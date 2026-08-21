@@ -1,0 +1,26 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.13"]
+    env:
+      ALPACA_KEY_ID: placeholder-key-id
+      ALPACA_SECRET_KEY: placeholder-secret-key
+      ALPACA_TRADING_HOST: https://paper-api.alpaca.markets
+      INGEST_START: "2020-08-01"
+      INGEST_END: "2026-06-30"
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/unused
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e '.[dev]'
+      - run: pytest

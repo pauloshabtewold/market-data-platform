@@ -26,4 +26,8 @@ dev = [
 
 [tool.setuptools]
 py-modules = ["config"]
-packages = ["ingest", "api"]
+packages = ["ingest", "api", "db"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
