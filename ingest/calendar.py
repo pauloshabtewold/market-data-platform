@@ -16,7 +16,10 @@ WITH d AS (
 INSERT INTO market_days (day, open_ts, close_ts, session_minutes)
 SELECT day, open_ts, close_ts, (EXTRACT(epoch FROM close_ts - open_ts) / 60)::int
 FROM d
-ON CONFLICT (day) DO NOTHING
+ON CONFLICT (day) DO UPDATE
+   SET open_ts = EXCLUDED.open_ts,
+       close_ts = EXCLUDED.close_ts,
+       session_minutes = EXCLUDED.session_minutes
 """
 
 
@@ -25,6 +28,16 @@ class CalendarSummary:
     days: int
     first: str
     last: str
+
+
+def _checked(row: dict) -> dict:
+    day, opening, closing = row.get("date"), row.get("open"), row.get("close")
+    if not day or not opening or not closing:
+        raise RuntimeError(f"{CALENDAR_PATH} returned a day with no session times: {row!r}")
+    if closing <= opening:
+        # a zero or negative session_minutes drops the day out of the expected-minute total and reads as full coverage
+        raise RuntimeError(f"{CALENDAR_PATH} returned {day} closing at {closing}, on or before its {opening} open")
+    return {"day": day, "open": opening, "close": closing}
 
 
 def load_calendar(conn: psycopg.Connection, client) -> CalendarSummary:
@@ -40,7 +53,7 @@ def load_calendar(conn: psycopg.Connection, client) -> CalendarSummary:
         raise RuntimeError(f"{CALENDAR_PATH} returned no trading days for {start}..{end}")
 
     # open and close are the regular session; session_open and session_close are the extended session and would give a 960-minute day.
-    params = [{"day": row["date"], "open": row["open"], "close": row["close"]} for row in rows]
+    params = [_checked(row) for row in rows]
     with conn.cursor() as cur:
         cur.executemany(INSERT_DAY, params)
     conn.commit()

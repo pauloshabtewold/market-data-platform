@@ -1,6 +1,8 @@
 import json
 from datetime import UTC, datetime
 
+import pytest
+
 from db.session import connect
 from ingest.calendar import load_calendar
 
@@ -56,3 +58,37 @@ def test_calendar_load_is_idempotent(migrated_dsn, fixtures_dir):
     with connect(migrated_dsn) as conn:
         load_calendar(conn, StubClient(rows))
     assert _market_days(migrated_dsn) == first
+
+
+def test_a_day_with_no_session_times_aborts_before_anything_is_stored(migrated_dsn, fixtures_dir):
+    rows = _rows(fixtures_dir) + [{"date": "2026-06-02", "open": None, "close": "16:00"}]
+
+    with connect(migrated_dsn) as conn:
+        with pytest.raises(RuntimeError, match="no session times"):
+            load_calendar(conn, StubClient(rows))
+
+    # a null open stores as a NULL open_ts and a NULL session_minutes, which drops the day out of the expected-minute total
+    assert _market_days(migrated_dsn) == {}
+
+
+def test_a_close_on_or_before_its_open_aborts(migrated_dsn):
+    rows = [{"date": "2026-06-02", "open": "16:00", "close": "09:30"}]
+
+    with connect(migrated_dsn) as conn:
+        with pytest.raises(RuntimeError, match="before its"):
+            load_calendar(conn, StubClient(rows))
+
+
+def test_a_corrected_session_replaces_the_one_already_stored(migrated_dsn):
+    full = [{"date": "2026-11-27", "open": "09:30", "close": "16:00"}]
+    half = [{"date": "2026-11-27", "open": "09:30", "close": "13:00"}]
+
+    with connect(migrated_dsn) as conn:
+        load_calendar(conn, StubClient(full))
+    assert _market_days(migrated_dsn)["2026-11-27"][2] == 390
+
+    with connect(migrated_dsn) as conn:
+        load_calendar(conn, StubClient(half))
+
+    # the idempotency test reloads identical rows, which passes under DO NOTHING and DO UPDATE alike -- only a changed value tells them apart
+    assert _market_days(migrated_dsn)["2026-11-27"][2] == 210
