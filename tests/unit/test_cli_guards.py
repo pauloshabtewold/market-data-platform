@@ -2,6 +2,7 @@ import logging
 
 import pytest
 
+import ingest.__main__ as cli
 from ingest.__main__ import main
 
 
@@ -16,6 +17,13 @@ def test_an_inverted_month_range_is_refused_before_any_network_call(tmp_path, ca
 
     assert code == 2
     assert "after --end-month" in capsys.readouterr().err
+
+
+def test_neither_the_vendor_transport_nor_the_database_is_reachable_from_this_suite():
+    # every guard case here passes by returning 2 before the transport is built, so a mutation that removes one runs a real ingest against whatever .env is on the machine; asserted by identity rather than by letting main() fall through, since that test would be the live run if the fixture ever went away.
+    for factory in (cli.AlpacaClient, cli.connect):
+        with pytest.raises(AssertionError, match="reached the vendor transport"):
+            factory("unused")
 
 
 def test_a_repeated_symbol_is_collapsed_before_the_run(monkeypatch, tmp_path):
