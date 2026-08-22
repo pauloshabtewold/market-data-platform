@@ -1,4 +1,6 @@
-from datetime import date
+import logging
+
+import pytest
 
 from ingest.__main__ import main
 
@@ -47,13 +49,20 @@ class _Seeded:
 
 
 class _NullClient:
-    request_counts = {"calendar": 0, "symbols": 0, "bars": 0}
+    def __init__(self):
+        self.request_counts = {"calendar": 0, "symbols": 0, "bars": 0}
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return None
+
+
+class _SpentClient(_NullClient):
+    def __init__(self):
+        super().__init__()
+        self.request_counts = {"calendar": 1, "symbols": 1, "bars": 3}
 
 
 class _NullConn:
@@ -62,3 +71,47 @@ class _NullConn:
 
     def __exit__(self, *exc):
         return None
+
+
+def test_a_month_outside_the_declared_window_is_refused(tmp_path, capsys):
+    code = main(["--tickers-file", _tickers(tmp_path, "AAPL"), "--start-month", "2010-01"])
+
+    assert code == 2
+    # one keystroke from 2020-01, and unclamped it enumerates 127 months the calendar has no rows for
+    assert "must fall inside" in capsys.readouterr().err
+
+
+def test_an_end_month_past_the_declared_window_is_refused(tmp_path, capsys):
+    code = main(["--tickers-file", _tickers(tmp_path, "AAPL"), "--end-month", "2027-03"])
+
+    assert code == 2
+    assert "must fall inside" in capsys.readouterr().err
+
+
+def test_a_repeated_line_in_the_ticker_file_is_refused(tmp_path, capsys):
+    code = main(["--tickers-file", _tickers(tmp_path, "AAPL", "MSFT", "AAPL")])
+
+    assert code == 2
+    # the seeded count is checked against this file, so a repeat makes the two disagree by construction
+    assert "repeats AAPL" in capsys.readouterr().err
+
+
+def test_a_run_that_aborts_still_reports_the_requests_it_spent(monkeypatch, tmp_path, caplog):
+    def explode(conn, symbols, start, end, fetch):
+        raise RuntimeError("vendor said no")
+
+    monkeypatch.setattr("ingest.__main__.run", explode)
+    monkeypatch.setattr("ingest.__main__.load_calendar", lambda conn, client: _Calendar())
+    monkeypatch.setattr("ingest.__main__.seed_symbols", lambda conn, client, tickers: _Seeded())
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _SpentClient)
+    monkeypatch.setattr("ingest.__main__.connect", lambda dsn: _NullConn())
+
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        with pytest.raises(RuntimeError):
+            main(["--tickers-file", _tickers(tmp_path, "AAPL")])
+
+    # every other figure is re-derivable from ingest_progress afterwards; the request counts die with the process
+    aborted = [m for m in caplog.messages if m.startswith("run incomplete:")]
+    assert len(aborted) == 1
+    assert "bars_requests=3" in aborted[0]
+    assert "to resume" in aborted[0]
