@@ -57,7 +57,7 @@ def test_missing_credential_fails_at_construction(monkeypatch):
     assert "ALPACA_KEY_ID" in str(excinfo.value)
 
 
-def test_defaults_are_the_section_8_values(clean_env):
+def test_defaults_match_the_documented_values(clean_env):
     settings = Settings(_env_file=None, **REQUIRED)
     assert settings.ALPACA_FEED == "iex"
     assert settings.ALPACA_ADJUSTMENT == "split,spin-off"
@@ -65,3 +65,21 @@ def test_defaults_are_the_section_8_values(clean_env):
     assert settings.RATE_LIMIT_RPM == 200
     assert settings.HTTP_MAX_ATTEMPTS == 5
     assert settings.AGG_MAX_WINDOW_DAYS == 90
+
+
+def test_require_raises_runtime_error_for_a_key_no_one_mapped(monkeypatch):
+    # a later feature adds the Settings field and forgets the _MEASURED_BY entry: still RuntimeError, never KeyError
+    monkeypatch.setattr(config, "_MEASURED_BY", {})
+    monkeypatch.setattr(config.settings, "DEEP_PAGE_DEPTH", None)
+    with pytest.raises(RuntimeError, match="DEEP_PAGE_DEPTH"):
+        config.require("DEEP_PAGE_DEPTH")
+
+
+def test_every_optional_setting_is_reachable_through_require(monkeypatch):
+    optional = [
+        name for name, field in Settings.model_fields.items() if field.default is None
+    ]
+    for name in optional:
+        monkeypatch.setattr(config.settings, name, None)
+        with pytest.raises(RuntimeError, match=name):
+            config.require(name)

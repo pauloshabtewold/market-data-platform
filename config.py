@@ -33,13 +33,16 @@ _MEASURED_BY = {
     "HEAP_INDEX_BYTE_RATIO": "the loaded partition's heap and index sizes",
 }
 
+# a key added to Settings without a matching entry above would otherwise raise KeyError instead of this function's contract
+_MEASURED_FALLBACK = "a measurement recorded in README.md"
+
 
 def require(name: str):
     # required at use and not at import: these three are measured by the sample ingest, which requiring them at import would have made unrunnable
     value = getattr(settings, name)
     if value is None:
         raise RuntimeError(
-            f"{name} is unset; it is measured from {_MEASURED_BY[name]} and written"
+            f"{name} is unset; it is measured from {_MEASURED_BY.get(name, _MEASURED_FALLBACK)} and written"
             " into .env by hand; README.md carries the value and the arithmetic"
         )
     return value

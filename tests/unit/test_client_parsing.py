@@ -4,7 +4,10 @@ from datetime import date
 from decimal import Decimal
 
 import httpx
+import pytest
+from urllib.parse import quote
 
+from config import settings
 from ingest.client import BARS_HOST, BARS_PATH, AlpacaClient, fetch_bars, month_window
 
 
@@ -57,8 +60,13 @@ def test_pages_concatenate_in_order_and_stop_on_a_null_token(fixtures_dir):
     assert all(isinstance(b.open, Decimal) for b in bars)
     assert bars[0].close == Decimal("310.13")
     assert bars[-1].vwap == Decimal("309.407967")
-    # the recorded high arrives as a JSON integer, which parse_float never sees
-    assert bars[-1].high == Decimal("310")
+    # the only recorded bar whose four prices differ, so this is what distinguishes a correct mapping from a transposed one
+    assert (bars[-1].open, bars[-1].high, bars[-1].low, bars[-1].close) == (
+        Decimal("309.6"),
+        Decimal("310"),
+        Decimal("308.55"),
+        Decimal("309.71"),
+    )
     assert (bars[-1].volume, bars[-1].trade_count) == (16799, 399)
 
 
@@ -92,7 +100,15 @@ def test_the_transport_parses_prices_without_crossing_a_float(fixtures_dir, capl
     # this one logged line is the only record that the whole adjustment list reached the vendor
     logged = [m for m in caplog.messages if m.startswith("request: " + BARS_HOST + BARS_PATH + "?")]
     assert len(logged) == 1
-    assert "feed=iex" in logged[0]
-    assert "limit=10000" in logged[0]
-    assert "adjustment=split%2Cspin-off" in logged[0]
+    assert f"feed={settings.ALPACA_FEED}" in logged[0]
+    assert f"limit={settings.ALPACA_LIMIT}" in logged[0]
+    assert quote(settings.ALPACA_ADJUSTMENT, safe="") in logged[0]
     assert "APCA-API" not in logged[0]
+
+
+def test_a_token_that_stops_advancing_raises_rather_than_looping(fixtures_dir):
+    stuck = _page(fixtures_dir, "bars_page1.json")
+    client = StubClient([stuck, stuck, stuck])
+
+    with pytest.raises(RuntimeError, match="not advancing"):
+        fetch_bars(client, "AAPL", date(2026, 6, 1))

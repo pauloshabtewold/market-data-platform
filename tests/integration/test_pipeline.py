@@ -92,6 +92,24 @@ def test_units_already_recorded_are_skipped_and_never_fetched(migrated_dsn):
     assert fetch.calls == [("MSFT", JUNE)]
 
 
+def test_resume_skips_the_done_month_and_still_runs_the_incomplete_one(migrated_dsn):
+    with connect(migrated_dsn) as conn:
+        conn.execute(
+            "INSERT INTO ingest_progress (symbol, month, completed_at, row_count, rejected_count)"
+            " VALUES ('AAPL', %s, now(), 3, 0)",
+            (JUNE,),
+        )
+        conn.commit()
+
+    fetch = RecordingFetcher()
+    with connect(migrated_dsn) as conn:
+        summary = run(conn, ["AAPL"], JUNE, JULY, fetch)
+
+    # a symbol-keyed skip would suppress JULY too, which on the real run drops every remaining month for that ticker
+    assert (summary.units, summary.skipped) == (1, 1)
+    assert fetch.calls == [("AAPL", JULY)]
+
+
 def test_rows_route_to_their_month_and_a_second_month_attaches_its_own(migrated_dsn):
     with connect(migrated_dsn) as conn:
         run(conn, ["AAPL"], JUNE, JULY, RecordingFetcher())
@@ -122,7 +140,7 @@ def test_ensure_partition_creates_then_attaches_then_skips(migrated_dsn):
         conn.commit()
         assert conn.execute(relispartition).fetchone() == (True,)
 
-        # a crash between CREATE and ATTACH leaves exactly this state, which is why the probe is three-way
+        # an out-of-band detach is what actually reaches the created-but-unattached state, so the probe stays three-way
         conn.execute(f"ALTER TABLE bars DETACH PARTITION {child}")
         conn.commit()
         assert conn.execute(relispartition).fetchone() == (False,)
