@@ -3,10 +3,17 @@
 # Market Data Platform
 
 Minute-bar ingestion, analytical queries, and a paginated read API over a month-partitioned
-PostgreSQL database. The universe is 100 large-cap US equities over 2020-08-01 to 2026-06-30,
-loaded from Alpaca's IEX feed.
+PostgreSQL database. The target universe is 100 large-cap US equities over 2020-08-01 to
+2026-06-30, sourced from Alpaca's IEX feed; the measurements below come from a 5-ticker,
+one-month sample loaded to size the pipeline before the full run.
 
 ## Setup
+
+Install the package and its development dependencies:
+
+```
+python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+```
 
 Start the database:
 
@@ -140,8 +147,11 @@ SELECT relispartition FROM pg_class WHERE oid = to_regclass('public.bars_2026_06
   the predicate matches no row at all. This is the create-and-attach branch, and the distinction
   matters: a handler written against a `NULL` *value* never fires, so the first unit of every fresh
   run would fall through to the attach-only branch and raise `42P01`.
-- **`false`** — the table exists but is not attached, which is exactly what a crash between the two
-  statements leaves behind. Attach only.
+- **`false`** — the table exists but is not attached. Attach only. Note what does *not* produce
+  this state: both statements run in one transaction and PostgreSQL DDL is transactional, so a
+  crash between them rolls the `CREATE` back too and the next run sees zero rows, not `false`. It
+  is reachable by an out-of-band `DETACH`, by a restore, or by any future path that commits
+  between the two — the branch is cheap and the state is real, but the crash story is not why.
 - **`true`** — already attached. Skip.
 
 Creation is `CREATE TABLE ... (LIKE bars INCLUDING ALL)` followed by `ALTER TABLE ... ATTACH

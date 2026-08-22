@@ -1,6 +1,4 @@
--- the destination parent state
 -- child partitions are runtime artifacts the pipeline creates, so none is declared here
--- the numbered migrations in db/migrations are the path.
 SET TIME ZONE 'UTC';
 
 CREATE TABLE schema_migrations (

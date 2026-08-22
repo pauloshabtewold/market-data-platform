@@ -62,8 +62,10 @@ These are whole-month counts over different session windows and are **not** a co
 ### Corporate-action probes
 
 The sample month contains no corporate action, so it cannot show whether the vendor honoured the
-adjustment list — the check would pass vacuously. Four extra requests were spent instead, on a
-spin-off-only name and a split-only name, and none of the four was inserted.
+adjustment list — the check would pass vacuously. Five extra requests were spent instead, on a
+spin-off-only name and a split-only name, and none of the five was inserted. The fifth is MMM's
+`split` leg: without it, `raw` differing from `split,spin-off` proves only that *something* in the
+list was honoured, not which element.
 
 | Symbol | Minute | `raw` | `split` | `split,spin-off` |
 | --- | --- | --- | --- | --- |
