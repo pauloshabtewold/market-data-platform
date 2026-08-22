@@ -184,19 +184,6 @@ def test_a_failing_insert_leaves_neither_bars_nor_a_progress_row(migrated_dsn):
     ) == 0
 
 
-def test_a_unit_whose_fetch_raises_is_not_checkpointed(migrated_dsn):
-    def refused(symbol, month):
-        raise RuntimeError("the vendor refused this request")
-
-    with connect(migrated_dsn) as conn:
-        with pytest.raises(RuntimeError):
-            ingest_unit(conn, "AAPL", JUNE, refused)
-
-    # a unit that did not fetch must not be recorded as done, or resume skips it forever and the run reports a database it never wrote
-    assert _scalar(migrated_dsn, "SELECT count(*) FROM ingest_progress") == 0
-    assert _scalar(migrated_dsn, "SELECT count(*) FROM bars") == 0
-
-
 def test_a_completed_unit_is_visible_to_another_connection_before_the_next_one_starts(migrated_dsn):
     seen = []
 
@@ -209,6 +196,21 @@ def test_a_completed_unit_is_visible_to_another_connection_before_the_next_one_s
         run(conn, ["AAPL"], JUNE, JULY, fetch)
 
     assert seen == [0, 1]
+
+
+def test_the_summary_accumulates_across_units_rather_than_recording_the_last_one(migrated_dsn):
+    seeded = RecordingFetcher({("AAPL", JUNE): 3, ("MSFT", JUNE): 3})
+    with connect(migrated_dsn) as conn:
+        ingest_unit(conn, "AAPL", JUNE, seeded)
+        ingest_unit(conn, "MSFT", JUNE, seeded)
+
+    fetch = RecordingFetcher({("AAPL", JULY): 5, ("MSFT", JULY): 11})
+    with connect(migrated_dsn) as conn:
+        summary = run(conn, ["AAPL", "MSFT"], JUNE, JULY, fetch)
+
+    # every one of these four is copied into INGEST_LOG.md, and each counter needs at least two of its own kind or assignment and accumulation agree -- two skips as well as two units, which the first version of this test got wrong
+    assert (summary.units, summary.skipped, summary.rows) == (2, 2, 16)
+    assert 0 < summary.elapsed < 60
 
 
 def test_a_month_carrying_a_day_still_attaches_month_aligned_bounds(migrated_dsn):

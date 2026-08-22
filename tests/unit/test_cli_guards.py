@@ -1,5 +1,8 @@
 import logging
+import subprocess
+import sys
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +22,29 @@ def test_an_inverted_month_range_is_refused_before_any_network_call(tmp_path, ca
 
     assert code == 2
     assert "after --end-month" in capsys.readouterr().err
+
+
+def test_a_single_month_range_is_not_read_as_inverted(monkeypatch, tmp_path):
+    ran = {}
+
+    def fake_run(conn, symbols, start, end, fetch):
+        ran["months"] = (start, end)
+        raise SystemExit(0)
+
+    monkeypatch.setattr("ingest.__main__.run", fake_run)
+    monkeypatch.setattr("ingest.__main__.load_calendar", lambda conn, client: _Calendar())
+    monkeypatch.setattr("ingest.__main__.seed_symbols", lambda conn, client, tickers: _Seeded())
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _NullClient)
+    monkeypatch.setattr("ingest.__main__.connect", lambda dsn: _NullConn())
+
+    # the equal bound is the narrowed re-seed form, which spends two requests where the bare form launches the whole universe
+    try:
+        main(["--tickers-file", _tickers(tmp_path, "AAPL"), "--symbol", "AAPL",
+              "--start-month", "2026-06", "--end-month", "2026-06"])
+    except SystemExit:
+        pass
+
+    assert ran["months"] == (date(2026, 6, 1), date(2026, 6, 1))
 
 
 def test_neither_the_vendor_transport_nor_the_database_is_reachable_from_this_suite():
@@ -56,6 +82,10 @@ class _Calendar:
 
 class _Seeded:
     upserted, deleted, refused, inactive = 0, [], [], []
+
+
+class _Summary:
+    units, skipped, rows, elapsed = 2, 1, 17, 4.8
 
 
 class _NullClient:
@@ -184,6 +214,75 @@ def test_the_resume_command_carries_the_flags_the_run_was_given(monkeypatch, tmp
 
     # without them the operator is handed a command that walks every ticker over the whole window, which is the spend the window guards exist to prevent
     resume = [m for m in caplog.messages if m.startswith("run incomplete:")][0]
+    # the whole command, not just the flags: asserting the flags alone passes on a line that lost the program and the file it runs against
+    assert "rerun `python -m ingest --tickers-file" in resume
     assert "--symbol AAPL" in resume
     assert "--start-month 2026-01" in resume
     assert "--end-month 2026-06" in resume
+
+
+def test_a_completed_run_reports_itself_complete(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr("ingest.__main__.run",
+                        lambda conn, symbols, start, end, fetch: _Summary())
+    monkeypatch.setattr("ingest.__main__.load_calendar", lambda conn, client: _Calendar())
+    monkeypatch.setattr("ingest.__main__.seed_symbols", lambda conn, client, tickers: _Seeded())
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _SpentClient)
+    monkeypatch.setattr("ingest.__main__.connect", lambda dsn: _NullConn())
+
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        code = main(["--tickers-file", _tickers(tmp_path, "AAPL")])
+
+    # only the abort path was asserted, so a run that reported every success as incomplete stayed green and would send an operator back to rerun a finished load
+    assert code == 0
+    line = [m for m in caplog.messages if m.startswith("run complete:")]
+    assert len(line) == 1
+    assert "units=2 skipped=1" in line[0] and "rows=17" in line[0]
+    assert not [m for m in caplog.messages if m.startswith("run incomplete:")]
+
+
+def test_a_run_that_dies_before_the_transport_still_reports(monkeypatch, tmp_path, caplog):
+    class _Exploding:
+        def __init__(self):
+            raise RuntimeError("no credentials")
+
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _Exploding)
+
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        with pytest.raises(RuntimeError):
+            main(["--tickers-file", _tickers(tmp_path, "AAPL")])
+
+    # request_counts does not exist yet on this path, so the zero fallback is the only thing between the operator and a TypeError raised inside `finally` that would bury the real cause
+    aborted = [m for m in caplog.messages if m.startswith("run incomplete:")]
+    assert len(aborted) == 1
+    assert "calendar_requests=0 symbols_requests=0 bars_requests=0" in aborted[0]
+
+
+def test_the_run_reaches_a_real_stream_at_info(tmp_path):
+    # basicConfig is a no-op once a handler exists and pytest installs one, so the level it sets is invisible in process -- the same blindness that let D-048's stream move unnoticed. A subprocess is the only place the emitted bytes are real.
+    tickers = _tickers(tmp_path, "AAPL")
+    program = (
+        "import sys, types\n"
+        "import ingest.__main__ as M\n"
+        "class C:\n"
+        "    request_counts = {'calendar': 1, 'symbols': 1, 'bars': 2}\n"
+        "    def __enter__(self): return self\n"
+        "    def __exit__(self, *a): pass\n"
+        "class N:\n"
+        "    def __enter__(self): return self\n"
+        "    def __exit__(self, *a): pass\n"
+        "M.AlpacaClient = C\n"
+        "M.connect = lambda dsn: N()\n"
+        "M.load_calendar = lambda c, cl: types.SimpleNamespace(days=1, first='a', last='b')\n"
+        "M.seed_symbols = lambda c, cl, t: types.SimpleNamespace(upserted=1, deleted=[], refused=[], inactive=[])\n"
+        "M.run = lambda *a, **k: types.SimpleNamespace(units=2, skipped=1, rows=17, elapsed=4.8)\n"
+        f"sys.exit(M.main(['--tickers-file', {str(tickers)!r}]))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program], cwd=Path(__file__).resolve().parent.parent.parent,
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # an unattended run whose level was never set emits nothing at all, and the operator learns that after the run rather than during it
+    assert "run complete: units=2 skipped=1" in result.stderr
+    assert "calendar: 1 days loaded" in result.stderr

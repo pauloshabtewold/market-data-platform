@@ -70,6 +70,8 @@ def test_pages_concatenate_in_order_and_stop_on_a_null_token(fixtures_dir):
     ]
     assert all(b.ts.tzinfo is not None for b in bars)
     assert all(isinstance(b.open, Decimal) for b in bars)
+    # the payload nests bars under the symbol rather than repeating it per row, so the parser supplies it and nothing else would notice it going missing until the NOT NULL primary key
+    assert all(b.symbol == "AAPL" for b in bars)
     assert bars[0].close == Decimal("310.13")
     assert bars[-1].vwap == Decimal("309.407967")
     # the only recorded bar whose four prices differ, so this is what distinguishes a correct mapping from a transposed one

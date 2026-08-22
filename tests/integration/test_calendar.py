@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from config import settings
 from db.session import connect
 from ingest.calendar import load_calendar
 
@@ -38,8 +39,10 @@ def test_calendar_load_converts_wall_clock_through_new_york(migrated_dsn, fixtur
 
     assert summary.days == 4
     assert (summary.first, summary.last) == ("2025-11-26", "2026-06-01")
-    assert client.calls[0][1] == "/v2/calendar"
-    assert client.calls[0][3] == "calendar"
+    # the trading host is account-dependent and the wrong one returns a 403 that reads like a bad key, so the request records where it went
+    base_url, path, params, phase = client.calls[0]
+    assert (base_url, path, phase) == (settings.ALPACA_TRADING_HOST, "/v2/calendar", "calendar")
+    assert params == {"start": settings.INGEST_START.isoformat(), "end": settings.INGEST_END.isoformat()}
 
     days = _market_days(migrated_dsn)
     assert days["2026-01-02"][0] == datetime(2026, 1, 2, 14, 30, tzinfo=UTC)

@@ -1,6 +1,6 @@
 import pytest
 
-from db.migrate import MIGRATIONS_DIR, apply
+from db.migrate import LEDGER_DDL, MIGRATIONS_DIR, apply
 from db.session import connect
 
 PARENT_TABLES = """
@@ -71,6 +71,25 @@ def test_schema_sql_matches_the_migrated_state(migrated_dsn, schema_ref_dsn):
     # guards the comparison against passing on two empty projections.
     assert {row[0] for row in migrated[0]} == EXPECTED_TABLES
     assert migrated == reference
+
+
+def test_apply_steps_over_an_applied_migration_rather_than_stopping_at_it(fresh_dsn):
+    dsn = fresh_dsn()
+    files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    with connect(dsn) as conn:
+        conn.execute(LEDGER_DDL)
+        for path in files[:2]:
+            conn.execute(path.read_text())
+            conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (path.stem,))
+        conn.commit()
+        applied = apply(conn)
+
+    # the state neither of the two tests above can reach: an older database meeting a newer distribution, where stopping at the first applied file and stepping over it both look like success
+    assert applied == len(files) - 2
+    with connect(dsn) as conn:
+        tables = {row[0] for row in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'")}
+    assert {"bars", "symbols", "market_days", "ingest_progress"} <= tables
 
 
 def test_apply_refuses_to_report_success_when_no_migration_files_shipped(migrated_dsn, monkeypatch, tmp_path):
