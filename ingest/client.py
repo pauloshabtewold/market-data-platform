@@ -16,6 +16,9 @@ PHASES = ("calendar", "symbols", "bars")
 BARS_HOST = "https://data.alpaca.markets"
 BARS_PATH = "/v2/stocks/bars"
 
+# a ticker-month is one page on iex and two on sip at limit=10000, so this bounds only a cursor that will not terminate
+MAX_PAGES = 64
+
 
 @dataclass(frozen=True)
 class Bar:
@@ -88,7 +91,7 @@ def fetch_bars(client, symbol: str, month: date) -> list[Bar]:
     bars: list[Bar] = []
     token: str | None = None
     seen: set[str] = set()
-    while True:
+    for _ in range(MAX_PAGES):
         page_params = params if token is None else params | {"page_token": token}
         body = client.get_json(BARS_HOST, BARS_PATH, page_params, "bars")
         # a holiday answers {"bars":{}}, so indexing straight into the symbol raises KeyError on every closed day of a seven-year run.
@@ -100,6 +103,11 @@ def fetch_bars(client, symbol: str, month: date) -> list[Bar]:
             # a token that stops advancing would loop forever against an unattended background run rather than fail
             raise RuntimeError(f"{symbol} {month:%Y-%m}: page token repeated, pagination is not advancing")
         seen.add(token)
+
+    # a cursor that keeps advancing without ending clears the repeat check, so the page count is what bounds the request budget
+    raise RuntimeError(
+        f"{symbol} {month:%Y-%m}: still paginating after {MAX_PAGES} pages, the cursor is not terminating"
+    )
 
 
 def _parse(symbol: str, rows: list[dict]) -> list[Bar]:

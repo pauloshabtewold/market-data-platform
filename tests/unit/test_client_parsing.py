@@ -8,7 +8,7 @@ import pytest
 from urllib.parse import quote
 
 from config import settings
-from ingest.client import BARS_HOST, BARS_PATH, AlpacaClient, fetch_bars, month_window
+from ingest.client import BARS_HOST, BARS_PATH, MAX_PAGES, AlpacaClient, fetch_bars, month_window
 
 
 class StubClient:
@@ -112,3 +112,26 @@ def test_a_token_that_stops_advancing_raises_rather_than_looping(fixtures_dir):
 
     with pytest.raises(RuntimeError, match="not advancing"):
         fetch_bars(client, "AAPL", date(2026, 6, 1))
+
+
+def test_a_cursor_that_keeps_advancing_is_bounded_by_the_page_cap(fixtures_dir):
+    page = _page(fixtures_dir, "bars_page1.json")
+
+    class EverAdvancing:
+        """A cursor that moves on every page and never returns null clears the repeat check."""
+
+        def __init__(self):
+            self.pages = 0
+
+        def get_json(self, base_url, path, params, phase):
+            self.pages += 1
+            if self.pages > MAX_PAGES:
+                # an unbounded fetcher would hang this test rather than fail it, and a hung suite reports nothing
+                raise AssertionError(f"fetch_bars asked for page {self.pages}, past the {MAX_PAGES} cap")
+            return page | {"next_page_token": f"tok-{self.pages}"}
+
+    client = EverAdvancing()
+    with pytest.raises(RuntimeError, match="not terminating"):
+        fetch_bars(client, "AAPL", date(2026, 6, 1))
+
+    assert client.pages == MAX_PAGES

@@ -1,3 +1,4 @@
+import logging
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -6,6 +7,8 @@ import psycopg
 from psycopg import sql
 
 from ingest.client import next_month
+
+log = logging.getLogger(__name__)
 
 PROBE = "SELECT relispartition FROM pg_class WHERE oid = to_regclass(%s::text)"
 
@@ -34,6 +37,8 @@ def partition_name(month: date) -> str:
 
 
 def ensure_partition(conn: psycopg.Connection, month: date) -> None:
+    # the request window is built from the month's first day, so the bounds are too -- a day component reaching here would leave the child's range narrower than its data.
+    month = month.replace(day=1)
     child = partition_name(month)
     row = conn.execute(PROBE, (f"public.{child}",)).fetchone()
 
@@ -105,7 +110,7 @@ def run(
                 skipped += 1
                 continue
             parsed, inserted = ingest_unit(conn, symbol, month, fetch)
-            print(f"{symbol} {month:%Y-%m} parsed={parsed} inserted={inserted}")
+            log.info("%s %s parsed=%d inserted=%d", symbol, f"{month:%Y-%m}", parsed, inserted)
             units += 1
             rows += parsed
 

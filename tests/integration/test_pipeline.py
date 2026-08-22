@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -181,3 +182,26 @@ def test_a_failing_insert_leaves_neither_bars_nor_a_progress_row(migrated_dsn):
         migrated_dsn,
         f"SELECT count(*) FROM pg_class WHERE oid = to_regclass('public.{partition_name(JUNE)}')",
     ) == 0
+
+
+def test_a_month_carrying_a_day_still_attaches_month_aligned_bounds(migrated_dsn):
+    with connect(migrated_dsn) as conn:
+        ensure_partition(conn, date(2026, 6, 15))
+        conn.commit()
+        bounds = conn.execute(
+            "SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = %s",
+            (partition_name(JUNE),),
+        ).fetchone()[0]
+
+    # the request window is always the whole month, so bounds taken from a day component would exclude the data they are built for
+    assert "'2026-06-01 00:00:00+00'" in bounds
+    assert "'2026-07-01 00:00:00+00'" in bounds
+
+
+def test_the_per_unit_progress_line_goes_through_the_run_log(migrated_dsn, caplog):
+    with caplog.at_level(logging.INFO, logger="ingest.pipeline"):
+        with connect(migrated_dsn) as conn:
+            run(conn, ["AAPL"], JUNE, JUNE, RecordingFetcher())
+
+    # a bare print lands on a block-buffered stdout, where a kill -9 on an unattended run discards every line still sitting in it
+    assert [m for m in caplog.messages if m == "AAPL 2026-06 parsed=3 inserted=3"]

@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -13,13 +14,14 @@ UNIVERSE = ["AAPL", "MSFT", "NVDA"]
 class StubAssets:
     """Stands in for /v2/assets so the suite never spends the shared request budget."""
 
-    def __init__(self, symbols, inactive=()):
+    def __init__(self, symbols, inactive=(), statuses=None):
+        statuses = statuses or {}
         self._assets = [
             {
                 "symbol": s,
                 "name": f"{s} Inc",
                 "exchange": "NASDAQ",
-                "status": "inactive" if s in inactive else "active",
+                "status": statuses.get(s, "inactive" if s in inactive else "active"),
             }
             for s in symbols
         ]
@@ -101,3 +103,24 @@ def test_the_reconciling_delete_refuses_to_orphan_bars_or_progress_rows(migrated
     assert summary.deleted == ["TSLA"]
     assert summary.refused == ["MSFT", "NVDA"]
     assert [r[0] for r in _rows(migrated_dsn)] == ["AAPL", "MSFT", "NVDA"]
+
+
+def test_a_removed_symbol_is_named_rather_than_only_counted(migrated_dsn, caplog):
+    with connect(migrated_dsn) as conn:
+        seed_symbols(conn, StubAssets(UNIVERSE), UNIVERSE)
+        with caplog.at_level(logging.WARNING, logger="ingest.symbols"):
+            seed_symbols(conn, StubAssets(UNIVERSE), UNIVERSE[:2])
+
+    # the reconciling delete is the only destructive step in the run, and a count does not say which row went
+    assert [m for m in caplog.messages if "NVDA removed" in m]
+
+
+def test_a_status_the_vendor_has_not_used_before_is_not_read_as_active(migrated_dsn):
+    client = StubAssets(UNIVERSE, statuses={"MSFT": "delisted"})
+
+    with connect(migrated_dsn) as conn:
+        summary = seed_symbols(conn, client, UNIVERSE)
+
+    # active comes from the response rather than from the absence of the one other value this vendor happens to send today
+    assert summary.inactive == ["MSFT"]
+    assert dict((r[0], r[3]) for r in _rows(migrated_dsn))["MSFT"] is False

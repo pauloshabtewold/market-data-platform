@@ -78,6 +78,9 @@ def seed_symbols(conn: psycopg.Connection, client, tickers: list[str]) -> SeedSu
     for symbol in inactive:
         # an inactive constituent is a survivorship signal worth reporting rather than a lookup failure.
         log.warning("symbols: %s is not active at the vendor", symbol)
+    for symbol in deleted:
+        # the only destructive step in the run, and a count alone does not say which row the vendor's name and exchange went with.
+        log.warning("symbols: %s removed, the ticker file no longer carries it", symbol)
     for symbol in refused:
         log.warning("symbols: %s left in place, it still has bars or progress rows", symbol)
 
