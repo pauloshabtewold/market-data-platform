@@ -40,8 +40,13 @@ rule.
 - **Window per unit:** `<M>-01T00:00:00Z` to `<last day>T23:59:59Z`, both bounds inclusive
 
 Result: 41,723 bars over 5 units in 4.8 s and 5 requests, 40,673 of them inside the regular
-session. `market_days` was loaded first — 1,484 days, 2020-08-03 to 2026-06-30 — and `symbols` was
-seeded to 100 rows from `/v2/assets`, with no inactive constituents and nothing deleted.
+session. `market_days` was loaded first — 1,484 days, 2020-08-03 to 2026-06-30 — and `symbols`
+was seeded to 100 rows from `/v2/assets`, with no inactive constituents and nothing deleted.
+
+A second pass over the same five units took 2.9 s. It fetched rather than skipped because
+`ingest_progress` was cleared first; the identical command left unchanged issues no bars requests
+at all. The published rate is that pair, and the spread between them is network latency rather
+than anything in the pipeline.
 
 ### Feed comparison
 

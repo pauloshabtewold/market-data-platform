@@ -71,9 +71,10 @@ and for nothing else. Two caveats travel with it. It is a first approximation me
 5-ticker, one-month partition and is re-checked against a full partition later. And it is driven
 by B-tree leaf fill, so it is comparable only across partitions written in primary-key order —
 which this pipeline produces by construction, since a unit's rows all belong to one partition and
-arrive in ascending `ts`, and which a hand-built fixture does not. The measured 3.17 came in below
-the ~3.7 the sizing work anticipated — the measurement is what is recorded, and the re-check
-against a full partition is where the gap gets resolved rather than averaged away.
+arrive in ascending `ts`, and which a hand-built fixture does not. What diagnoses a badly loaded
+heap is the index side rather than the ratio — a primary-key index materially larger than the
+sorted-arrival size for its row count means the keys did not arrive sorted — so the number below
+is recorded as measured rather than checked against a target.
 
 ## Sizing
 
@@ -87,11 +88,13 @@ against a full partition is where the gap gets resolved rather than averaged awa
 Extended-hours bars are real on this feed rather than absent, which is why the share is measured
 and reported rather than assumed to be zero.
 
-Wall-clock rate: 5 units in **2.9–4.8 s** over two runs of the identical command, extrapolating to
-**≈69–114 minutes** for the full 7,100 units. It is published as a range because that is what was
-observed — the spread is network latency between runs rather than anything in the pipeline, and it
-is the only figure on this page that a re-run does not land on exactly. The rate-limit floor —
-7,100 requests at 200 requests per minute — is ≈36 minutes, so the wall clock binds rather than the
+Wall-clock rate: 5 units in **2.9–4.8 s** over two runs, each from a cleared `ingest_progress`,
+extrapolating to **≈69–114 minutes** for the full 7,100 units. Clearing the progress rows is what
+makes the second run fetch at all — the identical command left unchanged skips every completed
+unit and issues no bars requests. It is published as a range because that is what was observed —
+the spread is network latency between runs rather than anything in the pipeline, and it is the
+only figure on this page that a re-run does not land on exactly. The rate-limit floor — 7,100
+requests at 200 requests per minute — is ≈36 minutes, so the wall clock binds rather than the
 throttle, and the top of the range is the one to plan against.
 
 ## Feed
@@ -173,7 +176,8 @@ overlap while leaving "already a partition" uncaught and the run dead on the sec
 ## Limitations
 
 - **IEX coverage is not complete.** On the 2026-06 sample it runs 96.73–100.00% of regular-session
-  minutes by symbol, averaging 99.32%; an earlier reading on June 2022 and June 2025 gave 98–99%.
+  minutes by symbol, averaging 99.32%; an earlier reading on June 2022 and June 2025 gave
+  98.46–99.74% against the same 390-minute denominator.
   A missing minute is data and is never synthesized or forward-filled, so gaps in `bars` are gaps
   in the tape as this feed saw it.
 - **There is no incremental ingest.** A run re-walks every requested unit and skips the ones
