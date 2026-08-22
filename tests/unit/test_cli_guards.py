@@ -1,8 +1,10 @@
 import logging
+from datetime import date
 
 import pytest
 
 import ingest.__main__ as cli
+from config import settings
 from ingest.__main__ import main
 
 
@@ -94,6 +96,20 @@ def test_an_end_month_past_the_declared_window_is_refused(tmp_path, capsys):
 
     assert code == 2
     assert "must fall inside" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [("INGEST_START", date(2020, 8, 3)), ("INGEST_END", date(2026, 6, 15))],
+)
+def test_a_window_that_does_not_span_whole_months_is_refused(monkeypatch, tmp_path, capsys, key, value):
+    monkeypatch.setattr(settings, key, value)
+
+    code = main(["--tickers-file", _tickers(tmp_path, "AAPL")])
+
+    assert code == 2
+    # the unit of work is a whole month, so a mid-month bound requests days outside the window it declares
+    assert "must span whole months" in capsys.readouterr().err
 
 
 def test_a_repeated_line_in_the_ticker_file_is_refused(tmp_path, capsys):

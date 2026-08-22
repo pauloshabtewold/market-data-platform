@@ -60,8 +60,18 @@ def test_calendar_load_is_idempotent(migrated_dsn, fixtures_dir):
     assert _market_days(migrated_dsn) == first
 
 
-def test_a_day_with_no_session_times_aborts_before_anything_is_stored(migrated_dsn, fixtures_dir):
-    rows = _rows(fixtures_dir) + [{"date": "2026-06-02", "open": None, "close": "16:00"}]
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"date": "2026-06-02", "open": None, "close": "16:00"},
+        {"date": "2026-06-02", "open": "09:30", "close": None},
+        # a row with no day at all reaches the insert as a NULL primary key, which is a different error in a later place
+        {"date": None, "open": "09:30", "close": "16:00"},
+    ],
+    ids=["no open", "no close", "no day"],
+)
+def test_a_day_with_no_session_times_aborts_before_anything_is_stored(migrated_dsn, fixtures_dir, bad):
+    rows = _rows(fixtures_dir) + [bad]
 
     with connect(migrated_dsn) as conn:
         with pytest.raises(RuntimeError, match="no session times"):
@@ -71,8 +81,14 @@ def test_a_day_with_no_session_times_aborts_before_anything_is_stored(migrated_d
     assert _market_days(migrated_dsn) == {}
 
 
-def test_a_close_on_or_before_its_open_aborts(migrated_dsn):
-    rows = [{"date": "2026-06-02", "open": "16:00", "close": "09:30"}]
+@pytest.mark.parametrize(
+    "closing",
+    # equal is the half that had no case: it stores session_minutes = 0, so a day nothing covers reads as fully covered
+    ["09:30", "09:00"],
+    ids=["equal to its open", "before its open"],
+)
+def test_a_close_on_or_before_its_open_aborts(migrated_dsn, closing):
+    rows = [{"date": "2026-06-02", "open": "09:30", "close": closing}]
 
     with connect(migrated_dsn) as conn:
         with pytest.raises(RuntimeError, match="before its"):
