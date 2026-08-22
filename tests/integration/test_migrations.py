@@ -79,3 +79,13 @@ def test_apply_refuses_to_report_success_when_no_migration_files_shipped(migrate
     with pytest.raises(RuntimeError, match="no migrations found"):
         with connect(migrated_dsn) as conn:
             apply(conn)
+
+
+def test_the_ledger_records_the_order_the_migrations_ran_in(fresh_dsn):
+    dsn = fresh_dsn()
+    with connect(dsn) as conn:
+        apply(conn)
+        # ORDER BY version re-sorts whatever order they ran in, so applied_at is the only column that can see a reordering
+        ran = [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY applied_at")]
+
+    assert ran == [path.stem for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
