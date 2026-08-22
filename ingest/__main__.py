@@ -16,7 +16,8 @@ log = logging.getLogger("ingest")
 
 
 def read_tickers(path: Path) -> list[str]:
-    return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+    # a whitespace-only line survives as an empty entry rather than being skipped, because `grep -c .` counts it and the gate counts this file that way.
+    return [line.strip() for line in path.read_text().splitlines() if line != ""]
 
 
 def month_arg(value: str) -> date:
@@ -44,6 +45,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not tickers:
         print(f"{args.tickers_file}: no tickers", file=sys.stderr)
+        return 2
+
+    if "" in tickers:
+        # dropping it silently would put the seeded count one below the line count the gate compares it against
+        print(f"{args.tickers_file}: has a line holding only whitespace", file=sys.stderr)
         return 2
 
     repeated = sorted({t for t in tickers if tickers.count(t) > 1})
@@ -108,6 +114,17 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _resume_command(args) -> str:
+    # the flags travel with it: a narrowed run resumed by the bare form walks every ticker and every month instead of the ones that were asked for
+    parts = ["python -m ingest --tickers-file", str(args.tickers_file)]
+    for symbol in dict.fromkeys(args.symbols or []):
+        parts += ["--symbol", symbol]
+    for flag, month in (("--start-month", args.start_month), ("--end-month", args.end_month)):
+        if month is not None:
+            parts += [flag, f"{month:%Y-%m}"]
+    return " ".join(parts)
+
+
 def _report(summary, counts, args) -> None:
     counts = counts or dict.fromkeys(("calendar", "symbols", "bars"), 0)
     head = (
@@ -118,7 +135,7 @@ def _report(summary, counts, args) -> None:
     tail = (
         f" rows={summary.rows} elapsed={summary.elapsed:.1f}s"
         if summary is not None
-        else f"; rerun `python -m ingest --tickers-file {args.tickers_file}` to resume"
+        else f"; rerun `{_resume_command(args)}` to resume"
     )
     log.info(
         "%s calendar_requests=%d symbols_requests=%d bars_requests=%d%s",

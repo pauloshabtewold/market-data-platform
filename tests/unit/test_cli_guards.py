@@ -120,6 +120,14 @@ def test_a_repeated_line_in_the_ticker_file_is_refused(tmp_path, capsys):
     assert "repeats AAPL" in capsys.readouterr().err
 
 
+def test_a_whitespace_only_line_in_the_ticker_file_is_refused(tmp_path, capsys):
+    code = main(["--tickers-file", _tickers(tmp_path, "AAPL", "   ", "MSFT")])
+
+    assert code == 2
+    # `grep -c .` counts this line and the reader would drop it, so the seeded count would come out one below the file
+    assert "only whitespace" in capsys.readouterr().err
+
+
 def test_a_run_that_aborts_still_reports_the_requests_it_spent(monkeypatch, tmp_path, caplog):
     def explode(conn, symbols, start, end, fetch):
         raise RuntimeError("vendor said no")
@@ -139,3 +147,27 @@ def test_a_run_that_aborts_still_reports_the_requests_it_spent(monkeypatch, tmp_
     assert len(aborted) == 1
     assert "bars_requests=3" in aborted[0]
     assert "to resume" in aborted[0]
+
+
+def test_the_resume_command_carries_the_flags_the_run_was_given(monkeypatch, tmp_path, caplog):
+    def explode(conn, symbols, start, end, fetch):
+        raise RuntimeError("vendor said no")
+
+    monkeypatch.setattr("ingest.__main__.run", explode)
+    monkeypatch.setattr("ingest.__main__.load_calendar", lambda conn, client: _Calendar())
+    monkeypatch.setattr("ingest.__main__.seed_symbols", lambda conn, client, tickers: _Seeded())
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _SpentClient)
+    monkeypatch.setattr("ingest.__main__.connect", lambda dsn: _NullConn())
+
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        with pytest.raises(RuntimeError):
+            main([
+                "--tickers-file", _tickers(tmp_path, "AAPL", "MSFT"),
+                "--symbol", "AAPL", "--start-month", "2026-01", "--end-month", "2026-06",
+            ])
+
+    # without them the operator is handed a command that walks every ticker over the whole window, which is the spend the window guards exist to prevent
+    resume = [m for m in caplog.messages if m.startswith("run incomplete:")][0]
+    assert "--symbol AAPL" in resume
+    assert "--start-month 2026-01" in resume
+    assert "--end-month 2026-06" in resume

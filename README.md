@@ -35,6 +35,9 @@ Load the calendar, seed `symbols` and ingest bars:
 .venv/bin/python -m ingest --tickers-file tickers.txt
 ```
 
+The run reports on stderr, so an unattended launch needs both streams: `python -m ingest
+--tickers-file tickers.txt > run.log 2>&1 &`. Redirecting stdout alone records nothing.
+
 The run reads `.env` for credentials and the window; `.env.example` lists every key. Repeated
 `--symbol` flags and `--start-month` / `--end-month` narrow the bars phase only — the calendar
 and `symbols` phases always cover the whole file, which is what lets `count(*) FROM symbols` be
