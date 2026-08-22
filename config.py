@@ -28,9 +28,9 @@ class Settings(BaseSettings):
 settings = Settings()
 
 _MEASURED_BY = {
-    "BARS_PER_TICKER_DAY": "Feature 1 gate item 5",
-    "DEEP_PAGE_DEPTH": "Feature 1 gate item 5",
-    "HEAP_INDEX_BYTE_RATIO": "Feature 1 gate item 6",
+    "BARS_PER_TICKER_DAY": "the sample ingest run",
+    "DEEP_PAGE_DEPTH": "the sample ingest run against the loaded calendar",
+    "HEAP_INDEX_BYTE_RATIO": "the loaded partition's heap and index sizes",
 }
 
 
@@ -39,6 +39,7 @@ def require(name: str):
     value = getattr(settings, name)
     if value is None:
         raise RuntimeError(
-            f"{name} is unset; it is measured by {_MEASURED_BY[name]} and written into .env by hand"
+            f"{name} is unset; it is measured from {_MEASURED_BY[name]} and written"
+            " into .env by hand; README.md carries the value and the arithmetic"
         )
     return value
