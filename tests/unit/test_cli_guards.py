@@ -120,6 +120,22 @@ def test_a_repeated_line_in_the_ticker_file_is_refused(tmp_path, capsys):
     assert "repeats AAPL" in capsys.readouterr().err
 
 
+def test_a_symbol_the_ticker_file_does_not_carry_is_refused(tmp_path, capsys):
+    code = main(["--tickers-file", _tickers(tmp_path, "AAPL", "MSFT"), "--symbol", "TYPO"])
+
+    assert code == 2
+    # unguarded a typo runs to completion, spends one bars request per month in the window, and leaves progress rows keyed on a symbol the universe has no row for
+    assert "does not carry TYPO" in capsys.readouterr().err
+
+
+def test_a_ticker_file_holding_no_tickers_is_refused(tmp_path, capsys):
+    code = main(["--tickers-file", _tickers(tmp_path, "", "", "")])
+
+    assert code == 2
+    # seeding against an empty universe makes the reconciling delete true of every row, which is the 100-to-5 cut this database has already taken once
+    assert "no tickers" in capsys.readouterr().err
+
+
 def test_a_whitespace_only_line_in_the_ticker_file_is_refused(tmp_path, capsys):
     code = main(["--tickers-file", _tickers(tmp_path, "AAPL", "   ", "MSFT")])
 

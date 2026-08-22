@@ -29,6 +29,18 @@ def _page(fixtures_dir, name):
     return json.loads((fixtures_dir / name).read_text(), parse_float=Decimal)
 
 
+@pytest.mark.parametrize("status", [403, 429, 500])
+def test_a_response_the_vendor_refused_raises_rather_than_reaching_the_parser(status):
+    # an error body carries no "bars" key, so one that reaches the parser reads as a month with no data and gets checkpointed as a completed unit
+    http = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(status, content=b'{"message":"no."}'))
+    )
+    client = AlpacaClient(http=http)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client.get_json(BARS_HOST, BARS_PATH, {"symbols": "AAPL"}, "bars")
+
+
 def test_a_page_token_is_followed_and_never_sent_empty(fixtures_dir):
     client = StubClient(
         [_page(fixtures_dir, "bars_page1.json"), _page(fixtures_dir, "bars_empty.json")]

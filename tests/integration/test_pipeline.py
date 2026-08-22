@@ -184,6 +184,33 @@ def test_a_failing_insert_leaves_neither_bars_nor_a_progress_row(migrated_dsn):
     ) == 0
 
 
+def test_a_unit_whose_fetch_raises_is_not_checkpointed(migrated_dsn):
+    def refused(symbol, month):
+        raise RuntimeError("the vendor refused this request")
+
+    with connect(migrated_dsn) as conn:
+        with pytest.raises(RuntimeError):
+            ingest_unit(conn, "AAPL", JUNE, refused)
+
+    # a unit that did not fetch must not be recorded as done, or resume skips it forever and the run reports a database it never wrote
+    assert _scalar(migrated_dsn, "SELECT count(*) FROM ingest_progress") == 0
+    assert _scalar(migrated_dsn, "SELECT count(*) FROM bars") == 0
+
+
+def test_a_completed_unit_is_visible_to_another_connection_before_the_next_one_starts(migrated_dsn):
+    seen = []
+
+    def fetch(symbol, month):
+        # a separate connection sees a finished unit only if run() left no transaction open around the loop, which is the whole of what surviving a kill -9 rests on
+        seen.append(_scalar(migrated_dsn, "SELECT count(*) FROM ingest_progress"))
+        return _bars(symbol, month, 3)
+
+    with connect(migrated_dsn) as conn:
+        run(conn, ["AAPL"], JUNE, JULY, fetch)
+
+    assert seen == [0, 1]
+
+
 def test_a_month_carrying_a_day_still_attaches_month_aligned_bounds(migrated_dsn):
     with connect(migrated_dsn) as conn:
         ensure_partition(conn, date(2026, 6, 15))
