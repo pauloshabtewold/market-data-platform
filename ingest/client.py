@@ -87,6 +87,7 @@ def fetch_bars(client, symbol: str, month: date) -> list[Bar]:
 
     bars: list[Bar] = []
     token: str | None = None
+    seen: set[str] = set()
     while True:
         page_params = params if token is None else params | {"page_token": token}
         body = client.get_json(BARS_HOST, BARS_PATH, page_params, "bars")
@@ -95,6 +96,10 @@ def fetch_bars(client, symbol: str, month: date) -> list[Bar]:
         token = body.get("next_page_token")
         if not token:
             return bars
+        if token in seen:
+            # a token that stops advancing would loop forever against an unattended background run rather than fail
+            raise RuntimeError(f"{symbol} {month:%Y-%m}: page token repeated, pagination is not advancing")
+        seen.add(token)
 
 
 def _parse(symbol: str, rows: list[dict]) -> list[Bar]:

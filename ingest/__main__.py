@@ -50,6 +50,13 @@ def main(argv: list[str] | None = None) -> int:
 
     start = args.start_month or settings.INGEST_START.replace(day=1)
     end = args.end_month or settings.INGEST_END
+    if start > end:
+        # an inverted range enumerates no units and would otherwise print a run-complete line that reads like success
+        print(f"--start-month {start:%Y-%m} is after --end-month {end:%Y-%m}", file=sys.stderr)
+        return 2
+
+    # deduped because the progress key is (symbol, month) and a repeated symbol would fail its second insert mid-run
+    wanted = list(dict.fromkeys(args.symbols or tickers))
 
     with AlpacaClient() as client, connect(settings.DATABASE_URL) as conn:
         calendar = load_calendar(conn, client)
@@ -62,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             f"refused={len(seeded.refused)} inactive={len(seeded.inactive)}"
         )
 
-        summary = run(conn, args.symbols or tickers, start, end, partial(fetch_bars, client))
+        summary = run(conn, wanted, start, end, partial(fetch_bars, client))
         counts = client.request_counts
 
     print(
