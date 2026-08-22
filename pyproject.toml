@@ -22,6 +22,8 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "testcontainers[postgres]>=4.0",
+    # the packaging test builds a wheel with --no-build-isolation, so the backend has to be present rather than fetched
+    "setuptools>=77",
 ]
 
 [tool.setuptools]
@@ -29,7 +31,7 @@ py-modules = ["config"]
 packages = ["ingest", "api", "db"]
 
 [tool.setuptools.package-data]
-db = ["schema.sql", "migrations/*.sql"]
+db = ["schema.sql", "migrations/*.sql", "queries/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
