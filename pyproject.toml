@@ -28,6 +28,9 @@ dev = [
 py-modules = ["config"]
 packages = ["ingest", "api", "db"]
 
+[tool.setuptools.package-data]
+db = ["schema.sql", "migrations/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

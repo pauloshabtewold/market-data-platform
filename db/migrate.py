@@ -20,8 +20,13 @@ def apply(conn: psycopg.Connection) -> int:
     applied = {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
     conn.commit()
 
+    files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    if not files:
+        # an install that shipped no .sql would otherwise report "applied 0 migrations" and exit 0, which is the success line
+        raise RuntimeError(f"no migrations found in {MIGRATIONS_DIR}")
+
     count = 0
-    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+    for path in files:
         if path.stem in applied:
             continue
         conn.execute(path.read_text())

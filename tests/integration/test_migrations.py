@@ -1,3 +1,5 @@
+import pytest
+
 from db.migrate import MIGRATIONS_DIR, apply
 from db.session import connect
 
@@ -69,3 +71,11 @@ def test_schema_sql_matches_the_migrated_state(migrated_dsn, schema_ref_dsn):
     # guards the comparison against passing on two empty projections.
     assert {row[0] for row in migrated[0]} == EXPECTED_TABLES
     assert migrated == reference
+
+
+def test_apply_refuses_to_report_success_when_no_migration_files_shipped(migrated_dsn, monkeypatch, tmp_path):
+    monkeypatch.setattr("db.migrate.MIGRATIONS_DIR", tmp_path / "missing")
+
+    with pytest.raises(RuntimeError, match="no migrations found"):
+        with connect(migrated_dsn) as conn:
+            apply(conn)
