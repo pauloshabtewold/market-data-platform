@@ -116,7 +116,7 @@ def test_the_transport_parses_prices_without_crossing_a_float(fixtures_dir, capl
     assert len(logged) == 1
     assert f"feed={settings.ALPACA_FEED}" in logged[0]
     assert f"limit={settings.ALPACA_LIMIT}" in logged[0]
-    assert quote(settings.ALPACA_ADJUSTMENT, safe="") in logged[0]
+    assert f"adjustment={quote(settings.ALPACA_ADJUSTMENT, safe='')}" in logged[0]
     assert "APCA-API" not in logged[0]
 
 

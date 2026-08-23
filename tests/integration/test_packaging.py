@@ -67,7 +67,8 @@ def test_the_built_distribution_carries_the_python_modules_and_not_the_tests(bui
     assert not [name for name in shipped if name.startswith("tests/")]
 
 
-def test_the_installed_distribution_migrates_a_database_from_zero(installed, fresh_dsn, tmp_path):
+def test_the_installed_distribution_migrates_a_database_from_zero(built, installed, fresh_dsn, tmp_path):
+    _, found, _ = built
     dsn = fresh_dsn()
     program = (
         "import pathlib, sys, db.migrate\n"
@@ -81,7 +82,9 @@ def test_the_installed_distribution_migrates_a_database_from_zero(installed, fre
     )
 
     assert result.returncode == 0, result.stderr
-    assert "applied 4 migrations" in result.stdout
+    # counted from the tree the wheel was built from rather than from the installed copy, so a fifth migration at Feature 4 does not turn a correct run red while a wheel shipping fewer files than the tree holds still does
+    expected = len([path for path in found if path.startswith("db/migrations/")])
+    assert f"applied {expected} migrations" in result.stdout
 
     # the half no archive listing can reach: a distribution shipping some of the migrations still reports success
     with connect(dsn) as conn:

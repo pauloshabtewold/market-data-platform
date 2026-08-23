@@ -76,6 +76,33 @@ def test_a_repeated_symbol_is_collapsed_before_the_run(monkeypatch, tmp_path):
     assert seen["symbols"] == ["AAPL"]
 
 
+def test_seeding_covers_the_file_while_the_bars_phase_covers_the_narrowing(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_seed(conn, client, tickers):
+        seen["seeded"] = tickers
+        return _Seeded()
+
+    def fake_run(conn, symbols, start, end, fetch):
+        seen["ran"] = symbols
+        raise SystemExit(0)
+
+    monkeypatch.setattr("ingest.__main__.seed_symbols", fake_seed)
+    monkeypatch.setattr("ingest.__main__.run", fake_run)
+    monkeypatch.setattr("ingest.__main__.load_calendar", lambda conn, client: _Calendar())
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _NullClient)
+    monkeypatch.setattr("ingest.__main__.connect", lambda dsn: _NullConn())
+
+    try:
+        main(["--tickers-file", _tickers(tmp_path, "AAPL", "MSFT"), "--symbol", "AAPL"])
+    except SystemExit:
+        pass
+
+    # seeding the narrowing instead makes the reconciling delete true of every symbol outside it, and none of them carries bars or progress rows yet to be spared by the orphan guards
+    assert seen["seeded"] == ["AAPL", "MSFT"]
+    assert seen["ran"] == ["AAPL"]
+
+
 class _Calendar:
     days, first, last = 1, "2026-06-01", "2026-06-30"
 
@@ -257,6 +284,17 @@ def test_a_run_that_dies_before_the_transport_still_reports(monkeypatch, tmp_pat
     assert "calendar_requests=0 symbols_requests=0 bars_requests=0" in aborted[0]
 
 
+# the autouse fixture patches names in this process and stops at the process boundary, so a child gets its floor from the environment instead: a cwd with no .env for config's env_file to resolve against, and dead values for everything main() could otherwise open.
+DEAD_ENV = {
+    "ALPACA_KEY_ID": "dead",
+    "ALPACA_SECRET_KEY": "dead",
+    "ALPACA_TRADING_HOST": "http://127.0.0.1:1",
+    "INGEST_START": "2020-08-01",
+    "INGEST_END": "2026-06-30",
+    "DATABASE_URL": "postgresql://dead:dead@127.0.0.1:1/dead",
+}
+
+
 def test_the_run_reaches_a_real_stream_at_info(tmp_path):
     # basicConfig is a no-op once a handler exists and pytest installs one, so the level it sets is invisible in process -- the same blindness that let D-048's stream move unnoticed. A subprocess is the only place the emitted bytes are real.
     tickers = _tickers(tmp_path, "AAPL")
@@ -278,7 +316,9 @@ def test_the_run_reaches_a_real_stream_at_info(tmp_path):
         f"sys.exit(M.main(['--tickers-file', {str(tickers)!r}]))\n"
     )
     result = subprocess.run(
-        [sys.executable, "-c", program], cwd=Path(__file__).resolve().parent.parent.parent,
+        [sys.executable, "-c", program], cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path(__file__).resolve().parent.parent.parent),
+             **DEAD_ENV},
         capture_output=True, text=True,
     )
 
