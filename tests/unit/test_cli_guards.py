@@ -1,4 +1,5 @@
 import logging
+import os
 import subprocess
 import sys
 from datetime import date
@@ -284,7 +285,7 @@ def test_a_run_that_dies_before_the_transport_still_reports(monkeypatch, tmp_pat
     assert "calendar_requests=0 symbols_requests=0 bars_requests=0" in aborted[0]
 
 
-# the autouse fixture patches names in this process and stops at the process boundary, so a child gets its floor from the environment instead: a cwd with no .env for config's env_file to resolve against, and dead values for everything main() could otherwise open.
+# the autouse fixture patches names in this process and stops at the process boundary, so a child gets its floor from the environment instead. pydantic-settings ranks environment variables above env_file -- measured -- so these beat the repository's real .env without moving the child's cwd, and the cwd must not move: notes/tools/mutmut_run.sh runs this suite from a copied tree where a cwd- or __file__-derived import path resolves inside mutants/, and the child then imports an instrumented package whose trampoline cannot find its config.
 DEAD_ENV = {
     "ALPACA_KEY_ID": "dead",
     "ALPACA_SECRET_KEY": "dead",
@@ -316,9 +317,9 @@ def test_the_run_reaches_a_real_stream_at_info(tmp_path):
         f"sys.exit(M.main(['--tickers-file', {str(tickers)!r}]))\n"
     )
     result = subprocess.run(
-        [sys.executable, "-c", program], cwd=tmp_path,
-        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(Path(__file__).resolve().parent.parent.parent),
-             **DEAD_ENV},
+        [sys.executable, "-c", program], cwd=Path(__file__).resolve().parent.parent.parent,
+        # overlaid rather than replacing os.environ, so a harness running this suite keeps its own variables in the child
+        env={**os.environ, **DEAD_ENV},
         capture_output=True, text=True,
     )
 
