@@ -91,14 +91,18 @@ is recorded as measured rather than checked against a target.
 Extended-hours bars are real on this feed rather than absent, which is why the share is measured
 and reported rather than assumed to be zero.
 
-Wall-clock rate: 5 units in **2.9–4.8 s** over two runs, each from a cleared `ingest_progress`,
-extrapolating to **≈69–114 minutes** for the full 7,100 units. Clearing the progress rows is what
-makes the second run fetch at all — the identical command left unchanged skips every completed
-unit and issues no bars requests. It is published as a range because that is what was observed —
-the spread is network latency between runs rather than anything in the pipeline, and it is the
-only figure on this page that a re-run does not land on exactly. The rate-limit floor — 7,100
-requests at 200 requests per minute — is ≈36 minutes, so the wall clock binds rather than the
-throttle, and the top of the range is the one to plan against.
+Wall-clock rate: 5 units in **4.8 s**, extrapolating to **≈114 minutes** for the full 7,100
+units — `7100 / 5 × 4.8 / 60 = 113.6`. It is a single figure rather than a range because only one
+of the two sample runs is a rate. The run measured here started from an empty `bars` and inserted
+all 41,723 rows, paying for the partition DDL, the index maintenance and the WAL that a real load
+pays for. The second run of the same five units took 2.9 s and **inserted nothing**: every row met
+`ON CONFLICT (symbol, ts) DO NOTHING` and the partition already existed, so it measures the
+idempotency path and is reported under it in `INGEST_LOG.md` rather than here. Extrapolating it
+would publish a rate no load of new data can reach.
+
+This remains the one figure on this page a re-run does not land on exactly, since it moves with
+the network and with what else the host is doing. The rate-limit floor — 7,100 requests at 200
+requests per minute — is ≈36 minutes, so the wall clock binds rather than the throttle.
 
 ## Feed
 

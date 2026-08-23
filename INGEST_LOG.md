@@ -18,11 +18,20 @@ recorded because the survivorship disclosure depends on them.
 **The rename exclusion rests on recall and cannot be verified here.** The assumption when the rule
 was written was that a ticker renamed mid-window would return a sparse series and so would show up
 as a coverage finding. Tested on 2026-08-20, that is wrong in the direction that hides it: Alpaca
-remaps renamed symbols, and META, RTX, ELV and XYZ each return bars from 2020-08-03 — before their
-renames. A rename therefore yields a *complete* series, no completeness check can see it, and the
-constituent table carries the predecessor's index date (RTX shows 1957, META shows 2013). The
-exclusions were made from recall and are recorded as such rather than described as checked. The
-risk they guard is semantic — a series whose meaning changes mid-window — not missing data.
+remaps renamed symbols, and META, ELV and XYZ each return bars from 2020-08-03 — before their
+renames, FB→META and ANTM→ELV in 2022-06 and SQ→XYZ in 2025-01. A rename therefore yields a
+*complete* series, no completeness check can see it, and the constituent table carries the
+predecessor's index date (META shows 2013). The exclusions were made from recall and are recorded
+as such rather than described as checked. The risk they guard is semantic — a series whose meaning
+changes mid-window — not missing data.
+
+RTX was probed in the same batch and is **not** evidence for that finding. It has traded under
+this ticker since the UTX/Raytheon merger of 2020-04-03, four months before the window opens, so
+bars from 2020-08-03 are the ordinary in-window case and show nothing about remapping. Four
+symbols returning early bars read as four confirmations when three of them were confirmations and
+the fourth was a control nobody had marked as one. RTX is nonetheless absent from `tickers.txt`,
+and the rule above does not account for that absence: it was not renamed inside the window. The
+exclusion stands as recorded, one name wider than the published rule describes.
 
 The two survival filters also mean the universe is survivorship-biased by construction. Coverage
 and distribution figures describe a continuously-listed large-cap universe, not the market.
@@ -43,10 +52,11 @@ Result: 41,723 bars over 5 units in 4.8 s and 5 requests, 40,673 of them inside 
 session. `market_days` was loaded first — 1,484 days, 2020-08-03 to 2026-06-30 — and `symbols`
 was seeded to 100 rows from `/v2/assets`, with no inactive constituents and nothing deleted.
 
-A second pass over the same five units took 2.9 s. It fetched rather than skipped because
-`ingest_progress` was cleared first; the identical command left unchanged issues no bars requests
-at all. The published rate is that pair, and the spread between them is network latency rather
-than anything in the pipeline.
+That 4.8 s is the published rate, and it is one leg rather than a pair. A second pass over the
+same five units took 2.9 s; it fetched rather than skipped because `ingest_progress` was cleared
+first, but `bars` was not, so it inserted nothing and paid for no partition DDL, no index
+maintenance and no WAL. It is idempotency evidence and is recorded under that heading below. The
+two legs are different workloads, and the gap between them is the inserts rather than the network.
 
 ### Feed comparison
 
@@ -91,5 +101,7 @@ rather than inferred from config.
 
 Proven both ways after the load. Re-running unchanged skipped all five units through
 `ingest_progress` and issued zero bars requests. Clearing the progress rows only and re-running
-re-fetched all five and inserted zero bars, leaving the total at 41,723 — which exercises the
-`ON CONFLICT` path rather than only the skip path.
+re-fetched all five in **2.9 s** and inserted zero bars, leaving the total at 41,723 — which
+exercises the `ON CONFLICT` path rather than only the skip path. That 2.9 s is the timing of this
+leg and not of a load: it is faster than the 4.8 s above because it writes nothing, so it is not
+extrapolated to anything.
