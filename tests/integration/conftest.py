@@ -1,3 +1,4 @@
+import re
 from uuid import uuid4
 
 import pytest
@@ -48,3 +49,25 @@ def schema_ref_dsn(fresh_dsn, repo_root) -> str:
         conn.execute((repo_root / "db" / "schema.sql").read_text())
         conn.commit()
     return dsn
+
+
+_PLACEHOLDER = re.compile(r":'([a-z_]+)'")
+
+
+@pytest.fixture
+def query_sql(repo_root):
+    # rendered rather than run through psql in the container: the generated mutation harness substitutes a stub container fixture carrying no get_wrapped_container, so a fixture reaching for one errors on every test in a campaign
+    def render(name: str) -> str:
+        text = (repo_root / "db" / "queries" / name).read_text()
+        # a file that declares none is legal -- the spec binds no parameters for several of the ten -- and must render rather than raise
+        header = re.findall(r"-- parameters:([^\n]*)", text)
+        declared = set(header[0].split()) if header else set()
+        substituted = {f":{n}" for n in _PLACEHOLDER.findall(text)}
+        # a parameter added to the body without being declared in the header would otherwise be bound silently and never checked
+        assert substituted == declared, f"{name}: body binds {substituted}, header declares {declared}"
+        # every other percent is doubled first: psycopg reads a bare % as its own placeholder, so a "100%" in a comment fails the bind with an error naming neither comments nor that file
+        rendered = _PLACEHOLDER.sub(r"%(\1)s", text.replace("%", "%%"))
+        assert ":'" not in rendered, f"{name}: a psql placeholder survived the render"
+        return rendered
+
+    return render

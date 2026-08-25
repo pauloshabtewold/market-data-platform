@@ -20,3 +20,4 @@ htmlcov/
 
 # macOS
 .DS_Store
+run.log

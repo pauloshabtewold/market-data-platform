@@ -3,7 +3,9 @@ import os
 import subprocess
 import sys
 from datetime import date
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +18,26 @@ def _tickers(tmp_path, *symbols):
     path = tmp_path / "tickers.txt"
     path.write_text("\n".join(symbols))
     return str(path)
+
+
+def test_the_tickers_file_flag_is_required_by_the_parser():
+    # argparse's own required=True, not one of the guard branches this module writes itself
+    with pytest.raises(SystemExit) as excinfo:
+        main([])
+
+    assert excinfo.value.code == 2
+
+
+def test_a_nonexistent_tickers_file_is_refused_with_exit_code_2_on_stderr(tmp_path, capsys):
+    missing = tmp_path / "missing.txt"
+
+    code = main(["--tickers-file", str(missing)])
+
+    # OSError's own errno maps to no particular exit code, so the guard's own 2 is what a caller can rely on
+    assert code == 2
+    out, err = capsys.readouterr()
+    assert str(missing) in err
+    assert out == ""
 
 
 def test_an_inverted_month_range_is_refused_before_any_network_call(tmp_path, capsys):
@@ -104,6 +126,57 @@ def test_seeding_covers_the_file_while_the_bars_phase_covers_the_narrowing(monke
     assert seen["ran"] == ["AAPL"]
 
 
+def test_the_run_call_is_wired_to_the_real_dsn_conn_client_and_a_client_bound_fetch(monkeypatch, tmp_path):
+    seen = {}
+    conn = _NullConn()
+    client = _NullClient()
+
+    def fake_connect(dsn):
+        seen["dsn"] = dsn
+        return conn
+
+    def fake_load_calendar(passed_conn, passed_client):
+        seen["calendar"] = (passed_conn, passed_client)
+        return _Calendar()
+
+    def fake_seed_symbols(passed_conn, passed_client, tickers):
+        seen["seed"] = (passed_conn, passed_client)
+        return _Seeded()
+
+    def fake_run(passed_conn, symbols, start, end, fetch):
+        seen["run_conn"] = passed_conn
+        seen["fetch"] = fetch
+        raise SystemExit(0)
+
+    def fake_fetch_bars(passed_client, symbol, month):
+        seen.setdefault("fetch_calls", []).append((passed_client, symbol, month))
+        return []
+
+    monkeypatch.setattr("ingest.__main__.connect", fake_connect)
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", lambda: client)
+    monkeypatch.setattr("ingest.__main__.load_calendar", fake_load_calendar)
+    monkeypatch.setattr("ingest.__main__.seed_symbols", fake_seed_symbols)
+    monkeypatch.setattr("ingest.__main__.run", fake_run)
+    monkeypatch.setattr("ingest.__main__.fetch_bars", fake_fetch_bars)
+
+    try:
+        main(["--tickers-file", _tickers(tmp_path, "AAPL")])
+    except SystemExit:
+        pass
+
+    assert seen["dsn"] == settings.DATABASE_URL
+    assert seen["calendar"] == (conn, client)
+    assert seen["seed"] == (conn, client)
+    assert seen["run_conn"] is conn
+
+    fetch = seen["fetch"]
+    assert isinstance(fetch, partial)
+    assert fetch.args == (client,)
+    # calling it is what proves the bound client is the one that reaches fetch_bars, not just the first positional slot
+    fetch("AAPL", date(2026, 6, 1))
+    assert seen["fetch_calls"] == [(client, "AAPL", date(2026, 6, 1))]
+
+
 class _Calendar:
     days, first, last = 1, "2026-06-01", "2026-06-30"
 
@@ -114,6 +187,12 @@ class _Seeded:
 
 class _Summary:
     units, skipped, rows, elapsed = 2, 1, 17, 4.8
+    rejected, failed = 3, (("MSFT", date(2026, 5, 1)),)
+
+
+class _SummaryWithNoFailures:
+    units, skipped, rows, elapsed = 2, 1, 17, 4.8
+    rejected, failed = 0, ()
 
 
 class _NullClient:
@@ -138,6 +217,13 @@ class _NullConn:
         return self
 
     def __exit__(self, *exc):
+        return None
+
+    # main() runs the first_bar_ts recompute against whatever connection it is handed, and the recompute reads rowcount off the cursor
+    def execute(self, *args, **kwargs):
+        return SimpleNamespace(rowcount=0)
+
+    def commit(self):
         return None
 
 
@@ -249,6 +335,26 @@ def test_the_resume_command_carries_the_flags_the_run_was_given(monkeypatch, tmp
     assert "--end-month 2026-06" in resume
 
 
+def test_the_resume_command_names_the_actual_tickers_file_path(monkeypatch, tmp_path, caplog):
+    def explode(conn, symbols, start, end, fetch):
+        raise RuntimeError("vendor said no")
+
+    monkeypatch.setattr("ingest.__main__.run", explode)
+    monkeypatch.setattr("ingest.__main__.load_calendar", lambda conn, client: _Calendar())
+    monkeypatch.setattr("ingest.__main__.seed_symbols", lambda conn, client, tickers: _Seeded())
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _SpentClient)
+    monkeypatch.setattr("ingest.__main__.connect", lambda dsn: _NullConn())
+
+    tickers_file = _tickers(tmp_path, "AAPL")
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        with pytest.raises(RuntimeError):
+            main(["--tickers-file", tickers_file])
+
+    # str(None) satisfies a check for the literal "--tickers-file" prefix just as well as the real path would
+    resume = [m for m in caplog.messages if m.startswith("run incomplete:")][0]
+    assert f"--tickers-file {tickers_file}" in resume
+
+
 def test_a_completed_run_reports_itself_complete(monkeypatch, tmp_path, caplog):
     monkeypatch.setattr("ingest.__main__.run",
                         lambda conn, symbols, start, end, fetch: _Summary())
@@ -309,11 +415,13 @@ def test_the_run_reaches_a_real_stream_at_info(tmp_path):
         "class N:\n"
         "    def __enter__(self): return self\n"
         "    def __exit__(self, *a): pass\n"
+        "    def execute(self, *a, **k): return types.SimpleNamespace(rowcount=0)\n"
+        "    def commit(self): pass\n"
         "M.AlpacaClient = C\n"
         "M.connect = lambda dsn: N()\n"
         "M.load_calendar = lambda c, cl: types.SimpleNamespace(days=1, first='a', last='b')\n"
         "M.seed_symbols = lambda c, cl, t: types.SimpleNamespace(upserted=1, deleted=[], refused=[], inactive=[])\n"
-        "M.run = lambda *a, **k: types.SimpleNamespace(units=2, skipped=1, rows=17, elapsed=4.8)\n"
+        "M.run = lambda *a, **k: types.SimpleNamespace(units=2, skipped=1, rows=17, elapsed=4.8, rejected=0, failed=())\n"
         f"sys.exit(M.main(['--tickers-file', {str(tickers)!r}]))\n"
     )
     result = subprocess.run(
@@ -327,3 +435,76 @@ def test_the_run_reaches_a_real_stream_at_info(tmp_path):
     # an unattended run whose level was never set emits nothing at all, and the operator learns that after the run rather than during it
     assert "run complete: units=2 skipped=1" in result.stderr
     assert "calendar: 1 days loaded" in result.stderr
+
+
+def test_a_completed_runs_report_line_carries_the_rejected_and_failed_counters(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr("ingest.__main__.run",
+                        lambda conn, symbols, start, end, fetch: _Summary())
+    monkeypatch.setattr("ingest.__main__.load_calendar", lambda conn, client: _Calendar())
+    monkeypatch.setattr("ingest.__main__.seed_symbols", lambda conn, client, tickers: _Seeded())
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _SpentClient)
+    monkeypatch.setattr("ingest.__main__.connect", lambda dsn: _NullConn())
+
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        main(["--tickers-file", _tickers(tmp_path, "AAPL")])
+
+    line = [m for m in caplog.messages if m.startswith("run complete:")][0]
+    # appended to the tail rather than inserted into it, so these keep matching what they matched before the counters existed
+    assert "units=2 skipped=1" in line and "rows=17" in line
+    assert "rejected=3" in line
+    assert "failed=1" in line
+
+
+def test_a_completed_run_with_failed_units_names_them_on_a_second_line(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr("ingest.__main__.run",
+                        lambda conn, symbols, start, end, fetch: _Summary())
+    monkeypatch.setattr("ingest.__main__.load_calendar", lambda conn, client: _Calendar())
+    monkeypatch.setattr("ingest.__main__.seed_symbols", lambda conn, client, tickers: _Seeded())
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _SpentClient)
+    monkeypatch.setattr("ingest.__main__.connect", lambda dsn: _NullConn())
+
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        main(["--tickers-file", _tickers(tmp_path, "AAPL")])
+
+    # re-running the same command retries exactly these units and nothing else
+    failed_lines = [m for m in caplog.messages if m.startswith("failed units:")]
+    assert len(failed_lines) == 1
+    assert "MSFT 2026-05" in failed_lines[0]
+    assert "rerun `python -m ingest --tickers-file" in failed_lines[0]
+
+
+def test_a_completed_run_with_no_failed_units_omits_the_failed_units_line(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr("ingest.__main__.run",
+                        lambda conn, symbols, start, end, fetch: _SummaryWithNoFailures())
+    monkeypatch.setattr("ingest.__main__.load_calendar", lambda conn, client: _Calendar())
+    monkeypatch.setattr("ingest.__main__.seed_symbols", lambda conn, client, tickers: _Seeded())
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _SpentClient)
+    monkeypatch.setattr("ingest.__main__.connect", lambda dsn: _NullConn())
+
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        main(["--tickers-file", _tickers(tmp_path, "AAPL")])
+
+    # a run that failed nothing must not print an empty failure list
+    assert not [m for m in caplog.messages if m.startswith("failed units:")]
+
+
+def test_main_recomputes_first_bar_ts_after_a_completed_run_and_logs_the_count(monkeypatch, tmp_path, caplog):
+    calls = []
+
+    def fake_recompute(conn):
+        calls.append(conn)
+        return 42
+
+    monkeypatch.setattr("ingest.__main__.run",
+                        lambda conn, symbols, start, end, fetch: _Summary())
+    monkeypatch.setattr("ingest.__main__.recompute_first_bar_ts", fake_recompute)
+    monkeypatch.setattr("ingest.__main__.load_calendar", lambda conn, client: _Calendar())
+    monkeypatch.setattr("ingest.__main__.seed_symbols", lambda conn, client, tickers: _Seeded())
+    monkeypatch.setattr("ingest.__main__.AlpacaClient", _SpentClient)
+    monkeypatch.setattr("ingest.__main__.connect", lambda dsn: _NullConn())
+
+    with caplog.at_level(logging.INFO, logger="ingest"):
+        main(["--tickers-file", _tickers(tmp_path, "AAPL")])
+
+    assert len(calls) == 1
+    assert "first_bar_ts: 42 symbols recomputed" in caplog.messages

@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from config import settings
 from db.session import connect
 from ingest.pipeline import ensure_partition
 from ingest.symbols import seed_symbols
@@ -28,7 +29,7 @@ class StubAssets:
         self.params = []
 
     def get_json(self, base_url, path, params, phase):
-        self.params.append((path, params, phase))
+        self.params.append((base_url, path, params, phase))
         return self._assets
 
 
@@ -70,7 +71,7 @@ def test_seeding_writes_one_row_per_ticker_and_asks_for_every_status(migrated_ds
         ("NVDA", "NVDA Inc", "NASDAQ", False),
     ]
     # a status filter would make active true by construction and record the request rather than the asset
-    assert client.params[0] == ("/v2/assets", {"asset_class": "us_equity"}, "symbols")
+    assert client.params[0] == (settings.ALPACA_TRADING_HOST, "/v2/assets", {"asset_class": "us_equity"}, "symbols")
 
 
 def test_a_second_seeding_against_a_trimmed_file_mirrors_the_deletion(migrated_dsn):

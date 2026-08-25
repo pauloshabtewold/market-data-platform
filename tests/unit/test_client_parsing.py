@@ -8,7 +8,16 @@ import pytest
 from urllib.parse import quote
 
 from config import settings
-from ingest.client import BARS_HOST, BARS_PATH, MAX_PAGES, AlpacaClient, fetch_bars, month_window
+from ingest.client import (
+    BARS_HOST,
+    BARS_PATH,
+    MAX_PAGES,
+    AlpacaClient,
+    FatalVendorError,
+    UnitFetchError,
+    fetch_bars,
+    month_window,
+)
 
 
 class StubClient:
@@ -29,16 +38,40 @@ def _page(fixtures_dir, name):
     return json.loads((fixtures_dir / name).read_text(), parse_float=Decimal)
 
 
-@pytest.mark.parametrize("status", [403, 429, 500])
-def test_a_response_the_vendor_refused_raises_rather_than_reaching_the_parser(status):
+def test_a_403_raises_fatal_vendor_error_rather_than_reaching_the_parser():
     # an error body carries no "bars" key, so one that reaches the parser reads as a month with no data and gets checkpointed as a completed unit
     http = httpx.Client(
-        transport=httpx.MockTransport(lambda r: httpx.Response(status, content=b'{"message":"no."}'))
+        transport=httpx.MockTransport(lambda r: httpx.Response(403, content=b'{"message":"no."}'))
     )
-    client = AlpacaClient(http=http)
+    client = AlpacaClient(http=http, sleep=lambda delay: None)
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(FatalVendorError):
         client.get_json(BARS_HOST, BARS_PATH, {"symbols": "AAPL"}, "bars")
+
+
+def test_a_500_raises_unit_fetch_error_rather_than_reaching_the_parser():
+    # an error body carries no "bars" key, so one that reaches the parser reads as a month with no data and gets checkpointed as a completed unit
+    http = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(500, content=b'{"message":"no."}'))
+    )
+    client = AlpacaClient(http=http, sleep=lambda delay: None)
+
+    with pytest.raises(UnitFetchError):
+        client.get_json(BARS_HOST, BARS_PATH, {"symbols": "AAPL"}, "bars")
+
+
+def test_a_429_is_retried_past_rather_than_raised_and_reaches_the_parser_once_it_clears():
+    # 429 retries indefinitely by design, so a transport that never stopped refusing would hang the suite rather than fail it
+    statuses = [429, 429]
+
+    def send(request):
+        if statuses:
+            return httpx.Response(statuses.pop(0), content=b'{"message":"no."}')
+        return httpx.Response(200, content=b'{"bars": {}}')
+
+    client = AlpacaClient(http=httpx.Client(transport=httpx.MockTransport(send)), sleep=lambda delay: None)
+
+    assert client.get_json(BARS_HOST, BARS_PATH, {"symbols": "AAPL"}, "bars") == {"bars": {}}
 
 
 def test_a_page_token_is_followed_and_never_sent_empty(fixtures_dir):
@@ -96,6 +129,19 @@ def test_the_month_window_ends_inside_the_month():
     )
     assert month_window(date(2026, 12, 1))[1] == "2026-12-31T23:59:59Z"
     assert month_window(date(2024, 2, 1))[1] == "2024-02-29T23:59:59Z"
+
+
+def test_fetch_bars_requests_the_symbol_the_1min_timeframe_and_the_month_window(fixtures_dir):
+    client = StubClient([_page(fixtures_dir, "bars_empty.json")])
+    start, end = month_window(date(2026, 6, 1))
+
+    fetch_bars(client, "AAPL", date(2026, 6, 1))
+
+    params = client.params[0]
+    assert params["symbols"] == "AAPL"
+    assert params["timeframe"] == "1Min"
+    assert params["start"] == start
+    assert params["end"] == end
 
 
 def test_the_transport_parses_prices_without_crossing_a_float(fixtures_dir, caplog):

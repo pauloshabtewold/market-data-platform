@@ -9,7 +9,7 @@ from config import settings
 from db.session import connect
 from ingest.calendar import load_calendar
 from ingest.client import AlpacaClient, fetch_bars, next_month
-from ingest.pipeline import run
+from ingest.pipeline import recompute_first_bar_ts, run
 from ingest.symbols import seed_symbols
 
 log = logging.getLogger("ingest")
@@ -108,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             summary = run(conn, wanted, start, end, partial(fetch_bars, client))
+            # inside the same try, so a run that aborts leaves the column to the next run rather than publishing a half-updated one
+            log.info("first_bar_ts: %d symbols recomputed", recompute_first_bar_ts(conn))
     finally:
         # request_counts lives only in the client and is the one figure a failed run cannot re-derive from ingest_progress afterwards
         _report(summary, counts, args)
@@ -132,8 +134,10 @@ def _report(summary, counts, args) -> None:
         if summary is not None
         else "run incomplete:"
     )
+    # appended to the tail rather than inserted into it, so the assertions written against the existing head keep matching what they were written to match
     tail = (
         f" rows={summary.rows} elapsed={summary.elapsed:.1f}s"
+        f" rejected={summary.rejected} failed={len(summary.failed)}"
         if summary is not None
         else f"; rerun `{_resume_command(args)}` to resume"
     )
@@ -141,6 +145,13 @@ def _report(summary, counts, args) -> None:
         "%s calendar_requests=%d symbols_requests=%d bars_requests=%d%s",
         head, counts["calendar"], counts["symbols"], counts["bars"], tail,
     )
+    if summary is not None and summary.failed:
+        # named as they are, because re-running the same command retries exactly those units and nothing else
+        log.info(
+            "failed units: %s; rerun `%s` to retry them",
+            " ".join(f"{symbol} {month:%Y-%m}" for symbol, month in summary.failed),
+            _resume_command(args),
+        )
 
 
 if __name__ == "__main__":

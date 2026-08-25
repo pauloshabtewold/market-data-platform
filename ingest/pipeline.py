@@ -6,7 +6,8 @@ from datetime import date
 import psycopg
 from psycopg import sql
 
-from ingest.client import next_month
+from ingest.client import FatalVendorError, next_month
+from ingest.validate import check_bars, window_bounds
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +21,17 @@ ON CONFLICT (symbol, ts) DO NOTHING
 
 INSERT_PROGRESS = """
 INSERT INTO ingest_progress (symbol, month, completed_at, row_count, rejected_count)
-VALUES (%s, %s, now(), %s, 0)
+VALUES (%s, %s, now(), %s, %s)
+"""
+
+# read back inside the unit transaction rather than counting what this fetch accepted: a replay whose accepted set is smaller than what is already stored would otherwise leave sum(row_count) below count(*) and fail the reconciliation on a healthy database
+COUNT_UNIT_BARS = "SELECT count(*) FROM bars WHERE symbol = %s AND ts >= %s AND ts < %s"
+
+# correlated per symbol rather than grouped over bars: a GROUP BY cannot express a symbol holding no bars, which would keep a stale value the coverage query then reads as ingested
+RECOMPUTE_FIRST_BAR_TS = """
+UPDATE symbols s
+   SET first_bar_ts = (SELECT min(b.ts) FROM bars b WHERE b.symbol = s.symbol)
+ WHERE s.first_bar_ts IS DISTINCT FROM (SELECT min(b.ts) FROM bars b WHERE b.symbol = s.symbol)
 """
 
 
@@ -29,6 +40,8 @@ class RunSummary:
     units: int
     skipped: int
     rows: int
+    rejected: int
+    failed: tuple[tuple[str, date], ...]
     elapsed: float
 
 
@@ -60,11 +73,13 @@ def ensure_partition(conn: psycopg.Connection, month: date) -> None:
     )
 
 
-def ingest_unit(conn: psycopg.Connection, symbol: str, month: date, fetch) -> tuple[int, int]:
+def ingest_unit(conn: psycopg.Connection, symbol: str, month: date, fetch) -> tuple[int, int, int]:
     bars = fetch(symbol, month)
+    # validated outside the transaction, so a rejected bar costs no transaction time and rejection can never abort the unit
+    checked = check_bars(bars, month)
     rows = [
         (b.symbol, b.ts, b.open, b.high, b.low, b.close, b.volume, b.trade_count, b.vwap)
-        for b in bars
+        for b in checked.accepted
     ]
 
     inserted = 0
@@ -74,10 +89,18 @@ def ingest_unit(conn: psycopg.Connection, symbol: str, month: date, fetch) -> tu
             if rows:
                 cur.executemany(INSERT_BARS, rows)
                 inserted = cur.rowcount
-            # row_count is the parsed length: a replay affects zero rows under DO NOTHING so an affected count here would break reconciliation against a healthy database.
-            cur.execute(INSERT_PROGRESS, (symbol, month, len(rows)))
+            lo, hi = window_bounds(month)
+            stored = cur.execute(COUNT_UNIT_BARS, (symbol, lo, hi)).fetchone()[0]
+            cur.execute(INSERT_PROGRESS, (symbol, month, stored, len(checked.rejected)))
 
-    return len(rows), inserted
+    return stored, len(checked.rejected), inserted
+
+
+def recompute_first_bar_ts(conn: psycopg.Connection) -> int:
+    # recomputed after the run and never set on insert, because resume can ingest an earlier month after a later one
+    cur = conn.execute(RECOMPUTE_FIRST_BAR_TS)
+    conn.commit()
+    return cur.rowcount
 
 
 def months_between(start: date, end: date) -> list[date]:
@@ -103,15 +126,27 @@ def run(
     conn.commit()
 
     began = time.monotonic()
-    units = skipped = rows = 0
+    units = skipped = rows = rejected = 0
+    failed: list[tuple[str, date]] = []
     for symbol in symbols:
         for month in months_between(start, end):
             if (symbol, month) in done:
                 skipped += 1
                 continue
-            parsed, inserted = ingest_unit(conn, symbol, month, fetch)
+            try:
+                parsed, refused, inserted = ingest_unit(conn, symbol, month, fetch)
+            except FatalVendorError:
+                # ordered first: the clause below is except Exception and would otherwise swallow the one failure class that must stop the run
+                raise
+            except Exception as exc:
+                # no progress row for a failed unit, because a row here is a permanent skip on every future resume
+                log.error("%s %s failed: %s", symbol, f"{month:%Y-%m}", exc)
+                failed.append((symbol, month))
+                continue
             log.info("%s %s parsed=%d inserted=%d", symbol, f"{month:%Y-%m}", parsed, inserted)
             units += 1
             rows += parsed
+            rejected += refused
 
-    return RunSummary(units, skipped, rows, time.monotonic() - began)
+    # a tuple rather than a list, so frozen=True means what it says and the dataclass stays hashable
+    return RunSummary(units, skipped, rows, rejected, tuple(failed), time.monotonic() - began)
