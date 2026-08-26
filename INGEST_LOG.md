@@ -105,3 +105,45 @@ re-fetched all five in **2.9 s** and inserted zero bars, leaving the total at 41
 exercises the `ON CONFLICT` path rather than only the skip path. That 2.9 s is the timing of this
 leg and not of a load: it is faster than the 4.8 s above because it writes nothing, so it is not
 extrapolated to anything.
+
+## 2026-08-26 — first half of the universe, 50 tickers × 71 months
+
+The first 50 lines of `tickers.txt` over the whole window, 2020-08-01..2026-06-30. The five tickers
+of the sample load above are the first five of these, and their rows were deleted before this run
+started: they were loaded before validation existed, so their `rejected_count` was a placeholder
+rather than a measurement. They came straight back as part of this load.
+
+- **Feed:** `iex`
+- **Adjustment:** `split,spin-off`
+- **Limit:** 10000, one page per ticker-month at this size
+- **Window per unit:** `<M>-01T00:00:00Z` to `<last day>T23:59:59Z`, both bounds inclusive
+- **Units:** 3,550 — 50 tickers × 71 months, every one completed
+
+Result: **22,435,680 bars** across 71 monthly partitions, spanning 2020-08-03 to 2026-06-30, with
+**24 bars rejected** by validation and **no failed units**. 22,378,005 rows fall inside the regular
+session, so the extended-hours share is **57,675 rows, 0.26%** — small, but real, which is why the
+session bounds are a join predicate rather than an assumption. `symbols` stayed at 100 rows and
+`first_bar_ts` was recomputed for the 50 that now hold bars.
+
+On-disk size is **2,852 MB**, measured as the sum of `pg_total_relation_size` over the child
+partitions. Taken against the parent it reads `0 bytes`, because that function does not descend into
+a partitioned table — worth stating here, because that zero looks like an empty database rather than
+like the wrong question.
+
+Wall clock was **23.2 minutes** for the 3,550 units, 0.392 s per unit. That supersedes the ≈57
+minutes projected for a 50-ticker half: the projection came from timing five units at 4.8 s, and
+five units carry the cost of opening the first partitions and the first connection, which then rides
+along in every extrapolated unit. The request rate over the measured leg was 157 per minute against
+a 200/minute client-side limit, so the throttle never blocked and the wall clock binds.
+
+**This load was interrupted on purpose and finished in two legs.** The run was killed with `kill -9`
+after 5 minutes 23 seconds, at which point 750 units had committed, then restarted against the same
+window. It skipped exactly those 750 and completed the remaining 2,800 in 1,068.7 s. That is why the
+run's own report line reads `units=2800 skipped=750 … rejected=18` — it describes the second leg
+only, and the 24 rejections and 23.2 minutes above are the totals across both. Every completed unit
+survived the kill because each is committed as its own transaction, and afterwards `ingest_progress`
+agreed with the log to the row.
+
+Coverage over the window reads **77.62%** with **zero missing units**, and 50 symbols not yet
+ingested — the second half of the universe, which is a later load's work. The percentage is what IEX
+carries rather than a defect; the missing-unit count is the one that has to be zero.
