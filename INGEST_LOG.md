@@ -147,3 +147,21 @@ agreed with the log to the row.
 Coverage over the window reads **77.62%** with **zero missing units**, and 50 symbols not yet
 ingested — the second half of the universe, which is a later load's work. The percentage is what IEX
 carries rather than a defect; the missing-unit count is the one that has to be zero.
+
+### Coverage by period
+
+Recorded here because a single month is not a rate and the README used to publish one that could not
+be re-derived. Measured over these 50 symbols against `market_days`, counting only bars inside
+`[open_ts, close_ts)` and dividing by `SUM(session_minutes)` for the same days — the same membership
+the coverage query uses:
+
+| Period | Pooled | Per-symbol range |
+| --- | --- | --- |
+| 2026-06 (the sample month) | 99.32% | 96.73–100.00% |
+| 2022-06 | 81.01% | 13.25–99.90% |
+| 2025-06 | 74.77% | 7.59–99.88% |
+| 2020-08..2026-06, whole window | 77.62% | — |
+
+The sample month is near this feed's ceiling and is not representative. Coverage is a property of the
+symbol and the period together, which is what queries 9 and 10 exist to break down; the whole-window
+figure is superseded once the second fifty are loaded.

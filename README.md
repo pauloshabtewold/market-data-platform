@@ -4,8 +4,9 @@
 
 Minute-bar ingestion, analytical queries, and a paginated read API over a month-partitioned
 PostgreSQL database. The target universe is 100 large-cap US equities over 2020-08-01 to
-2026-06-30, sourced from Alpaca's IEX feed; the measurements below come from a 5-ticker,
-one-month sample loaded to size the pipeline before the full run.
+2026-06-30, sourced from Alpaca's IEX feed. The sizing and byte measurements below come from a
+5-ticker, one-month sample loaded before the full run; the coverage figures also draw on the first
+50 tickers, loaded over the whole window.
 
 ## Setup
 
@@ -91,18 +92,23 @@ is recorded as measured rather than checked against a target.
 Extended-hours bars are real on this feed rather than absent, which is why the share is measured
 and reported rather than assumed to be zero.
 
-Wall-clock rate: 5 units in **4.8 s**, extrapolating to **≈114 minutes** for the full 7,100
-units — `7100 / 5 × 4.8 / 60 = 113.6`. It is a single figure rather than a range because only one
-of the two sample runs is a rate. The run measured here started from an empty `bars` and inserted
-all 41,723 rows, paying for the partition DDL, the index maintenance and the WAL that a real load
-pays for. The second run of the same five units took 2.9 s and **inserted nothing**: every row met
+Wall-clock rate: **0.392 s per ticker-month**, measured over the 3,550 units of the fifty-ticker
+load — 1,391.7 s, including a deliberate kill and restart. The full 7,100 units extrapolate to
+**≈46 minutes**: `7100 × 0.392 / 60 = 46.4`.
+
+An earlier version of this page published ≈114 minutes, from timing the five-unit sample at 4.8 s
+and computing `7100 / 5 × 4.8 / 60`. Five units pay once for the first partition DDL and the first
+connection, and dividing by five leaves that one-off cost inside every extrapolated unit, which is
+why it landed 2.5× high. The sample is what sized the pipeline; it was never what timed it.
+
+The second run of the same five units took 2.9 s and **inserted nothing**: every row met
 `ON CONFLICT (symbol, ts) DO NOTHING` and the partition already existed, so it measures the
 idempotency path and is reported under it in `INGEST_LOG.md` rather than here. Extrapolating it
 would publish a rate no load of new data can reach.
 
-This remains the one figure on this page a re-run does not land on exactly, since it moves with
-the network and with what else the host is doing. The rate-limit floor — 7,100 requests at 200
-requests per minute — is ≈36 minutes, so the wall clock binds rather than the throttle.
+The figure still moves with the network and with what else the host is doing. The rate-limit floor
+— 7,100 requests at 200 requests per minute — is ≈36 minutes, so the wall clock binds rather than
+the throttle, though no longer by much.
 
 ## Feed
 
@@ -132,10 +138,12 @@ against the calendar. All 21 sessions in 2026-06 are full 390-minute days, so th
 | `ORCL` | 7,922 | 96.73% |
 
 The mean is 40,673 ÷ 40,950 = **99.32%**, which is `BARS_PER_TICKER_DAY` ÷ 390 and is the same
-number arrived at from the other direction. An earlier reading on June 2022 and June 2025 gave
-384–389 minutes of 390 against SIP's 391; coverage is not constant across this history, so the
-figure is reported per period rather than as one rate, and the full-window number replaces both
-once the universe is loaded.
+number arrived at from the other direction — and it is near this feed's ceiling rather than typical
+of it. Coverage is not constant across this history, so it is reported per period. Measured over
+the 50 tickers loaded so far, on the same `[open_ts, close_ts)` membership and the same
+`SUM(session_minutes)` denominator: June 2022 pools to **81.01%** over a 13.25–99.90% per-symbol
+range, and June 2025 to **74.77%** over 7.59–99.88%. Across the whole window those 50 symbols pool
+to **77.62%**. The hundred-symbol figure replaces that one once the second half is loaded.
 
 The finding this project reports is *where* the missing minutes fall rather than a headline gap,
 and on this sample they are concentrated rather than spread: 277 minutes are missing in total and
@@ -182,9 +190,11 @@ overlap while leaving "already a partition" uncaught and the run dead on the sec
 
 ## Limitations
 
-- **IEX coverage is not complete.** On the 2026-06 sample it runs 96.73–100.00% of regular-session
-  minutes by symbol, averaging 99.32%; an earlier reading on June 2022 and June 2025 gave
-  98.46–99.74% against the same 390-minute denominator.
+- **IEX coverage is not complete, and it varies by symbol and by period far more than any one
+  month shows.** On the 2026-06 sample it runs 96.73–100.00% of regular-session minutes by symbol,
+  averaging 99.32% — but that month is close to the ceiling. Over the 50 tickers loaded across the
+  whole window it pools to **77.62%**, and individual symbol-months run as low as **7.59%**. Read
+  the single-month figure as an upper bound, not as a rate.
   A missing minute is data and is never synthesized or forward-filled, so gaps in `bars` are gaps
   in the tape as this feed saw it.
 - **There is no incremental ingest.** A run re-walks every requested unit and skips the ones
