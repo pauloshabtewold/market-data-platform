@@ -52,3 +52,9 @@ def test_the_bucket_never_asks_to_sleep_a_negative_duration():
 
     # the real time.sleep raises ValueError on a negative duration, so a deficit computed against the wrong threshold takes the run down rather than pacing it
     assert all(delay >= 0 for delay in clock.slept), clock.slept
+
+
+def test_backoff_delay_stays_computable_on_the_unbounded_retry_path():
+    # 429 is exempt from the attempt budget, so attempt grows without limit and 1.0 * 2 ** 1024 raises OverflowError before min() can discard it
+    assert backoff_delay(1025, 1.0) == BACKOFF_CAP
+    assert backoff_delay(10**6, 1.0) == BACKOFF_CAP

@@ -422,3 +422,42 @@ def test_the_run_summary_is_hashable_and_its_failed_units_cannot_be_mutated(migr
     # frozen=True generates __hash__ from every field, so a list here made the dataclass claim an immutability it did not have in either direction
     assert hash(summary) is not None
     assert isinstance(summary.failed, tuple)
+
+
+def test_a_connection_that_dies_mid_run_stops_the_run_rather_than_walking_the_rest(migrated_dsn):
+    calls = []
+    # not the usual `with connect(...)`: the connection is dead by the end of this test and the context manager would commit a closed one
+    conn = connect(migrated_dsn)
+    pid = conn.execute("SELECT pg_backend_pid()").fetchone()[0]
+    conn.commit()
+
+    def fetch(symbol, month):
+        calls.append((symbol, month))
+        if len(calls) == 2:
+            with connect(migrated_dsn) as killer:
+                killer.execute("SELECT pg_terminate_backend(%s)", (pid,))
+                killer.commit()
+        return _bars(symbol, month, 3)
+
+    # a dead connection is as unclearable as a fatal status, and continuing spends one vendor request per remaining unit before finding out
+    with pytest.raises(psycopg.Error):
+        run(conn, ["AAPL"], JUNE, AUGUST, fetch)
+
+    assert calls == [("AAPL", JUNE), ("AAPL", JULY)]
+
+
+def test_ingest_unit_on_an_empty_payload_reports_zero_parsed_rejected_and_inserted(migrated_dsn):
+    with connect(migrated_dsn) as conn:
+        # a pre-listing month answers with an empty payload and is a completed unit, which is the branch the `if rows:` guard skips
+        assert ingest_unit(conn, "AAPL", JUNE, lambda symbol, month: []) == (0, 0, 0)
+
+
+def test_an_empty_payload_commits_a_zero_row_progress_row_and_logs_zero_inserted(migrated_dsn, caplog):
+    with connect(migrated_dsn) as conn:
+        with caplog.at_level(logging.INFO, logger="ingest.pipeline"):
+            summary = run(conn, ["AAPL"], JUNE, JUNE, lambda symbol, month: [])
+
+    # this line is what the kill criterion counts against ingest_progress, and an inserted of None would emit no line at all
+    assert "AAPL 2026-06 parsed=0 inserted=0" in caplog.messages
+    assert (summary.units, summary.rows, summary.failed) == (1, 0, ())
+    assert _scalar(migrated_dsn, "SELECT row_count FROM ingest_progress WHERE symbol = 'AAPL'") == 0

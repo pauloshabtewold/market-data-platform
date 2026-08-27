@@ -142,6 +142,9 @@ def run(
                 # no progress row for a failed unit, because a row here is a permanent skip on every future resume
                 log.error("%s %s failed: %s", symbol, f"{month:%Y-%m}", exc)
                 failed.append((symbol, month))
+                if conn.closed:
+                    # as unclearable as a fatal status, and every unit after it still spends a vendor request before finding out
+                    raise
                 continue
             log.info("%s %s parsed=%d inserted=%d", symbol, f"{month:%Y-%m}", parsed, inserted)
             units += 1

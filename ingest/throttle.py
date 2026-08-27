@@ -29,6 +29,7 @@ class TokenBucket:
 
 
 def backoff_delay(attempt: int, rand: float) -> float:
-    ceiling = min(BACKOFF_CAP, BACKOFF_BASE * 2 ** (attempt - 1))
+    # the exponent is clamped because the 429 path is unbounded and 2 ** 1024 overflows the multiply before min can discard it
+    ceiling = min(BACKOFF_CAP, BACKOFF_BASE * 2 ** min(attempt - 1, 20))
     # half the ceiling plus jitter is never zero, so a 429 is never retried hot against the limit it reports
     return ceiling / 2 + rand * ceiling / 2

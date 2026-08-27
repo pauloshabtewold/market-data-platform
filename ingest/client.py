@@ -99,13 +99,18 @@ class AlpacaClient:
             else:
                 status = response.status_code
                 if 200 <= status < 300:
-                    # Decimal keeps prices off the float boundary that numeric storage exists to avoid.
-                    return json.loads(response.content, parse_float=Decimal)
-                if status in FATAL_STATUSES:
+                    try:
+                        # Decimal keeps prices off the float boundary that numeric storage exists to avoid.
+                        return json.loads(response.content, parse_float=Decimal)
+                    except ValueError as exc:
+                        # a 200 carrying a proxy error page or a truncated payload is as transient as a reset, so it retries on the same budget rather than leaving the policy unclassified
+                        status, why = None, f"unparseable body, {exc}"
+                elif status in FATAL_STATUSES:
                     raise FatalVendorError(f"{base_url}{path}: vendor returned {status}, the run cannot continue")
-                if status != THROTTLED_STATUS and status not in RETRYABLE_STATUSES:
+                elif status != THROTTLED_STATUS and status not in RETRYABLE_STATUSES:
                     raise UnitFetchError(f"{base_url}{path}: vendor returned {status}")
-                why = f"status {status}"
+                else:
+                    why = f"status {status}"
 
             # HTTP_MAX_ATTEMPTS counts total requests rather than retries after a first try
             if status != THROTTLED_STATUS and attempt >= settings.HTTP_MAX_ATTEMPTS:
@@ -151,6 +156,9 @@ def fetch_bars(client, symbol: str, month: date) -> list[Bar]:
     for _ in range(MAX_PAGES):
         page_params = params if token is None else params | {"page_token": token}
         body = client.get_json(BARS_HOST, BARS_PATH, page_params, "bars")
+        if not isinstance(body, dict):
+            # the calendar and assets endpoints answer with a list, so get_json cannot demand a mapping and this is the only place that can
+            raise UnitFetchError(f"{symbol} {month:%Y-%m}: bars endpoint returned {type(body).__name__}, not an object")
         # a holiday answers {"bars":{}}, so indexing straight into the symbol raises KeyError on every closed day of a seven-year run.
         bars.extend(_parse(symbol, (body.get("bars") or {}).get(symbol) or []))
         token = body.get("next_page_token")

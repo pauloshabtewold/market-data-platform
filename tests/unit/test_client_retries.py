@@ -187,3 +187,35 @@ def test_the_bars_request_method_is_get():
 
     # MockTransport accepts any verb, so nothing else here would notice the method silently changing
     assert captured["method"] == "GET"
+
+
+def _scripted_bodies(bodies):
+    """Replays one 200 body per physical request. Bounded like _scripted_transport, and for the same
+    reason: an unbounded transport turns a mutation that breaks the attempt counter into a hang
+    instead of a failure, and a suite that hangs is worse than one that goes red."""
+    remaining = list(bodies)
+
+    def send(request: httpx.Request) -> httpx.Response:
+        assert remaining, "the client made more physical requests than this test scripted"
+        return httpx.Response(200, content=remaining.pop(0))
+
+    return httpx.MockTransport(send)
+
+
+def test_a_two_hundred_whose_body_will_not_parse_retries_on_the_budget_and_fails_the_unit():
+    # a proxy error page and a truncated payload both arrive with a 2xx, so no status in the classification sees them
+    transport = _scripted_bodies([b"<html>502</html>"] * settings.HTTP_MAX_ATTEMPTS)
+    client = AlpacaClient(http=httpx.Client(transport=transport), sleep=lambda delay: None)
+
+    with pytest.raises(UnitFetchError):
+        client.get_json(BARS_HOST, BARS_PATH, {"symbols": "AAPL"}, "bars")
+
+    assert client.request_counts["bars"] == settings.HTTP_MAX_ATTEMPTS
+
+
+def test_a_body_that_parses_on_the_retry_succeeds_rather_than_failing_the_unit():
+    transport = _scripted_bodies([b"<html>502</html>", b'{"bars": {}}'])
+    client = AlpacaClient(http=httpx.Client(transport=transport), sleep=lambda delay: None)
+
+    assert client.get_json(BARS_HOST, BARS_PATH, {"symbols": "AAPL"}, "bars") == {"bars": {}}
+    assert client.request_counts["bars"] == 2

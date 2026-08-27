@@ -200,3 +200,11 @@ def test_a_cursor_that_keeps_advancing_is_bounded_by_the_page_cap(fixtures_dir):
         fetch_bars(client, "AAPL", date(2026, 6, 1))
 
     assert client.pages == MAX_PAGES
+
+
+def test_a_bars_payload_that_is_not_an_object_fails_the_unit_rather_than_raising_attribute_error():
+    # the calendar and assets endpoints answer with a list, so get_json cannot demand a mapping and this caller is the only place that can
+    client = StubClient([[{"t": "2026-06-01T14:30:00Z"}]])
+
+    with pytest.raises(UnitFetchError):
+        fetch_bars(client, "AAPL", date(2026, 6, 1))
