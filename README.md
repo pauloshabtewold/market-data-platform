@@ -84,10 +84,19 @@ is recorded as measured rather than checked against a target.
 
 | Quantity | Sample (5 tickers × 1 month) | Projected (100 × 71) |
 | --- | --- | --- |
-| Bars | 41,723 | 59,246,660 |
+| Bars | 41,723 | 44,871,360 |
 | Regular-session bars | 40,673 | — |
 | Extended-hours share | 2.52% | — |
-| Total relation bytes | 5,603,328 | 7,956,725,760 (≈7.4 GiB) |
+| Total relation bytes | 5,603,328 | ≈5,704 MB (≈5.6 GiB) |
+
+The projection doubles the fifty-ticker half that is loaded — `22,435,680 × 2` and
+`2,852 MB × 2` — rather than scaling the five-ticker sample. An earlier version of this page projected 59,246,660
+bars and ≈7.4 GiB by multiplying the sample column by 1,420, which ran **32% high**: the sample
+month carries 8,344.6 bars per ticker-month against the loaded half's 6,319.9, because June 2026
+sits near this feed's coverage ceiling and the whole window does not. Doubling carries an
+assumption of its own — the second fifty are different symbols, selected by the rule
+`INGEST_LOG.md` records — so this stays a projection until Feature 3 loads them and it becomes a
+measurement.
 
 Extended-hours bars are real on this feed rather than absent, which is why the share is measured
 and reported rather than assumed to be zero.
@@ -138,17 +147,21 @@ against the calendar. All 21 sessions in 2026-06 are full 390-minute days, so th
 | `ORCL` | 7,922 | 96.73% |
 
 The mean is 40,673 ÷ 40,950 = **99.32%**, which is `BARS_PER_TICKER_DAY` ÷ 390 and is the same
-number arrived at from the other direction — and it is near this feed's ceiling rather than typical
-of it. Coverage is not constant across this history, so it is reported per period. Measured over
-the 50 tickers loaded so far, on the same `[open_ts, close_ts)` membership and the same
-`SUM(session_minutes)` denominator: June 2022 pools to **81.01%** over a 13.25–99.90% per-symbol
-range, and June 2025 to **74.77%** over 7.59–99.88%. Across the whole window those 50 symbols pool
-to **77.62%**. The hundred-symbol figure replaces that one once the second half is loaded.
+number arrived at from the other direction — and it is near this feed's ceiling rather than
+typical of it. Coverage is not constant across this history, so it is reported per period.
+Measured over the 50 tickers loaded so far, on the same `[open_ts, close_ts)` membership and the
+same `SUM(session_minutes)` denominator: June 2026 pools to **92.37%** over a 53.54–100.00%
+per-symbol range — seven points below what the five sample tickers read for the same month, which
+is the clearest measure of how unrepresentative they are — June 2022 to **81.01%** over
+13.25–99.90%, and June 2025 to **74.77%** over 7.59–99.88%. Across the whole window those 50
+symbols pool to **77.62%**. The hundred-symbol figure replaces that one once the second half is
+loaded.
 
 The finding this project reports is *where* the missing minutes fall rather than a headline gap,
 and on this sample they are concentrated rather than spread: 277 minutes are missing in total and
-**268 of them are ORCL's**, with three of the five symbols complete. Queries 9 and 10 extend that
-breakdown to the full universe and the full window.
+**268 of them are ORCL's**, with three of the five symbols complete. `db/queries/09_coverage.sql`
+extends that breakdown to every ingested symbol across the whole window; the per-minute query that
+would locate the missing minutes themselves is Feature 4's and is not in this repository yet.
 
 ## Partition methodology
 

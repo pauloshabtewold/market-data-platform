@@ -153,15 +153,21 @@ carries rather than a defect; the missing-unit count is the one that has to be z
 Recorded here because a single month is not a rate and the README used to publish one that could not
 be re-derived. Measured over these 50 symbols against `market_days`, counting only bars inside
 `[open_ts, close_ts)` and dividing by `SUM(session_minutes)` for the same days — the same membership
-the coverage query uses:
+the coverage query uses. Every row names the symbol set it was measured over, because the two that
+share a period do not agree:
 
-| Period | Pooled | Per-symbol range |
+| Period and symbol set | Pooled | Per-symbol range |
 | --- | --- | --- |
-| 2026-06 (the sample month) | 99.32% | 96.73–100.00% |
-| 2022-06 | 81.01% | 13.25–99.90% |
-| 2025-06 | 74.77% | 7.59–99.88% |
-| 2020-08..2026-06, whole window | 77.62% | — |
+| 2026-06, the 50 loaded | 92.37% | 53.54–100.00% |
+| 2026-06, the 5 sample tickers | 99.32% | 96.73–100.00% |
+| 2022-06, the 50 loaded | 81.01% | 13.25–99.90% |
+| 2025-06, the 50 loaded | 74.77% | 7.59–99.88% |
+| 2020-08..2026-06 whole window, the 50 loaded | 77.62% | — |
 
-The sample month is near this feed's ceiling and is not representative. Coverage is a property of the
-symbol and the period together, which is what queries 9 and 10 exist to break down; the whole-window
-figure is superseded once the second fifty are loaded.
+Both 2026-06 rows use the same 8,190-minute denominator, 21 sessions of 390 minutes. The
+seven-point gap between them is the point: the five sample tickers are not a sample of the fifty,
+and the sample month is near this feed's ceiling and is not representative. Coverage is a property
+of the symbol and the period together, which is what `db/queries/09_coverage.sql` exists to break
+down over the ingested symbols; the per-minute query that would locate the missing minutes is
+Feature 4's and is not in this repository yet. The whole-window figure is superseded once the
+second fifty are loaded.
