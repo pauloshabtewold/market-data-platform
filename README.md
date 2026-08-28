@@ -82,28 +82,31 @@ is recorded as measured rather than checked against a target.
 
 ## Sizing
 
-| Quantity | Sample (5 tickers × 1 month) | Projected (100 × 71) |
+| Quantity | Sample (5 tickers × 1 month) | Measured (100 × 71) |
 | --- | --- | --- |
-| Bars | 41,723 | 44,871,360 |
-| Regular-session bars | 40,673 | — |
-| Extended-hours share | 2.52% | — |
-| Total relation bytes | 5,603,328 | ≈5,704 MB (≈5.6 GiB) |
+| Bars | 41,723 | 41,668,537 |
+| Regular-session bars | 40,673 | 41,605,369 |
+| Extended-hours share | 2.52% | 0.15% |
+| Total relation bytes | 5,603,328 | 5,547,909,120 (5,291 MB) |
 
-The projection doubles the fifty-ticker half that is loaded — `22,435,680 × 2` and
-`2,852 MB × 2` — rather than scaling the five-ticker sample. An earlier version of this page projected 59,246,660
-bars and ≈7.4 GiB by multiplying the sample column by 1,420, which ran **32% high**: the sample
-month carries 8,344.6 bars per ticker-month against the loaded half's 6,319.9, because June 2026
-sits near this feed's coverage ceiling and the whole window does not. Doubling carries an
-assumption of its own — the second fifty are different symbols, selected by the rule
-`INGEST_LOG.md` records — so this stays a projection until Feature 3 loads them and it becomes a
-measurement.
+The right-hand column is measured on the loaded universe, not projected onto it. Two earlier
+projections stood here and both are recorded rather than deleted, because the size of the error is
+the useful part. The first multiplied the five-ticker sample by 1,420 and gave 59,246,660 bars and
+≈7.4 GiB — **42% above** what the universe actually holds, because the sample month sits near this
+feed's coverage ceiling at 8,344.6 bars per ticker-month where the full window averages 5,868.8.
+The second doubled the fifty-ticker half to 44,871,360 bars and ≈5,704 MB, which landed within
+**7.7%** on rows and **7.8%** on bytes — the second fifty are slightly thinner than the first, so
+doubling the better-covered half ran a little high. A projection from a representative half beat one
+from an unrepresentative month by a factor of five.
 
 Extended-hours bars are real on this feed rather than absent, which is why the share is measured
 and reported rather than assumed to be zero.
 
-Wall-clock rate: **0.392 s per ticker-month**, measured over the 3,550 units of the fifty-ticker
-load — 1,391.7 s, including a deliberate kill and restart. The full 7,100 units extrapolate to
-**≈46 minutes**: `7100 × 0.392 / 60 = 46.4`.
+Wall-clock rate: **0.358 s per ticker-month**, measured over all 7,100 units of the full universe —
+2,544.6 s in two halves, 1,391.7 s for the first fifty (including a deliberate kill and restart) and
+1,152.9 s for the second. The whole load is **42.4 minutes**, no longer an extrapolation. The
+earlier `7100 × 0.392 / 60 = 46.4` came from the first half alone, whose rate carries the restart;
+the second half ran at 0.325 s per unit.
 
 An earlier version of this page published ≈114 minutes, from timing the five-unit sample at 4.8 s
 and computing `7100 / 5 × 4.8 / 60`. Five units pay once for the first partition DDL and the first
@@ -149,13 +152,14 @@ against the calendar. All 21 sessions in 2026-06 are full 390-minute days, so th
 The mean is 40,673 ÷ 40,950 = **99.32%**, which is `BARS_PER_TICKER_DAY` ÷ 390 and is the same
 number arrived at from the other direction — and it is near this feed's ceiling rather than
 typical of it. Coverage is not constant across this history, so it is reported per period.
-Measured over the 50 tickers loaded so far, on the same `[open_ts, close_ts)` membership and the
-same `SUM(session_minutes)` denominator: June 2026 pools to **92.37%** over a 53.54–100.00%
-per-symbol range — seven points below what the five sample tickers read for the same month, which
-is the clearest measure of how unrepresentative they are — June 2022 to **81.01%** over
-13.25–99.90%, and June 2025 to **74.77%** over 7.59–99.88%. Across the whole window those 50
-symbols pool to **77.62%**. The hundred-symbol figure replaces that one once the second half is
-loaded.
+Measured over all 100 tickers, on the same `[open_ts, close_ts)` membership and the
+same `SUM(session_minutes)` denominator: June 2026 pools to **85.04%** over a 43.94–100.00%
+per-symbol range — fourteen points below what the five sample tickers read for the same month,
+which is the clearest measure of how unrepresentative they are — June 2022 to **77.04%** over
+13.25–99.90%, and June 2025 to **67.49%** over 7.59–99.88%. Across the whole window all 100
+symbols pool to **72.16%**, replacing the 77.62% this page carried while only the first half was
+loaded. The extremes of the 2022 and 2025 ranges are unchanged because both belong to symbols in
+the first fifty; it is the pooled figures that moved.
 
 The finding this project reports is *where* the missing minutes fall rather than a headline gap,
 and on this sample they are concentrated rather than spread: 277 minutes are missing in total and
@@ -201,13 +205,63 @@ of things that can go wrong on `ATTACH` is open. Catching psycopg's `InvalidObje
 instead would have been worse than either: that name *is* `42P17`, so it would swallow the real
 overlap while leaving "already a partition" uncaught and the run dead on the second unit.
 
+## Data provenance
+
+Every bar in this database came from one vendor over one window under one set of parameters, and
+the table below is the whole of it. Nothing is synthesized, back-filled, or carried over from
+another source.
+
+| | |
+| --- | --- |
+| Vendor | Alpaca Market Data v2, `/v2/stocks/bars` |
+| Feed | `iex` — one exchange's prints, not the consolidated tape |
+| Adjustment | `split,spin-off` — prices adjusted for splits and spin-offs, not for dividends |
+| Window | 2020-08-01 .. 2026-06-30, fixed and closed |
+| Granularity | 1-minute bars, `limit=10000`, one page per ticker-month |
+| Universe | 100 tickers, the committed `tickers.txt` |
+| Loaded | 41,668,537 bars over 7,100 units, in two runs on 2026-08-26 and 2026-08-27 |
+| Rejected | 26 bars, by the validation rules, across the whole load |
+| Timestamps | UTC throughout; session bounds come from `market_days`, loaded from Alpaca's calendar |
+
+`INGEST_LOG.md` carries the per-run detail: what each run requested, what came back, how long it
+took, plus the feed comparison and the five corporate-action probes that establish what `iex` and
+`split,spin-off` actually mean for this data.
+
+## Survivorship
+
+**The universe is the 100 companies that were large-cap in 2026, and it was selected then.** That
+is a survivorship-biased sample and every cross-sectional result on it inherits the bias. A company
+that was large-cap in 2020 and had left the index by 2026 is absent, so any backward-looking study
+of this data sees only the firms that made it to the selection date. Measured returns are biased
+upward and measured failure rates downward, by an amount this data cannot itself estimate.
+
+Two narrower consequences are worth naming because they are easy to miss:
+
+- **Delistings are invisible rather than sparse.** A delisted symbol is not a symbol with a short
+  history here; it is a symbol that never appears. The gap it would have left is not observable.
+- **A second filter removed companies renamed inside the window, and that filter cannot be
+  audited.** The selection rule excludes anything renamed between 2020-08 and 2026-06, because such
+  a series changes meaning mid-window. The vendor remaps renamed symbols, so a rename returns a
+  *complete* series under the new ticker and **no completeness check in this repository can detect
+  one** — which means the exclusion rests entirely on the recall of whoever applied it.
+  `INGEST_LOG.md` records this in full, including the three names it was tested against and the
+  fourth that was mistaken for a confirmation. If the recall missed a name, that name is in the
+  universe now, indistinguishable from any other.
+
+Both filters cut in the same direction: they remove discontinuity. What is left is a continuously
+listed, continuously named large-cap universe, which is a cleaner dataset and a narrower claim. The
+fix is a point-in-time constituent list, which this project does not have. The honest statement is
+that this is a study of 100 companies that were large-cap in August 2026, over 2020–2026 — not a
+study of the market over 2020–2026.
+
 ## Limitations
 
 - **IEX coverage is not complete, and it varies by symbol and by period far more than any one
   month shows.** On the 2026-06 sample it runs 96.73–100.00% of regular-session minutes by symbol,
-  averaging 99.32% — but that month is close to the ceiling. Over the 50 tickers loaded across the
-  whole window it pools to **77.62%**, and individual symbol-months run as low as **7.59%**. Read
-  the single-month figure as an upper bound, not as a rate.
+  averaging 99.32% — but that month is close to the ceiling. Over all 100 tickers across the
+  whole window it pools to **72.16%**, and individual symbol-months run as low as **7.59%**. Read
+  the single-month figure as an upper bound, not as a rate: the five sample tickers overstate the
+  universe by 27 points.
   A missing minute is data and is never synthesized or forward-filled, so gaps in `bars` are gaps
   in the tape as this feed saw it.
 - **There is no incremental ingest.** A run re-walks every requested unit and skips the ones

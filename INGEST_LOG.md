@@ -171,3 +171,76 @@ of the symbol and the period together, which is what `db/queries/09_coverage.sql
 down over the ingested symbols; the per-minute query that would locate the missing minutes is
 Feature 4's and is not in this repository yet. The whole-window figure is superseded once the
 second fifty are loaded.
+
+**It is superseded now** — the hundred-symbol figures are in the 2026-08-27 entry below. The rows
+above are kept as what the first half measured, not as the best available number.
+
+
+## 2026-08-27 — second half of the universe, 50 tickers × 71 months
+
+The last 50 lines of `tickers.txt` over the same window, 2020-08-01..2026-06-30. With this run the
+universe is fully loaded and no symbol has a NULL `first_bar_ts`.
+
+- **Feed:** `iex`
+- **Adjustment:** `split,spin-off`
+- **Limit:** 10000, still one page per ticker-month — the largest unit in the whole universe holds
+  9,760 rows and no unit reached the limit
+- **Window per unit:** `<M>-01T00:00:00Z` to `<last day>T23:59:59Z`, both bounds inclusive
+- **Units:** 3,550 — 50 tickers × 71 months, every one completed, none skipped
+- **Requests:** 3,550 bars requests plus one calendar and one assets, at **184.9 per minute**
+  against a 200/min bucket — the closest this pipeline has run to its own rate limit
+
+Result: **19,232,857 bars**, **2 rejected**, **no failed units**, in **1,152.9 s (19.2 minutes)** —
+**0.325 s per unit**, against the first half's 0.392 s, which carried a deliberate kill and restart.
+
+### The universe, both halves together
+
+- **41,668,537 bars** over **7,100 units**, spanning 2020-08-03 12:05 to 2026-06-30 20:54 UTC
+- **71 monthly partitions**, unchanged — the second half adds symbols, not months
+- **26 bars rejected** in total by validation, 24 in the first half and 2 in this one
+- **41,605,369 rows** inside the regular session, so the extended-hours share is **63,168 rows,
+  0.15%** — lower than the first half's 0.26%, because the second fifty trade less outside the
+  session rather than because anything changed in the pipeline
+- **100 symbols**, all with `first_bar_ts` set; `bars` reconciles against
+  `sum(ingest_progress.row_count)` at 41,668,537 on both sides
+- On-disk size is **5,291 MB** (5,547,909,120 bytes), summed with `pg_total_relation_size` over the
+  child partitions; against the parent it still reads `0 bytes`
+- **Wall clock for the whole universe is 2,544.6 s, 42.4 minutes**, across the two runs
+
+### Coverage by period, all 100 symbols
+
+Same method as the fifty-symbol table above — bars inside `[open_ts, close_ts)` over
+`SUM(session_minutes)` for the same days:
+
+| Period | Pooled | Per-symbol range |
+| --- | --- | --- |
+| 2026-06 | 85.04% | 43.94–100.00% |
+| 2022-06 | 77.04% | 13.25–99.90% |
+| 2025-06 | 67.49% | 7.59–99.88% |
+| 2020-08..2026-06, whole window | 72.16% | — |
+
+The 2022 and 2025 ranges are unchanged from the fifty-symbol table because both extremes belong to
+symbols in the first fifty; only the pooled figures moved. The gate query reports
+`missing_units 0`, `coverage_pct 72.16`, `uningested_symbols 0`.
+
+### Two deviations from the plan, recorded rather than smoothed over
+
+**This run was launched by the session, not by the operator.** Section 0 assigns both long ingests
+to the human. The owner instructed otherwise for this one; it is recorded here for the same reason
+`bugs.md` D-101 records the `nohup` deviation — the plan's text and what happened should not differ
+silently.
+
+**The run was narrowed to the second fifty with `--symbol` flags, so it skipped nothing.** The
+plan's intent for this feature is the bare `--tickers-file tickers.txt` form, where the first fifty
+are skipped by resume and only the second fifty are fetched — the resumability payoff made visible.
+Narrowing produced identical data but `skipped=0`, because the first fifty were never enumerated.
+The skip was demonstrated immediately afterwards instead, by running the bare form against the
+now-complete universe: `units=0 skipped=7100 bars_requests=0`, which is the same property over
+twice the ground, at the cost of two requests. The gate reads the coverage query rather than the
+skip count, so nothing in it depended on this.
+
+**One more, about the command itself.** The plan's launch line builds its `--symbol` flags with an
+unquoted `$(... | sed 's/^/--symbol /')`. That works in bash and does **not** work in zsh, which
+does not word-split unquoted command substitutions unless `SH_WORD_SPLIT` is set — the whole list
+arrives as a single argument and argparse rejects it. Piping through `xargs` is shell-agnostic and
+is what this run used; the argument vector was checked to be 102 arguments before launching.
