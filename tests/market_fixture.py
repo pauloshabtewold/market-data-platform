@@ -136,7 +136,8 @@ def _ensure_partition(conn, day: date) -> None:
 def load_symbol(dsn: str, symbol: str, days=TRADING_DAYS, *, extended_hours: bool = False) -> None:
     """Five in-session bars per day, written symbol-major and ts-ascending as the pipeline writes."""
     with connect(dsn) as conn:
-        _ensure_partition(conn, TRADING_DAYS[0])
+        for day in days:
+            _ensure_partition(conn, day)
         conn.execute(
             "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
             " VALUES (%s, %s, 'X', true, %s)",
@@ -168,3 +169,137 @@ def load(dsn: str, symbols=("AAA",), *, extended_hours: bool = False) -> str:
     for symbol in symbols:
         load_symbol(dsn, symbol, extended_hours=extended_hours)
     return dsn
+
+
+# ---------------------------------------------------------------------------
+# Shapes the four queries in commit 2 need that the core calendar cannot carry.
+
+
+def load_flat_symbol(dsn: str, symbol: str, days=TRADING_DAYS) -> None:
+    """Every bar at the same price, so realized volatility must come out exactly zero."""
+    with connect(dsn) as conn:
+        for day in days:
+            _ensure_partition(conn, day)
+        conn.execute(
+            "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+            " VALUES (%s, %s, 'X', true, %s)",
+            (symbol, symbol, open_ts(min(days))),
+        )
+        for day in days:
+            for minute in range(BARS_PER_SESSION):
+                conn.execute(
+                    "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                    " VALUES (%s, %s, 50, 50, 50, 50, 100, 1, 50)",
+                    (symbol, bar_ts(day, minute)),
+                )
+        conn.commit()
+
+
+def load_sparse_symbol(dsn: str, symbol: str, days, minutes, *, scrambled: bool = False) -> None:
+    """Bars only at the named minutes, so a return can span more than one minute."""
+    with connect(dsn) as conn:
+        for day in days:
+            _ensure_partition(conn, day)
+        conn.execute(
+            "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+            " VALUES (%s, %s, 'X', true, %s)",
+            (symbol, symbol, bar_ts(min(days), min(minutes))),
+        )
+        for day in days:
+            for minute in (sorted(minutes, reverse=True) if scrambled else minutes):
+                price = 100 + minute
+                conn.execute(
+                    "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, 100, 1, %s)",
+                    (symbol, bar_ts(day, minute), price, price, price, price, price),
+                )
+        conn.commit()
+
+
+# A run of consecutive weekday sessions, all inside 2026-04 so every one is EDT and no DST
+# transition muddies the row count. Query 2's frame counts rows, so distinguishing a rolling
+# 30-day window from the expanding default needs more than 30 of them.
+RUN_START = date(2026, 4, 1)
+RUN_LENGTH = 40
+
+
+def run_days(n: int = RUN_LENGTH) -> list[date]:
+    days, day = [], RUN_START
+    while len(days) < n:
+        if day.weekday() < 5:
+            days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+def load_run_calendar(dsn: str, days=None, *, scrambled: bool = False) -> list[date]:
+    days = days or run_days()
+    # market_days written out of day order, so row_number() OVER () would number them wrongly
+    # and only an explicit ORDER BY day recovers the trading-day ordinal
+    order = sorted(days, key=lambda d: (d.toordinal() * 7) % 13) if scrambled else days
+    with connect(dsn) as conn:
+        for day in order:
+            conn.execute(
+                "INSERT INTO market_days (day, open_ts, close_ts, session_minutes)"
+                " VALUES (%s, %s, %s, 390) ON CONFLICT (day) DO NOTHING",
+                (day, datetime(day.year, day.month, day.day, 13, 30, tzinfo=UTC),
+                 datetime(day.year, day.month, day.day, 20, 0, tzinfo=UTC)),
+            )
+        conn.commit()
+    return days
+
+
+def load_run_symbol(dsn: str, symbol: str, closes, days=None, *, scrambled: bool = False) -> None:
+    """One bar per session at a caller-supplied close, so daily returns are hand-computable."""
+    days = days or run_days()
+    with connect(dsn) as conn:
+        for day in days:
+            _ensure_partition(conn, day)
+        conn.execute(
+            "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+            " VALUES (%s, %s, 'X', true, %s)"
+            " ON CONFLICT (symbol) DO NOTHING",
+            (symbol, symbol, datetime(days[0].year, days[0].month, days[0].day, 13, 30, tzinfo=UTC)),
+        )
+        pairs = list(zip(days, closes))
+        if scrambled:
+            # heap order is insert order on a fresh table, so this makes physical order differ
+            # from ts order -- the only condition under which a missing window ORDER BY shows
+            pairs = sorted(pairs, key=lambda p: (p[0].toordinal() * 7) % 13)
+        for day, close in pairs:
+            stamp = datetime(day.year, day.month, day.day, 13, 30, tzinfo=UTC)
+            conn.execute(
+                "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                " VALUES (%s, %s, %s, %s, %s, %s, 100, 1, %s)",
+                (symbol, stamp, close, close, close, close, close),
+            )
+        conn.commit()
+
+
+# A deliberately scrambled insert order. On a fresh table heap order is insert order, so this
+# makes physical order differ from ts order -- which is the only condition under which a window
+# function missing its ORDER BY gives a different answer. With the bars written in ts order the
+# mistake is invisible, which is exactly why the spec calls the clause "not optional".
+_SCRAMBLE = (4, 1, 3, 0, 2)
+
+
+def load_scrambled_symbol(dsn: str, symbol: str, days=TRADING_DAYS) -> None:
+    with connect(dsn) as conn:
+        for day in days:
+            _ensure_partition(conn, day)
+        conn.execute(
+            "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+            " VALUES (%s, %s, 'X', true, %s)",
+            (symbol, symbol, open_ts(min(days))),
+        )
+        for day in days:
+            off = _DAY_OFFSET[day]
+            for minute in _SCRAMBLE:
+                o, h, low, c, vol = _BAR_SHAPE[minute]
+                conn.execute(
+                    "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (symbol, bar_ts(day, minute), o + off, h + off, low + off, c + off,
+                     vol, 4, (h + low) / 2 + off),
+                )
+        conn.commit()

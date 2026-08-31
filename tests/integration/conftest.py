@@ -61,7 +61,11 @@ def query_sql(repo_root):
         text = (repo_root / "db" / "queries" / name).read_text()
         # a file that declares none is legal -- the spec binds no parameters for several of the ten -- and must render rather than raise
         header = re.findall(r"-- parameters:([^\n]*)", text)
-        declared = set(header[0].split()) if header else set()
+        # "none" is the explicit empty declaration: 4, 7, 8 and 10 are deliberately whole-window and the spec requires that case be named in the file rather than inferred from a missing header, so the word has to parse to no parameters rather than to one called "none"
+        declared = {token for token in header[0].split() if token.startswith(":")} if header else set()
+        assert declared or not header or header[0].split()[:1] == ["none"], (
+            f"{name}: the parameter header names neither a :parameter nor 'none'"
+        )
         substituted = {f":{n}" for n in _PLACEHOLDER.findall(text)}
         # a parameter added to the body without being declared in the header would otherwise be bound silently and never checked
         assert substituted == declared, f"{name}: body binds {substituted}, header declares {declared}"
