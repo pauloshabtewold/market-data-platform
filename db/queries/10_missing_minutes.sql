@@ -25,8 +25,9 @@
 -- bounded is NOT MATERIALIZED for the same reason 09_coverage.sql's is: it is referenced
 -- twice, so Postgres materialises it by default, and a materialised CTE carries no
 -- statistics for the planner to cost a hash join against. Without it this plans as a merge
--- join that sorts every bar in the database. Measured: 131.1 s serial with a 1.2 GB spill,
--- against 42.6 s with 71 parallel scans, 2 workers and no spill.
+-- join that sorts every bar in the database. One observation per variant, not a median: 131.1 s
+-- serial with a 1.2 GB spill, against 42.6 s with 71 parallel scans, 2 workers and no spill. The
+-- structural half is a plan property and holds; treat the two timings as indicative, not a ratio.
 WITH bounded AS NOT MATERIALIZED (
     SELECT day, open_ts, close_ts, session_minutes
     FROM market_days

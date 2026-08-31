@@ -19,11 +19,11 @@ on the loaded data, not projected onto it.
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 docker compose up -d --wait db
 .venv/bin/python -m db.migrate            # separate operator action; ingest never migrates
-.venv/bin/python -m ingest
+.venv/bin/python -m ingest --tickers-file tickers.txt
 .venv/bin/python -m pytest
 ```
 
-Copy `.env.example` to `.env` first. The three measured constants in it are recorded rather
+Copy `.env.example` to `.env` first. The four measured constants in it are recorded rather
 than defaulted, because a silently-defaulted value is the failure they exist to prevent.
 
 ## What's interesting here

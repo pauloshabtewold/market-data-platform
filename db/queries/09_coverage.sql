@@ -8,8 +8,9 @@
 -- materialises it by default, and a materialised CTE carries no statistics -- the planner
 -- then cannot cost a hash join against it, falls back to a merge join, and sorts every bar
 -- in the database. Inlining it restores market_days' statistics and the plan becomes a
--- parallel hash join. Measured on the full universe: 173.9 s serial with a merge join and a
--- spill, against 32.7 s with 71 parallel scans, 2 workers and no spill at all.
+-- parallel hash join. Measured on the full universe, medians of three interleaved runs: 179.4 s
+-- serial with a merge join and a spill, against 58.3 s with 71 parallel scans, 2 workers and no
+-- spill at all. docs/QUERY_PERFORMANCE.md carries the four-variant table and the run spread.
 WITH bounded AS NOT MATERIALIZED (
     SELECT m.day, m.open_ts, m.close_ts, m.session_minutes
     FROM market_days m

@@ -227,8 +227,8 @@ symbols in the first fifty; only the pooled figures moved. The gate query report
 
 **This run was launched by the session, not by the operator.** Section 0 assigns both long ingests
 to the human. The owner instructed otherwise for this one; it is recorded here for the same reason
-`bugs.md` D-101 records the `nohup` deviation — the plan's text and what happened should not differ
-silently.
+the earlier `nohup` deviation was recorded — the plan's text and what happened should not
+differ silently.
 
 **The run was narrowed to the second fifty with `--symbol` flags, so it skipped nothing.** The
 plan's intent for this feature is the bare `--tickers-file tickers.txt` form, where the first fifty

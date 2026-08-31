@@ -55,11 +55,15 @@ an omission. Three things make it the right one:
   `shared_buffers` displaces the page cache the query depends on.
 
 **Three Class C queries spill, and that is not a defect.** At 4 MB, measured on the queries as
-they ship: `04_volume_profile.sql` **655 MB**, `07_vwap_check.sql` **797 MB**,
-`08_top_minutes.sql` **576 MB**, all `external merge`. Nothing is wrong with them — they
-aggregate 41.7M rows into ~148k groups and that sort does not fit in 4 MB at any sane setting.
-It costs them wall-clock and costs the gate nothing, because spills land in `Temp Read/Written`
-and every Class C verdict is a plan property.
+they ship, each spill is three concurrent per-worker external merges rather than one, and the
+figure this table used to publish was the smallest of the three — the leader's. Per-worker range
+and root-node temp total: `04_volume_profile.sql` **671,080–784,944 kB** (root `temp
+read=824,411 written=825,400`, **6.30 GiB**); `07_vwap_check.sql` **816,464–893,824 kB** (root
+`temp read=971,967 written=973,048`, **7.42 GiB**); `08_top_minutes.sql` **590,112–644,504 kB**
+(root `temp read=705,564 written=706,482`, **5.39 GiB**), all `external merge`. Nothing is wrong
+with them — they aggregate 41.7M rows into ~148k groups and that sort does not fit in 4 MB at
+any sane setting. It costs them wall-clock and costs the gate nothing, because spills land in
+`Temp Read/Written` and every Class C verdict is a plan property.
 
 The two coverage queries were different: their 1.2 GB sorts came from a merge join the query was
 forcing, and fixing the plan removed them entirely — at the same 4 MB. That is a plan problem
@@ -101,6 +105,14 @@ object of `EXPLAIN (…, FORMAT JSON)` and the first `Buffers: shared hit=… re
 same plan in text form. These are different output paths in Postgres, and the harness raises
 rather than warns if they disagree.
 
+**Every measurement here is also a fresh connection.** Each harness spawns a new `docker compose
+exec` per query, which pays catalog and sort-operator lookups a warm backend already has cached
+— so the published counts are cold and self-consistent with each other. Running the ten
+committed query files five times inside one continuous `psql` session instead gives root-block
+counts 2–6 blocks lower — `06_daily_rollup.sql` settles at 414 against the published 420,
+`03_gaps.sql` at 418 against 431 — a difference under 1.5% on a ~400-block base that moves no
+target or ratio in this document.
+
 ## The heap the numbers rest on
 
 Class B's gated number moves by **54–64× on the heap's write order alone**, so the layout is
@@ -108,9 +120,11 @@ part of the evidence rather than an assumption behind it. This database is also 
 provenance — the first fifty symbols were restored from a `pg_dump` and the second fifty loaded
 live — and no before-measurement was taken at the time.
 
-`pg_stats.correlation` cannot discriminate this (it reads 0.3279 here, which is evidence of
-nothing). Two `ctid` queries can, and they were run over **every symbol in every partition**
-rather than as a spot check:
+`pg_stats.correlation` cannot discriminate this — re-measured on 2026-08-31, after this
+feature's own mandated `VACUUM (ANALYZE)`, the parent-inherited `symbol` correlation reads
+0.0067, `bars_2026_06` alone reads 0.0260, and across all 71 children it runs −0.0076 to 0.0843,
+mean 0.0320, which is evidence of nothing either way. Two `ctid` queries can discriminate it,
+and they were run over **every symbol in every partition** rather than as a spot check:
 
 | partitions | rows checked | physical `ts` inversions | symbols split across runs | worst symbol's share of a partition |
 | --- | --- | --- | --- | --- |
@@ -342,10 +356,17 @@ reads `ingest_progress`, which no one has vacuumed by hand — it sits at **82.2
 blocks changes nothing, and the prediction still holds at 0.42%.
 
 **Wall-clock at that ceiling is a wash and is not portable, exactly as the design predicted.**
-Query 9's forced scan is 105,024 ms against 92,575 free — 0.88×, *slower*. Query 10's is
-102,370 ms against 133,978 — 1.31×, faster. Two queries of the same shape against the same
-index, disagreeing in sign. The blocks, meanwhile, agree with the bytes to two figures on both.
-That gap is the whole argument for gating on blocks.
+An earlier capture had query 9's forced scan at 105,024 ms against 92,575 free — 0.88×,
+*slower* — and query 10's at 102,370 ms against 133,978 free — 1.31×, faster. The 2026-08-31
+from-scratch re-capture in `notes/feature_4/plans/` reverses both: query 9 forced now runs
+**51,035 ms** against **122,178 ms** free — **2.39× faster** — and query 10 forced runs
+**50,361 ms** against **89,312 ms** free — **1.77× faster**. Which side wins flips completely
+between the two eras rather than merely disagreeing within one of them, and a full reversal
+argues the wash harder than the earlier split verdict did. The comparison is also serial against
+parallel, not two queries of the same shape against the same index: the forced variant runs at
+`max_parallel_workers_per_gather=0` while the free choice launches 2 workers over 71 parallel
+scans. The blocks, meanwhile, agree with the bytes to two figures on both. That gap is the whole
+argument for gating on blocks.
 
 Neither planner ever chose the index-only scan on its own: free-choice block ratio **1.00×** for
 both, which is the seq scan. The mechanism is real, it does what it always said it did, and it
@@ -391,6 +412,22 @@ next to the other five: it is the same plan and the same 423 blocks, differing o
 page cache happened to hold. It is also the reason the table above reports a median of five
 rather than a single number.
 
+**Two further five-run sweeps on 2026-08-31 say the same thing, and the contrast between what
+moved and what did not is the point.** The root blocks came back **identical to the block** in
+both — 423, 431 and 420 for Class A, and 25,125 → 830 for Class B — while every median moved and
+the Class B wall-clock ratio read 7.19× and then 7.87× against the 7.00× above:
+
+| | table above | re-run | re-run |
+| --- | ---: | ---: | ---: |
+| `01_volatility.sql` | 49.0 ms | 53.0 ms | 55.2 ms |
+| `03_gaps.sql` | 26.8 ms | 28.2 ms | 25.6 ms |
+| `06_daily_rollup.sql` | 26.7 ms | 30.0 ms | 29.6 ms |
+| query 2, wall-clock ratio | 7.00× | 7.19× | 7.87× |
+
+The medians above stand as the original measurement; these are a different day's cache and are
+recorded as corroboration rather than as a replacement. All three queries pass on all three
+sweeps, and no block count has moved across any of them.
+
 ## Class B — query 2, the one query with a selective filter
 
 Query 2 touches 2 symbols of 100. That is the only query in the set where an index can make it
@@ -401,17 +438,22 @@ which has existed since Feature 1, so there is no untuned state to measure. Sect
 `enable_indexscan=off; enable_bitmapscan=off; enable_indexonlyscan=off` in the same session
 rather than dropping and rebuilding a primary key over 41.7M rows to arrive at the same number.
 
+`:symbol_a = AAPL`, `:symbol_b = MSFT`, `:start = 2026-04-01`, `:end = 2026-06-30` — the same
+window Class A binds.
+
 | | root blocks | median exec | root node |
 | --- | ---: | ---: | --- |
 | simulated before | 25,125 | 561.8 ms | `WindowAgg` |
 | after | **830** | 80.3 ms | `WindowAgg` |
 | **ratio** | **30.27×** | 7.00× | |
 
-**Blocks 30.27× against a ≥10× target — passes.** Wall-clock moved 7.00× over the same pair,
-and the gap between those two numbers is the entire argument for gating on blocks: a stopwatch
-tuned to 10× would have called this query finished at less than a quarter of the block
-reduction it actually achieves, and a stopwatch on a colder cache would have called it done
-sooner still.
+**Blocks 30.27× against a ≥10× target — passes**, and two later five-run sweeps read the same
+25,125 and 830 to the block while their wall-clock ratios came out at 7.19× and 7.87× (see Class
+A above) — which is this section's argument demonstrating itself rather than asserting itself.
+Wall-clock moved 7.00× over the same pair, and the gap between those two numbers is the entire
+argument for gating on blocks: a stopwatch tuned to 10× would have called this query finished at
+less than a quarter of the block reduction it actually achieves, and a stopwatch on a colder
+cache would have called it done sooner still.
 
 This number is only meaningful because of the heap it was measured on. On a day-major heap the
 same query and the same index measure 1.13–1.42×, and the gate fails. See
@@ -422,8 +464,12 @@ every symbol on ~1% of the pages.
 
 ### The hot-window partial index — provisionally kept
 
-Created on the four recent **child** partitions directly, never on the parent, with
-`HOT_WINDOW_MONTHS = 4` fixing the cutoff at `INGEST_END` − 4 months:
+Created on the four recent **child** partitions directly, never on the parent. The cutoff is
+`date_trunc('month', INGEST_END − (HOT_WINDOW_MONTHS − 1) months)` with `HOT_WINDOW_MONTHS = 4`
+— the four most recent **whole** months, 2026-03 through 2026-06. The naive reading,
+`INGEST_END` − 4 months with no truncation to month start, gives `2026-02-28` and would pull
+`bars_2026_02` into the set instead; Feature 10 has to re-derive this cutoff by hand for the RDS
+copy and needs the whole-month rule, not the naive one, to land on the same four partitions:
 
 ```sql
 CREATE INDEX bars_2026_0N_hot_idx ON bars_2026_0N (ts, symbol) INCLUDE (open, close)
@@ -439,10 +485,10 @@ keyset-paginated, reading only `open` and `close`:
 | inherited `(ts, symbol)` | 1,012 | 0 | 4 |
 | with the partial index | **16** | **4** | 0 |
 
-**63.25× fewer blocks, and the planner chose it unprompted.** 134 MB across four partitions,
-built in 8 s. The verdict is **provisional**: there is no endpoint until Feature 7, so this
-measures the `.sql` form of the same access path rather than the endpoint itself. Feature 7
-confirms or reverses it, and whichever feature drops it says so here.
+**63.25× fewer blocks, and the planner chose it unprompted.** 128 MB (134,217,728 bytes) across
+four partitions, built in 8 s. The verdict is **provisional**: there is no endpoint until
+Feature 7, so this measures the `.sql` form of the same access path rather than the endpoint
+itself. Feature 7 confirms or reverses it, and whichever feature drops it says so here.
 
 Two things about the placement are rules rather than preferences, both verified: creating this
 on the *parent* propagates the predicate to every child, so every pre-2026 partition gets a
