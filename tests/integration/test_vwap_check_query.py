@@ -1,7 +1,5 @@
 from decimal import Decimal
 
-import pytest
-
 from psycopg.rows import dict_row
 
 from db.session import connect
@@ -96,16 +94,23 @@ def test_the_session_bar_count_excludes_the_bar_exactly_on_close_ts(migrated_dsn
     assert row["extended_bars"] == 2
 
 
-def test_the_typical_price_reconstruction_is_reported_beside_the_feeds_vwap(migrated_dsn, query_sql):
-    dsn = load(migrated_dsn)
+def test_the_query_reads_only_the_columns_the_covering_index_carries(query_sql, repo_root):
+    body = (repo_root / "db" / "queries" / "07_vwap_check.sql").read_text()
 
-    row = _by_key(_read(dsn, query_sql))[("AAA", PLAIN_TUESDAY)]
-
-    # the fixture sets each bar's vwap to (high + low) / 2 while the reconstruction uses
-    # (high + low + close) / 3, so the two disagree by a known nonzero amount. that column is
-    # what separates a feed inconsistency from a session one
-    assert row["vwap_typical"] != row["vwap_session"]
-    assert row["typical_price_bp"] != Decimal("0.0000")
+    # This file's whole Class C evidence rests on the covering index being able to serve it
+    # index-only, and that index is (symbol, ts) INCLUDE (vwap, volume). Reading any other bars
+    # column makes an index-only scan impossible by construction -- no plan, no tuning and no
+    # VACUUM recovers it. An earlier draft reconstructed a typical price from high, low and
+    # close; measured, the forced scan then reported 0 index-only scans and 682,813 root blocks
+    # against the seq scan's 514,260 -- 0.75x, worse than what it replaced -- and the byte-ratio
+    # prediction missed by 60%. Asserting the file text is weak, and it is the only instrument
+    # that catches the column being added back.
+    select_body = body[body.index("WITH stamped"):]
+    for forbidden in ("b.high", "b.low", "b.close", "s.high", "s.low", "s.close",
+                      "high +", "+ low", "+ close"):
+        assert forbidden not in select_body, forbidden
+    for needed in ("b.vwap", "b.volume", "b.symbol", "b.ts"):
+        assert needed in select_body, needed
 
 
 def test_every_figure_stays_numeric_and_exact(migrated_dsn, query_sql):
@@ -115,8 +120,7 @@ def test_every_figure_stays_numeric_and_exact(migrated_dsn, query_sql):
 
     # this query crosses no float boundary: there is no corr, sqrt, ln or percentile_cont in it,
     # so unlike queries 1, 2 and 3 it is exact end to end
-    for column in ("vwap_session", "vwap_all_hours", "vwap_typical",
-                   "extended_hours_bp", "typical_price_bp"):
+    for column in ("vwap_session", "vwap_all_hours", "extended_hours_bp"):
         assert isinstance(row[column], Decimal), column
 
 

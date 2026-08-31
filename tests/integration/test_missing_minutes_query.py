@@ -1,7 +1,6 @@
 from datetime import date
 from decimal import Decimal
 
-import pytest
 from psycopg.rows import dict_row
 
 from db.session import connect

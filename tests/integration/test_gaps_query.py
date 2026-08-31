@@ -1,7 +1,5 @@
 from decimal import Decimal
 
-import pytest
-
 from db.session import connect
 from tests.market_fixture import (
     DST_FRIDAY_EST,

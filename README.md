@@ -42,6 +42,14 @@ coverage pools to **72.16%** of regular-session minutes across the full universe
 individual symbol-months run as low as **7.59%**. A single well-covered month reads at
 99.32% and is an upper bound, not a rate.
 
+**The ten analytical queries are gated on blocks read, not on a stopwatch.** Blocks touched are
+a property of the plan — the same number on a warm cache, a cold one, or RDS — while wall-clock
+is mostly a measure of what the page cache happened to hold. The one query with a selective
+filter reads **30.27× fewer blocks** after tuning while the clock moves only 7×, and the six
+that must read every row are held to evidence of optimality instead: the parallel plan, a
+candidate index built and shown not to be chosen, and a byte ratio used as a prediction that
+had to survive being tested.
+
 **There is no incremental ingest.** A run re-walks every requested unit and skips what is
 already recorded. Widening the window and re-running is the supported path.
 
@@ -54,6 +62,8 @@ api/        empty — the read API is not built yet
 tests/      unit and integration suites, run in CI
 ```
 
-[Methodology](docs/METHODOLOGY.md) covers sizing, partitioning, provenance and survivorship,
-including two earlier projections kept rather than deleted so the size of each error stays
-visible. [INGEST_LOG.md](INGEST_LOG.md) is the run-by-run record.
+[Query performance](docs/QUERY_PERFORMANCE.md) has the before/after plans for all ten queries,
+the index decisions including two negative results, and the measurement conditions every number
+depends on. [Methodology](docs/METHODOLOGY.md) covers sizing, partitioning, provenance and
+survivorship, including two earlier projections kept rather than deleted so the size of each
+error stays visible. [INGEST_LOG.md](INGEST_LOG.md) is the run-by-run record.

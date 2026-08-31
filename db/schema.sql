@@ -19,6 +19,11 @@ CREATE TABLE bars (
     PRIMARY KEY (symbol, ts)
 ) PARTITION BY RANGE (ts);
 
+-- the universe-wide endpoints sort by (ts, symbol), which the PK cannot serve. on the parent, so
+-- every child the pipeline creates later inherits it; contrast the hot-window partial index, which
+-- is created on recent children directly and is deliberately not here
+CREATE INDEX bars_ts_symbol_idx ON bars (ts, symbol);
+
 CREATE TABLE symbols (
     symbol       text PRIMARY KEY,
     name         text,
@@ -29,9 +34,12 @@ CREATE TABLE symbols (
 
 CREATE TABLE market_days (
     day             date PRIMARY KEY,
-    open_ts         timestamptz,
-    close_ts        timestamptz,
-    session_minutes int
+    -- session_minutes is derived from close_ts - open_ts, so a NULL in any of the three makes every
+    -- coverage denominator NULL and a non-positive session divides by zero or runs negative
+    open_ts         timestamptz NOT NULL,
+    close_ts        timestamptz NOT NULL,
+    session_minutes int NOT NULL,
+    CONSTRAINT market_days_session_minutes_positive CHECK (session_minutes > 0)
 );
 
 CREATE TABLE ingest_progress (
