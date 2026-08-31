@@ -115,7 +115,7 @@ def load_calendar(dsn: str) -> None:
         conn.commit()
 
 
-def _ensure_partition(conn, day: date) -> None:
+def ensure_partition(conn, day: date) -> None:
     name = f"bars_{day.year}_{day.month:02d}"
     start = date(day.year, day.month, 1)
     end = date(day.year + 1, 1, 1) if day.month == 12 else date(day.year, day.month + 1, 1)
@@ -137,7 +137,7 @@ def load_symbol(dsn: str, symbol: str, days=TRADING_DAYS, *, extended_hours: boo
     """Five in-session bars per day, written symbol-major and ts-ascending as the pipeline writes."""
     with connect(dsn) as conn:
         for day in days:
-            _ensure_partition(conn, day)
+            ensure_partition(conn, day)
         conn.execute(
             "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
             " VALUES (%s, %s, 'X', true, %s)",
@@ -179,7 +179,7 @@ def load_flat_symbol(dsn: str, symbol: str, days=TRADING_DAYS) -> None:
     """Every bar at the same price, so realized volatility must come out exactly zero."""
     with connect(dsn) as conn:
         for day in days:
-            _ensure_partition(conn, day)
+            ensure_partition(conn, day)
         conn.execute(
             "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
             " VALUES (%s, %s, 'X', true, %s)",
@@ -199,7 +199,7 @@ def load_sparse_symbol(dsn: str, symbol: str, days, minutes, *, scrambled: bool 
     """Bars only at the named minutes, so a return can span more than one minute."""
     with connect(dsn) as conn:
         for day in days:
-            _ensure_partition(conn, day)
+            ensure_partition(conn, day)
         conn.execute(
             "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
             " VALUES (%s, %s, 'X', true, %s)",
@@ -254,7 +254,7 @@ def load_run_symbol(dsn: str, symbol: str, closes, days=None, *, scrambled: bool
     days = days or run_days()
     with connect(dsn) as conn:
         for day in days:
-            _ensure_partition(conn, day)
+            ensure_partition(conn, day)
         conn.execute(
             "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
             " VALUES (%s, %s, 'X', true, %s)"
@@ -286,7 +286,7 @@ _SCRAMBLE = (4, 1, 3, 0, 2)
 def load_scrambled_symbol(dsn: str, symbol: str, days=TRADING_DAYS) -> None:
     with connect(dsn) as conn:
         for day in days:
-            _ensure_partition(conn, day)
+            ensure_partition(conn, day)
         conn.execute(
             "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
             " VALUES (%s, %s, 'X', true, %s)",
