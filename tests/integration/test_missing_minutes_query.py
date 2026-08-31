@@ -194,3 +194,19 @@ def test_the_rendered_file_declares_exactly_the_parameters_it_binds(query_sql):
     assert ":'" not in rendered
     for name in ("start", "end"):
         assert f"%({name})s" in rendered
+
+
+def test_the_bounded_cte_is_inlined_rather_than_materialised(migrated_dsn, query_sql):
+    dsn = load(migrated_dsn)
+    with connect(dsn) as conn:
+        plan = "\n".join(
+            row[0] for row in conn.execute(
+                "EXPLAIN " + query_sql("10_missing_minutes.sql"),
+                {"start": WINDOW_START, "end": WINDOW_END},
+            ).fetchall()
+        )
+
+    # same directive and same reason as 09_coverage.sql's. measured on the full universe:
+    # 131.1 s serial with a 1.2 GB spill, against 42.6 s with 71 parallel scans and no spill
+    assert "CTE Scan on bounded" not in plan
+    assert "CTE bounded" not in plan

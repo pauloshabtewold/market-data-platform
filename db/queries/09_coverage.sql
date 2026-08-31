@@ -4,7 +4,13 @@
 -- no scalar bound on bars.ts here: this file is Class C and judged on a byte ratio measured on the
 -- unbounded form, which a 100%-true range predicate flips by changing the planner's free choice.
 
-WITH bounded AS (
+-- bounded is NOT MATERIALIZED deliberately. It is referenced three times, so Postgres
+-- materialises it by default, and a materialised CTE carries no statistics -- the planner
+-- then cannot cost a hash join against it, falls back to a merge join, and sorts every bar
+-- in the database. Inlining it restores market_days' statistics and the plan becomes a
+-- parallel hash join. Measured on the full universe: 173.9 s serial with a merge join and a
+-- spill, against 32.7 s with 71 parallel scans, 2 workers and no spill at all.
+WITH bounded AS NOT MATERIALIZED (
     SELECT m.day, m.open_ts, m.close_ts, m.session_minutes
     FROM market_days m
     WHERE m.day >= :'start' AND m.day <= :'end'
@@ -23,15 +29,19 @@ expected AS (
     SELECT symbol, sum(session_minutes)::numeric AS minutes FROM sessions GROUP BY symbol
 ),
 actual AS (
-    SELECT m.symbol, count(*)::numeric AS bars
-    FROM sessions m
+    -- joined to the 1,484-row calendar rather than to the 148,400-row session set, and grouped
+    -- after: the symbol equality key made the join sides 148k against 41.7M, which the planner
+    -- served with a merge join and a 1.2 GB external sort of every bar in the database. dropping
+    -- it costs nothing, because first_bar_ts is MIN(ts) so no bar can precede its own symbol's
+    -- floor, and the outer LEFT JOIN below already discards any symbol not in expected
+    SELECT b.symbol, count(*)::numeric AS bars
+    FROM bounded d
     JOIN bars b
-      ON b.symbol = m.symbol
-     -- the equality key over the New York trading date is what gives the planner a hash: the half-open pair alone is neither mergejoinable nor hashable
-     AND m.day = (b.ts AT TIME ZONE 'America/New_York')::date
-     AND m.open_ts <= b.ts
-     AND m.close_ts > b.ts
-    GROUP BY m.symbol
+      -- the equality key over the New York trading date is what gives the planner a hash: the half-open pair alone is neither mergejoinable nor hashable
+      ON d.day = (b.ts AT TIME ZONE 'America/New_York')::date
+     AND b.ts >= d.open_ts
+     AND b.ts <  d.close_ts
+    GROUP BY b.symbol
 ),
 per_symbol AS (
     SELECT e.symbol,

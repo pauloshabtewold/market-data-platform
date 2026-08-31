@@ -276,3 +276,43 @@ def test_a_symbol_whose_leading_months_failed_is_reported_missing_rather_than_fl
 
     # April and May were in the window and left no progress row, so they are two lost units and not two months the symbol was never expected to cover
     assert summary["missing_units"] == 2
+
+
+def test_the_bounded_cte_is_inlined_rather_than_materialised(loaded, query_sql):
+    with connect(loaded) as conn:
+        plan = "\n".join(
+            row[0] for row in conn.execute(
+                "EXPLAIN " + query_sql("09_coverage.sql"), {"start": START, "end": END}
+            ).fetchall()
+        )
+
+    # NOT MATERIALIZED is a directive rather than a cost decision, so it holds at any data size
+    # and this assertion is plan-shape independent. bounded is referenced three times, so without
+    # it Postgres materialises the CTE, the planner loses market_days' statistics, and it cannot
+    # cost a hash join -- it falls back to a merge join and sorts every bar in the database.
+    # Measured on the full universe: 173.9 s serial with a spill, against 32.7 s with 71 parallel
+    # scans, 2 workers launched and no spill at all
+    assert "CTE Scan on bounded" not in plan
+    assert "CTE bounded" not in plan
+
+
+def test_the_numerator_does_not_depend_on_the_first_bar_floor(migrated_dsn, query_sql):
+    _seed(migrated_dsn)
+    # first_bar_ts is the second session's open while the symbol printed in the first session too.
+    # this is a database that violates the pipeline's own contract, where recompute_first_bar_ts
+    # sets first_bar_ts to MIN(ts) -- checked on the live universe, where all 100 symbols hold it
+    # exactly. The counting join is bounded by market_days alone rather than by the floored
+    # session set, so a bar earlier than its own symbol's floor is still counted; the floor
+    # applies to the denominator, which is what it is for
+    _add_symbol(migrated_dsn, "EARLYBIRD", _ts(FULL_DAYS[1], OPEN_UTC))
+    _add_bars(migrated_dsn, "EARLYBIRD", [
+        _ts(FULL_DAYS[0], OPEN_UTC),
+        _ts(FULL_DAYS[1], OPEN_UTC),
+    ])
+    _progress(migrated_dsn, "EARLYBIRD", START, 2)
+
+    detail = dict(_read(migrated_dsn, query_sql)[:-3])
+
+    # both bars reach the numerator; the denominator is floored to the second and third sessions,
+    # 390 + 210 = 600 minutes, so 100 * 2 / 600 = 0.33
+    assert detail["EARLYBIRD"] == Decimal("0.33")

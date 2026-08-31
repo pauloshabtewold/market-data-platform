@@ -22,7 +22,12 @@
 -- month: 9's denominator is floored at first_bar_ts and this one's is not, deliberately, because
 -- a month a symbol had not yet listed for really did have session minutes it produced no bar in.
 
-WITH bounded AS (
+-- bounded is NOT MATERIALIZED for the same reason 09_coverage.sql's is: it is referenced
+-- twice, so Postgres materialises it by default, and a materialised CTE carries no
+-- statistics for the planner to cost a hash join against. Without it this plans as a merge
+-- join that sorts every bar in the database. Measured: 131.1 s serial with a 1.2 GB spill,
+-- against 42.6 s with 71 parallel scans, 2 workers and no spill.
+WITH bounded AS NOT MATERIALIZED (
     SELECT day, open_ts, close_ts, session_minutes
     FROM market_days
     WHERE day >= :'start'::date AND day <= :'end'::date
