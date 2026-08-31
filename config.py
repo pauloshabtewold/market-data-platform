@@ -1,5 +1,6 @@
 from datetime import date
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +34,23 @@ class Settings(BaseSettings):
     # judged against the PK's number -- which is flattering and cites an index it cannot use
     HEAP_INDEX_COVERING_RATIO: float | None = None
 
+    @model_validator(mode="after")
+    def _hot_window_contains_the_widest_endpoint_window(self):
+        # the floor is derived rather than written as 4, so raising AGG_MAX_WINDOW_DAYS at a later
+        # feature fails here instead of silently leaving the hot index too short to serve it
+        lengths = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+        shortest = min(
+            sum(lengths[(start + i) % 12] for i in range(self.HOT_WINDOW_MONTHS))
+            for start in range(12)
+        )
+        if shortest < self.AGG_MAX_WINDOW_DAYS:
+            raise ValueError(
+                f"HOT_WINDOW_MONTHS={self.HOT_WINDOW_MONTHS} spans as few as {shortest} days,"
+                f" which cannot contain AGG_MAX_WINDOW_DAYS={self.AGG_MAX_WINDOW_DAYS};"
+                " the hot-window index would not cover the widest window an endpoint can ask for"
+            )
+        return self
+
 
 settings = Settings()
 
@@ -44,15 +62,15 @@ _MEASURED_BY = {
 }
 
 # a key added to Settings without a matching entry above would otherwise raise KeyError instead of this function's contract
-_MEASURED_FALLBACK = "a measurement recorded in README.md"
+_MEASURED_FALLBACK = "a measurement recorded in docs/"
 
 
 def require(name: str):
-    # required at use and not at import: these three are measured by the sample ingest, which requiring them at import would have made unrunnable
+    # required at use and not at import: these are measured by runs that config.py refusing to import would have made unrunnable -- the sample ingest for the first three, Feature 4's index sweep for the covering ratio
     value = getattr(settings, name)
     if value is None:
         raise RuntimeError(
             f"{name} is unset; it is measured from {_MEASURED_BY.get(name, _MEASURED_FALLBACK)} and written"
-            " into .env by hand; README.md carries the value and the arithmetic"
+            " into .env by hand; docs/QUERY_PERFORMANCE.md and docs/METHODOLOGY.md carry the value and the arithmetic"
         )
     return value

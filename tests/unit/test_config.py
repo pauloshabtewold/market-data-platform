@@ -83,3 +83,18 @@ def test_every_optional_setting_is_reachable_through_require(monkeypatch):
         monkeypatch.setattr(config.settings, name, None)
         with pytest.raises(RuntimeError, match=name):
             config.require(name)
+
+
+def test_a_hot_window_too_short_for_the_widest_endpoint_window_is_refused():
+    # three consecutive months can be as few as 89 days (Feb+Mar+Apr), which cannot hold a
+    # 90-day request, so the hot-window index would miss rows the endpoint is entitled to ask for
+    with pytest.raises(ValidationError, match="89 days"):
+        Settings(_env_file=None, HOT_WINDOW_MONTHS=3, **REQUIRED)
+
+
+def test_the_hot_window_floor_follows_the_window_it_has_to_contain():
+    # the floor is derived, not the literal 4: widening the endpoint cap past what four months
+    # can guarantee has to fail here rather than leave the index quietly too short
+    assert Settings(_env_file=None, HOT_WINDOW_MONTHS=4, **REQUIRED).HOT_WINDOW_MONTHS == 4
+    with pytest.raises(ValidationError, match="120 days"):
+        Settings(_env_file=None, HOT_WINDOW_MONTHS=4, AGG_MAX_WINDOW_DAYS=121, **REQUIRED)
