@@ -139,6 +139,17 @@ def test_a_bar_outside_the_session_is_never_a_largest_move(migrated_dsn, query_s
     assert [r["symbol"] for r in rows] == ["IN"]
 
 
+def test_a_bar_exactly_at_the_session_open_can_be_a_largest_move(migrated_dsn, query_sql):
+    load_calendar(migrated_dsn)
+    # every other planted bar in this file lands at minute 1, 2, 3...; minute 0 is open_ts itself
+    _plant(migrated_dsn, "OPEN", PLAIN_TUESDAY, 0, Decimal(100), Decimal(150))
+
+    rows = _read(migrated_dsn, query_sql)
+
+    # membership is half-open on this side too, so a bar stamped exactly on open_ts still counts
+    assert [r["symbol"] for r in rows] == ["OPEN"]
+
+
 def test_the_window_is_bounded_at_both_ends(planted, query_sql):
     _plant(planted, "LATER", HALF_DAY, 1, Decimal(100), Decimal(150))
 

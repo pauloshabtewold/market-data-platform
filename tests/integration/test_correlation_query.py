@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from db.session import connect
 from tests.market_fixture import (
     RUN_LENGTH,
+    ensure_partition,
     load_run_calendar,
     load_run_symbol,
     run_days,
@@ -21,14 +23,40 @@ def _read(dsn, query_sql, a="AAA", b="BBB", start=None, end=None, *, heap_order=
     with connect(dsn) as conn:
         if heap_order:
             # the fixture is small enough that the planner index-scans the PK and hands every
-            # window ts order for free, which hides a missing ORDER BY entirely (bugs.md D-122).
-            # production plans this as a bitmap scan, which returns heap order
+            # window ts order for free, which hides a missing ORDER BY entirely. production
+            # plans this as a bitmap scan, which returns heap order
             conn.execute("SET enable_indexscan = off")
         return conn.execute(
             query_sql("02_correlation.sql"),
             {"symbol_a": a, "symbol_b": b,
              "start": start or days[0], "end": end or days[-1]},
         ).fetchall()
+
+
+def _load_decoy_then_true_close(dsn, symbol, days, decoys, closes):
+    """Two bars a session: an earlier decoy at the open and the true close five minutes later.
+
+    Written earliest-ts first, the way the pipeline writes, so nothing but the rollup's own
+    ORDER BY ts DESC can be what picks the true close over the decoy.
+    """
+    with connect(dsn) as conn:
+        for day in days:
+            ensure_partition(conn, day)
+        conn.execute(
+            "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+            " VALUES (%s, %s, 'X', true, %s) ON CONFLICT (symbol) DO NOTHING",
+            (symbol, symbol, datetime(days[0].year, days[0].month, days[0].day, 13, 30, tzinfo=UTC)),
+        )
+        for day, decoy, close in zip(days, decoys, closes):
+            decoy_ts = datetime(day.year, day.month, day.day, 13, 30, tzinfo=UTC)
+            true_ts = datetime(day.year, day.month, day.day, 13, 35, tzinfo=UTC)
+            for stamp, price in ((decoy_ts, decoy), (true_ts, close)):
+                conn.execute(
+                    "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, 100, 1, %s)",
+                    (symbol, stamp, price, price, price, price, price),
+                )
+        conn.commit()
 
 
 @pytest.fixture
@@ -153,6 +181,64 @@ def test_a_perfectly_opposed_pair_correlates_to_exactly_minus_one(migrated_dsn, 
 
     # the value, not just the shape. without this the pivot could take the max over both symbols
     # rather than each symbol's own return and every structural assertion here would still hold
+    settled = [r for r in rows if r[2] >= 3]
+    assert settled
+    assert all(r[1] == Decimal("-1.0000") for r in settled)
+
+
+def test_the_rollups_close_is_the_sessions_last_bar_rather_than_an_arbitrary_one(migrated_dsn, query_sql):
+    # load_run_symbol writes exactly one bar a session, too few for array_agg's ordering to be
+    # observable at all -- a one-row group returns that row whatever the ordering. UP's second
+    # bar a session, an earlier decoy priced far off the true close, is what makes the pick
+    # observable: the exact negation below only holds if the later bar's close is the one used
+    steps = [Decimal(s) for s in ("0.01", "-0.02", "0.03", "-0.015", "0.005")]
+    up, down, a, b = [Decimal(100)], [Decimal(100)], Decimal(100), Decimal(100)
+    for i in range(RUN_LENGTH - 1):
+        step = steps[i % len(steps)]
+        a *= 1 + step
+        b *= 1 - step
+        up.append(a)
+        down.append(b)
+    decoys = [close + 500 for close in up]
+
+    days = load_run_calendar(migrated_dsn)
+    _load_decoy_then_true_close(migrated_dsn, "UP", days, decoys, up)
+    load_run_symbol(migrated_dsn, "DOWN", down, days=days)
+
+    rows = _read(migrated_dsn, query_sql, a="UP", b="DOWN")
+
+    settled = [r for r in rows if r[2] >= 3]
+    assert settled
+    assert all(r[1] == Decimal("-1.0000") for r in settled)
+
+
+def test_a_bar_exactly_on_the_session_close_never_reaches_the_rollup(migrated_dsn, query_sql):
+    # membership is half-open, so a bar priced far off the real close and stamped exactly on
+    # close_ts must never reach session_bars -- if it did, its later ts would win the rollup's
+    # array_agg ORDER BY ts DESC and the exact negation below would break
+    steps = [Decimal(s) for s in ("0.01", "-0.02", "0.03", "-0.015", "0.005")]
+    up, down, a, b = [Decimal(100)], [Decimal(100)], Decimal(100), Decimal(100)
+    for i in range(RUN_LENGTH - 1):
+        step = steps[i % len(steps)]
+        a *= 1 + step
+        b *= 1 - step
+        up.append(a)
+        down.append(b)
+
+    days = load_run_calendar(migrated_dsn)
+    load_run_symbol(migrated_dsn, "UP", up, days=days)
+    load_run_symbol(migrated_dsn, "DOWN", down, days=days)
+    with connect(migrated_dsn) as conn:
+        for day in days:
+            conn.execute(
+                "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                " VALUES ('UP', %s, 999, 999, 999, 999, 100, 1, 999)",
+                (datetime(day.year, day.month, day.day, 20, 0, tzinfo=UTC),),
+            )
+        conn.commit()
+
+    rows = _read(migrated_dsn, query_sql, a="UP", b="DOWN")
+
     settled = [r for r in rows if r[2] >= 3]
     assert settled
     assert all(r[1] == Decimal("-1.0000") for r in settled)

@@ -20,8 +20,8 @@ from tests.market_fixture import (
 def _read(dsn, query_sql, symbol="AAA", start=WINDOW_START, end=WINDOW_END, *, heap_order=False):
     with connect(dsn) as conn:
         if heap_order:
-            # see bugs.md D-122: on the fixture the planner index-scans the PK and delivers ts
-            # order for free, so a missing window ORDER BY is invisible. production bitmap-scans
+            # on the fixture the planner index-scans the PK and delivers ts order for free, so a
+            # missing window ORDER BY is invisible. production bitmap-scans and returns heap order
             conn.execute("SET enable_indexscan = off")
         return conn.execute(
             query_sql("03_gaps.sql"),
@@ -194,3 +194,18 @@ def test_the_lag_orders_by_the_session_ordinal_even_though_no_result_can_hold_it
     # under a forced bitmap plan, deleting the ORDER BY changed no value. The ordinal's own
     # ORDER BY day is a different matter and IS caught, by the test above this one.
     assert "lag(r.close)     OVER (ORDER BY c.session_no)" in body
+
+
+def test_the_spanned_lag_orders_by_the_session_ordinal_even_though_no_result_can_hold_it(
+    query_sql, repo_root
+):
+    body = (repo_root / "db" / "queries" / "03_gaps.sql").read_text()
+
+    # A different mechanism from the test above, and from the enable_indexscan=off cases
+    # elsewhere: this lag shares its FROM with prev_close's lag, whose own ORDER BY c.session_no
+    # already forces the whole join into session_no order before either lag runs, so this clause
+    # is never what supplies it. Measured rather than assumed -- with market_days and every bar
+    # written out of order, a real skipped-session gap in the fixture, and enable_mergejoin,
+    # enable_hashjoin and enable_sort forced off in every combination, deleting this ORDER BY
+    # changed no value.
+    assert "c.session_no - lag(c.session_no) OVER (ORDER BY c.session_no) AS sessions_spanned" in body

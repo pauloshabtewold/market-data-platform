@@ -1,7 +1,7 @@
 """Shared fixture data for the ten analytical queries.
 
 A plain module rather than a conftest: importing a helper from a conftest keeps pytest
-green and wedges the generated mutation harness (bugs.md D-097).
+green and wedges the generated mutation harness.
 
 The calendar carries the three shapes section 6.2 #10 requires, and each one is load
 bearing for a different trap:

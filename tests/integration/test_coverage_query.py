@@ -122,6 +122,19 @@ def test_the_three_summary_rows_are_last_and_keep_their_fixed_order(loaded, quer
     assert [r[0] for r in rows[:-3]] == ["EARLY", "LATE"]
 
 
+def test_the_detail_rows_stay_alphabetical_even_when_loaded_out_of_order(migrated_dsn, query_sql):
+    _seed(migrated_dsn)
+    # inserted neither alphabetically nor as a palindrome of it, so nothing but the trailing
+    # ORDER BY could be what puts them back in label order
+    for symbol in ("ZEB", "ALP", "MID"):
+        _add_symbol(migrated_dsn, symbol, _ts(FULL_DAYS[0], OPEN_UTC))
+        _add_bars(migrated_dsn, symbol, [_ts(FULL_DAYS[0], OPEN_UTC)])
+
+    detail = [r[0] for r in _read(migrated_dsn, query_sql)[:-3]]
+
+    assert detail == ["ALP", "MID", "ZEB"]
+
+
 def test_the_detail_band_carries_one_row_per_ingested_symbol_and_none_for_the_uningested_one(loaded, query_sql):
     detail = _read(loaded, query_sql)[:-3]
 

@@ -219,3 +219,18 @@ def test_the_file_binds_no_parameters_at_all(query_sql, repo_root):
     assert "%(" not in rendered
     assert ":'" not in rendered
     assert "-- parameters: none" in (repo_root / "db" / "queries" / "08_top_minutes.sql").read_text()
+
+
+def test_the_final_order_is_explicit_even_though_no_fixture_can_show_its_absence(
+    query_sql, repo_root
+):
+    body = (repo_root / "db" / "queries" / "08_top_minutes.sql").read_text()
+
+    # ranked's own row_number() OVER (PARTITION BY year ORDER BY volume DESC, ts) needs its own
+    # Sort to compute rank_in_year at all, and that Sort leaves every row in (year, volume DESC,
+    # ts) order regardless of insertion order, hash aggregation, or a forced spill -- measured
+    # with twenty symbols across three years inserted in shuffled order, under enable_hashagg=off
+    # and a work_mem small enough to force an external sort, and the final order never moved.
+    # Only a plan that gathers already-ranked per-worker output without merging it would drop
+    # this, which a single-process fixture cannot construct
+    assert "ORDER BY year, rank_in_year;" in body
