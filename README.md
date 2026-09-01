@@ -33,22 +33,24 @@ the same transaction as the bars it covers, so a `kill -9` mid-run loses no comm
 re-running skips what already landed. `tests/integration/test_crash_resume.py` kills the
 process and asserts it.
 
-**A token-bucket limiter holds the feed's rate ceiling.** 185 requests/minute against a
-200/minute cap, with the clock injected so the tests don't sleep.
+**A token-bucket limiter holds the request rate under its own cap.** The load peaked at 185
+requests a minute against a 200/minute client-side limit — the cap is ours, not a published
+vendor ceiling — with the clock injected so the tests don't sleep.
 
 **Missing minutes stay missing.** A gap is never synthesized or forward-filled, so gaps in
 `bars` are gaps in the tape as this feed saw it. That matters more than it sounds: IEX
 coverage pools to **72.16%** of regular-session minutes across the full universe, and
-individual symbol-months run as low as **7.59%**. A single well-covered month reads at
-99.32% and is an upper bound, not a rate.
+individual symbol-months run as low as **3.02%**. A well-covered month reads **85.04%** over the
+universe and 99.32% over the five sample tickers — an upper bound, not a rate.
 
 **The ten analytical queries are gated on blocks read, not on a stopwatch.** Blocks touched are
 a property of the plan — the same number on a warm cache, a cold one, or RDS — while wall-clock
 is mostly a measure of what the page cache happened to hold. The one query with a selective
 filter reads **30.27× fewer blocks** after tuning while the clock moves only 7×, and the six
-that must read every row are held to evidence of optimality instead: the parallel plan, a
-candidate index built and shown not to be chosen, and a byte ratio used as a prediction that
-had to survive being tested.
+that must read every row are held to evidence of optimality instead: the parallel plan the
+planner should pick and did, a candidate index built and shown not to be chosen, the row math,
+and — for three of the six — a byte ratio used as a prediction that had to survive being
+tested.
 
 **There is no incremental ingest.** A run re-walks every requested unit and skips what is
 already recorded. Widening the window and re-running is the supported path.

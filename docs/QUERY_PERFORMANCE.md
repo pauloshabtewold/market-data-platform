@@ -6,10 +6,13 @@ named in [Measurement conditions](#measurement-conditions), with the parameters 
 it. A latency figure without its parameters is not reproducible and not comparable to the next
 one, so the parameters are part of every row.
 
-The full `EXPLAIN (ANALYZE, BUFFERS)` output behind every table here — twenty plans, before and
-after, one file per variant with its bound parameters and session settings in the header — is
-kept alongside this document rather than quoted into it. The tables are summaries; the plans are
-the evidence.
+The full `EXPLAIN (ANALYZE, BUFFERS)` output behind the before/after and candidate-index tables
+— twenty plans, one file per variant with its bound parameters and session settings in the header
+— is kept alongside this document rather than quoted into it. For those, the tables are summaries
+and the plans are the evidence. The coverage-variant and Class A re-run tables come from separate
+harness runs whose output is kept beside them. The hot-index and BRIN tables are the exception:
+their harness wrote to a path that no longer exists, so those two tables are the record of that
+measurement rather than a summary of one.
 
 ## What is being measured, and why it is mostly not wall-clock
 
@@ -23,8 +26,9 @@ applied to all ten would be wrong for at least seven of them.
 | **C** | 4, 5, 7, 8, 9, 10 | nothing: they read every row by definition | **evidence of optimality** |
 
 Class B is gated on **blocks touched**, not on time. Blocks are a property of the plan: the
-same number on a warm cache, a cold cache, a laptop, or RDS. Wall-clock is not — on a warm
-instance a plan that reads 35× fewer blocks can measure under 2× faster, and tuning until the
+same number on a warm cache, a cold cache, a laptop, or RDS. Wall-clock is not — the one query
+gated here reads **30.27× fewer blocks** and measures **7.00× faster**, and two later sweeps read
+the same blocks to the digit while the wall-clock half moved to 7.19× and 7.87×. Tuning until the
 stopwatch says 10× is tuning the page cache. Wall-clock is recorded beside it and gated on
 nothing.
 
@@ -51,13 +55,15 @@ an omission. Three things make it the right one:
 - `shared_buffers` moves the split between `hit` and `read` and never their sum, which is the
   property that makes these figures portable to RDS.
 - Raising `work_mem` made a Class C shape measurably *slower* on this host — 29.8 s at 4 MB
-  against 46.9 s at 256 MB — because three workers each claiming 256 MB against a 128 MB
+  against 46.9 s at 256 MB, one run each, with 64 MB between them at 43.7 s — because three
+  workers each claiming 256 MB against a 128 MB
   `shared_buffers` displaces the page cache the query depends on.
 
 **Three Class C queries spill, and that is not a defect.** At 4 MB, measured on the queries as
 they ship, each spill is three concurrent per-worker external merges rather than one, and the
 figure this table used to publish was the smallest of the three — the leader's. Per-worker range
-and root-node temp total: `04_volume_profile.sql` **671,080–784,944 kB** (root `temp
+and root-node temp total — the per-worker figures are kB as `EXPLAIN` prints them, the root
+`temp` counters are 8 kB blocks: `04_volume_profile.sql` **671,080–784,944 kB** (root `temp
 read=824,411 written=825,400`, **6.30 GiB**); `07_vwap_check.sql` **816,464–893,824 kB** (root
 `temp read=971,967 written=973,048`, **7.42 GiB**); `08_top_minutes.sql` **590,112–644,504 kB**
 (root `temp read=705,564 written=706,482`, **5.39 GiB**), all `external merge`. Nothing is wrong
@@ -65,9 +71,12 @@ with them — they aggregate 41.7M rows into ~148k groups and that sort does not
 any sane setting. It costs them wall-clock and costs the gate nothing, because spills land in
 `Temp Read/Written` and every Class C verdict is a plan property.
 
-The two coverage queries were different: their 1.2 GB sorts came from a merge join the query was
-forcing, and fixing the plan removed them entirely — at the same 4 MB. That is a plan problem
-that looked like a memory problem, and it is the one case here where a spill was worth chasing.
+The two coverage queries were different: their sorts came from a merge join the query was
+forcing, and fixing the plan removed them entirely — at the same 4 MB. The two sizes are two
+orders of magnitude apart: query 10 spilled 1.2 GB, query 9 **as shipped** spilled 5,264 kB, and
+the 1.2 GB that also appears against query 9 belongs to an intermediate variant that ships
+nowhere. That is a plan problem that looked like a memory problem, and it is the one case here
+where a spill was worth chasing.
 See [The two coverage queries](#the-two-coverage-queries-9-and-10).
 
 `maintenance_work_mem` is raised to 1 GB for index builds alone. It changes build wall-clock and
@@ -109,9 +118,10 @@ rather than warns if they disagree.
 exec` per query, which pays catalog and sort-operator lookups a warm backend already has cached
 — so the published counts are cold and self-consistent with each other. Running the ten
 committed query files five times inside one continuous `psql` session instead gives root-block
-counts 2–6 blocks lower — `06_daily_rollup.sql` settles at 414 against the published 420,
-`03_gaps.sql` at 418 against 431 — a difference under 1.5% on a ~400-block base that moves no
-target or ratio in this document.
+counts a few blocks lower — `06_daily_rollup.sql` settles at 414 against the published 420, six
+blocks and 1.43%; `03_gaps.sql` at 418 against 431, thirteen blocks and 3.02%. Neither moves a
+target or a ratio in this document, and a verifier who re-runs them in one session and finds
+these numbers has not found a defect.
 
 ## The heap the numbers rest on
 
@@ -173,9 +183,10 @@ count.
 These are the only two queries in the set whose plan was actually wrong, and the fix is the
 clearest tuning story here — so it is written out in full rather than reduced to a row.
 
-`09_coverage.sql` shipped at Feature 2. Over the full universe it took **173.9 s**, ran every
-one of its 71 partition scans **serially**, and spilled. It launched no parallel workers at
-all, which is not the plan an unfiltered full-universe aggregation should get.
+`09_coverage.sql` shipped at Feature 2. Over the full universe it took a median **179.4 s**
+over the three interleaved runs in the table below, ran every one of its 71 partition scans
+**serially**, and spilled. It launched no parallel workers at all, which is not the plan an
+unfiltered full-universe aggregation should get.
 
 Two independent causes, and **neither change alone is sufficient**:
 
@@ -207,7 +218,7 @@ rather than argued — all 100 symbols hold `first_bar_ts = MIN(ts)` exactly.
 carries no statistics, so the planner cannot cost a hash join against it and falls back to the
 merge join. `NOT MATERIALIZED` restores `market_days`' statistics.
 
-Row three is why both changes ship together: the rewrite *alone* spills 233× more than the
+Row three is why both changes ship together: the rewrite *alone* spills 232× more than the
 shipped form, because dropping the symbol key widens what the merge join has to sort. Taken as
 a lone change it reads as a regression.
 
@@ -215,10 +226,15 @@ The output is unchanged, and that was verified rather than assumed: 103 rows, sy
 difference 0, identical row for row against the shipped form over the full window, with the
 pipeline's gate reading `missing_units 0`, `coverage_pct 72.16`, `uningested_symbols 0`.
 
-`10_missing_minutes.sql` shares the shape and needed only the second change: **131.1 s serial
-with the same 1.2 GB spill, against 42.6 s with 71 parallel scans, 2 workers and no spill.**
-7,100 rows identical. Its **pooled** complement of query 9 — `100 − 100 × sum(missing) /
-sum(expected)` over all 7,100 symbol-months — is **72.1564**, which is 72.16 at two decimals and
+`10_missing_minutes.sql` shares the shape and needed only the second change: 131.1 s serial
+with a 1.2 GB spill, against 42.6 s with 71 parallel scans, 2 workers and no spill. **One
+observation per variant, not a median.** The structural half is a plan property and holds; treat
+the two timings as indicative rather than as a ratio. The 2026-08-31 re-capture read the shipped
+form at **89.3 s** — the same plan, the same 71 scans and 2 workers, twice the wall-clock — which
+is the run-to-run spread the coverage table above shows on query 9. 7,100 rows identical.
+Its **pooled**
+complement of query 9 — `100 − 100 × sum(missing) / sum(expected)` over all 7,100 symbol-months —
+is **72.1564**, which is 72.16 at two decimals and
 matches query 9's own `coverage_pct` of **72.16** exactly. That is the complement identity
 checked on real data rather than on a fixture.
 
@@ -246,7 +262,10 @@ taken **before migration 005** added `bars_ts_symbol_idx`; every table after it 
 afterwards. The two eras differ by at most 40 blocks — query 5 reads 25,009 before and a stable
 25,049 after, confirmed over three consecutive runs — and queries 9 and 10 are identical on both
 sides, so it is a real boundary rather than noise. And the `exec` column is **one observation per
-row**, kept only for scale; the columns that carry the verdict are the three on the right.
+row** from that same pre-005 capture, kept only for scale; the columns that carry the verdict are
+the three on the right. The 2026-08-31 re-capture timed all six differently — queries 9 and 10 at
+122,178 ms and 89,312 ms against the 92,575 and 133,978 below — and it is the re-captured pair
+that Item 4 reasons from. This column is not a second measurement of it.
 
 | query | root node | exec (single run) | root blocks | workers launched | parallel `bars` scans |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -277,7 +296,8 @@ free to use it, then dropped.
 **The blocks are identical to the block on all four** — the same plan ran with the index on disk
 as without it. That is the negative result: each index was built on the full 41.7M rows, costed
 by the planner, and rejected. Timings are omitted from this table deliberately; they varied by
-more than the difference they would be claiming.
+more than the difference they would be claiming — run-to-run noise on a 5.3 GB working set,
+measured at more than 2× on a single query, which is exactly why this gate is on blocks.
 
 **Query 5's is the one worth a sentence**, because it is the index a reviewer asks for first.
 With the ranking expression indexed, the plan is unchanged to the sort key:
@@ -285,11 +305,6 @@ With the ranking expression indexed, the plan is unchanged to the sort key:
 by a sort. The reason is the one section 4 gives — the session-bounds join to `market_days` is
 not in the index, so the planner cannot stream in ranked order — and this is that prediction
 confirmed on the real dataset rather than carried in from a fixture.
-
-The block counts are the evidence, not the timings: **identical to the block on all four**
-means the same plan ran both times. The index was on disk, costed, and rejected. The wall-clock
-differences either side of that are run-to-run noise on a 5.3 GB working set — measured at more
-than 2× on a single query — which is exactly why this gate is on blocks.
 
 Queries 4 and 8 are deliberately **not** measured forced onto their candidate index. Neither
 index carries the columns those queries read — `trade_count`, `volume` and the session join — so
@@ -307,10 +322,10 @@ The crossover follows from the cost constants rather than from taste. At `seq_pa
 `random_page_cost` 4, an index scan visiting a fraction *f* of the heap pays about `4f` per page
 against a sequential scan's `1`, so it can only win below **f ≈ 25%** on a perfectly correlated
 heap, and far below that on an uncorrelated one. Query 5 is the useful check on that reasoning:
-its window puts it at **25,009 root-node blocks against the 514,300 the whole-universe queries
-read — 4.9%** — and the planner *still* chose a parallel sequential scan over any index. That is
-a measured point on the curve rather than a derived one. The other five sit at f = 1.0, where no index can win by
-construction.
+its window puts it at **25,049 root-node blocks against the 514,264 the whole-universe queries
+read — 4.87%**, both post-005 and both from Item 2's table — and the planner *still* chose a
+parallel sequential scan over any index. That is a measured point on the curve rather than a
+derived one. The other five sit at f = 1.0, where no index can win by construction.
 
 ### Item 4 — the byte math, as a prediction that could have failed
 
@@ -330,9 +345,9 @@ rather than one. Its index has to carry four of nine columns, close to a second 
 heap, so it is worth **1.89×** where the PK is worth 3.16× — the two are **67% apart on
 identical data**, and writing the PK's figure into query 7's row would be wrong in the
 flattering direction and would cite an index the query cannot use. `HEAP_INDEX_COVERING_RATIO`
-is measured here because this is the only window in the whole build where that index is on
-disk: it does not exist before this feature builds it for the negative result, and it does not
-exist after this feature drops it.
+is measured here because that index is on disk only inside the runs this feature makes: it does
+not exist before one builds it for the negative result, and it does not exist after that run
+drops it.
 
 **This prediction failed once, and the failure was the query rather than the database.** An
 earlier draft of query 7 also reconstructed a typical price from `high`, `low` and `close` —
@@ -350,8 +365,10 @@ the run that builds it. Rebuilt over the full 41.7M rows in 264 s, measured, and
 byte ratio **1.8924**, forced block ratio **1.9019**, **0.50% apart**, with **71 index-only scans
 and 0 heap fetches**. The negative result came back in the same run — with the index on disk the
 planner still read 514,222 blocks, identical to its free choice, and chose no index-only scan.
-The block ratio differs from the 1.9021 above only in its numerator, 514,222 against 514,260,
-which is the same ≤40-block boundary either side of migration 005 noted under Item 1.
+The two block ratios are 0.01% apart. The original's own numerator is not recoverable — the run
+that produced 1.9021 wrote to a path that no longer exists — but Item 1 records query 7 at
+514,262 blocks before migration 005 against the 514,222 measured here, which is the same
+≤40-block boundary noted there.
 
 Both forced scans are genuinely index-only where it matters: **every `bars` partition reports 0
 heap fetches**, in both queries, across all 71. Query 10 reports 0 in total.
@@ -367,7 +384,7 @@ blocks changes nothing, and the prediction still holds at 0.42%.
 **Wall-clock at that ceiling is a wash and is not portable, exactly as the design predicted.**
 An earlier capture had query 9's forced scan at 105,024 ms against 92,575 free — 0.88×,
 *slower* — and query 10's at 102,370 ms against 133,978 free — 1.31×, faster. The 2026-08-31
-from-scratch re-capture in `notes/feature_4/plans/` reverses both: query 9 forced now runs
+from-scratch re-capture reverses both: query 9 forced now runs
 **51,035 ms** against **122,178 ms** free — **2.39× faster** — and query 10 forced runs
 **50,361 ms** against **89,312 ms** free — **1.77× faster**. Which side wins flips completely
 between the two eras rather than merely disagreeing within one of them, and a full reversal
@@ -412,7 +429,8 @@ mechanism that has existed since Feature 1:
 
 **Class A's block reduction is roughly double Class B's**, and the reason is the whole basis of
 the class split: these read one symbol where query 2 reads two. Selectivity is what the index
-buys, and it buys exactly twice as much at half the symbols. Class A is not *gated* on this
+buys, and halving the symbols buys very nearly twice as much — 59.31 ÷ 30.27 = 1.96, where the
+mechanism predicts 2. Class A is not *gated* on this
 ratio — its target is the 100 ms above — but the before/after is recorded here because 6.3 #14
 asks for it on all ten queries, not only on the one with a block target.
 
@@ -450,7 +468,9 @@ rather than dropping and rebuilding a primary key over 41.7M rows to arrive at t
 `:symbol_a = AAPL`, `:symbol_b = MSFT`, `:start = 2026-04-01`, `:end = 2026-06-30` — the same
 window Class A binds.
 
-| | root blocks | median exec | root node |
+Five runs each, the same sweep Class A uses, median reported:
+
+| | root blocks | median exec (5 runs) | root node |
 | --- | ---: | ---: | --- |
 | simulated before | 25,125 | 561.8 ms | `WindowAgg` |
 | after | **830** | 80.3 ms | `WindowAgg` |
@@ -460,9 +480,9 @@ window Class A binds.
 25,125 and 830 to the block while their wall-clock ratios came out at 7.19× and 7.87× (see Class
 A above) — which is this section's argument demonstrating itself rather than asserting itself.
 Wall-clock moved 7.00× over the same pair, and the gap between those two numbers is the entire
-argument for gating on blocks: a stopwatch tuned to 10× would have called this query finished at
-less than a quarter of the block reduction it actually achieves, and a stopwatch on a colder
-cache would have called it done sooner still.
+argument for gating on blocks: a 10× target read off the stopwatch **fails** this query at 7.00×
+on the same runs where its block ratio passes three times over, and a colder cache would have
+moved that verdict again without a single block changing.
 
 This number is only meaningful because of the heap it was measured on. On a day-major heap the
 same query and the same index measure 1.13–1.42×, and the gate fails. See
@@ -532,8 +552,8 @@ metapage, revmap and first range page.
 
 On a five-day range probe the planner **did not choose it**: free choice was a sequential scan
 at 32.93 ms and 8,629 blocks. Forced onto BRIN it read 2,532 blocks — genuinely fewer — and took
-**367.89 ms, 11× slower**, because a BRIN range scan rechecks every tuple in every block its
-summary admits. Dropped.
+**367.89 ms, 11× slower** (one run each; the blocks are the durable half), because a BRIN range
+scan rechecks every tuple in every block its summary admits. Dropped.
 
 That is the documented negative result the design asked for, and it is the right answer: the
 partition key already does BRIN's job here, and a 24 kB index that the planner never picks is

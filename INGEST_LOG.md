@@ -168,9 +168,9 @@ Both 2026-06 rows use the same 8,190-minute denominator, 21 sessions of 390 minu
 seven-point gap between them is the point: the five sample tickers are not a sample of the fifty,
 and the sample month is near this feed's ceiling and is not representative. Coverage is a property
 of the symbol and the period together, which is what `db/queries/09_coverage.sql` exists to break
-down over the ingested symbols; the per-minute query that would locate the missing minutes is
-Feature 4's and is not in this repository yet. The whole-window figure is superseded once the
-second fifty are loaded.
+down over the ingested symbols, and which `db/queries/10_missing_minutes.sql` reports per symbol
+per month. Neither enumerates the individual missing minutes. The whole-window figure is
+superseded once the second fifty are loaded.
 
 **It is superseded now** — the hundred-symbol figures are in the 2026-08-27 entry below. The rows
 above are kept as what the first half measured, not as the best available number.

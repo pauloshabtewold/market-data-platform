@@ -11,9 +11,13 @@ are kept rather than deleted so the size of each error stays visible.
 | Bars | 41,723 | 41,668,537 |
 | Regular-session bars | 40,673 | 41,605,369 |
 | Extended-hours share | 2.52% | 0.15% |
-| Total relation bytes | 5,603,328 | 5,547,909,120 (5,291 MB) |
+| Total relation bytes | 5,603,328 | 5,547,909,120 (5,291 MB), 2026-08-27 |
 
-The right-hand column is measured on the loaded universe, not projected onto it. Two earlier
+The right-hand column is measured on the loaded universe, not projected onto it. The byte row is
+dated because it is `pg_total_relation_size` and therefore counts indexes: migration 005's
+`bars_ts_symbol_idx` and the four hot-window indexes landed after it, and the same sum reads
+6,998,122,496 (6,674 MB) today, of which 4,211,064,832 (4,016 MB) is heap. The projections below
+are compared against the 2026-08-27 figure, which is the like-for-like one. Two earlier
 projections stood here and both are recorded rather than deleted, because the size of the error is
 the useful part. The first multiplied the five-ticker sample by 1,420 and gave 59,246,660 bars and
 ≈7.4 GiB — **42% above** what the universe actually holds, because the sample month sits near this
@@ -21,7 +25,7 @@ feed's coverage ceiling at 8,344.6 bars per ticker-month where the full window a
 The second doubled the fifty-ticker half to 44,871,360 bars and ≈5,704 MB, which landed within
 **7.7%** on rows and **7.8%** on bytes — the second fifty are slightly thinner than the first, so
 doubling the better-covered half ran a little high. A projection from a representative half beat one
-from an unrepresentative month by a factor of five.
+from an unrepresentative month by a factor of five and a half.
 
 Extended-hours bars are real on this feed rather than absent, which is why the share is measured
 and reported rather than assumed to be zero.
@@ -35,7 +39,8 @@ the second half ran at 0.325 s per unit.
 An earlier version of this page published ≈114 minutes, from timing the five-unit sample at 4.8 s
 and computing `7100 / 5 × 4.8 / 60`. Five units pay once for the first partition DDL and the first
 connection, and dividing by five leaves that one-off cost inside every extrapolated unit, which is
-why it landed 2.5× high. The sample is what sized the pipeline; it was never what timed it.
+why it landed **2.7× high** against the measured 42.4 minutes. The sample is what sized the
+pipeline; it was never what timed it.
 
 The second run of the same five units took 2.9 s and **inserted nothing**: every row met
 `ON CONFLICT (symbol, ts) DO NOTHING` and the partition already existed, so it measures the
@@ -73,7 +78,7 @@ against the calendar. All 21 sessions in 2026-06 are full 390-minute days, so th
 | `AVGO` | 8,181 | 99.89% |
 | `ORCL` | 7,922 | 96.73% |
 
-The mean is 40,673 ÷ 40,950 = **99.32%**, which is `BARS_PER_TICKER_DAY` ÷ 390 and is the same
+Pooled, that is 40,673 ÷ 40,950 = **99.32%**, which is `BARS_PER_TICKER_DAY` ÷ 390 and is the same
 number arrived at from the other direction — and it is near this feed's ceiling rather than
 typical of it. Coverage is not constant across this history, so it is reported per period.
 Measured over all 100 tickers, on the same `[open_ts, close_ts)` membership and the
@@ -88,8 +93,9 @@ the first fifty; it is the pooled figures that moved.
 The finding this project reports is *where* the missing minutes fall rather than a headline gap,
 and on this sample they are concentrated rather than spread: 277 minutes are missing in total and
 **268 of them are ORCL's**, with three of the five symbols complete. `db/queries/09_coverage.sql`
-extends that breakdown to every ingested symbol across the whole window; the per-minute query that
-would locate the missing minutes themselves is Feature 4's and is not in this repository yet.
+extends that breakdown to every ingested symbol across the whole window, and
+`db/queries/10_missing_minutes.sql` reports the missing-minute count and share per symbol per
+month. Neither enumerates the individual missing minutes, and no query here does.
 
 ## Partition methodology
 
