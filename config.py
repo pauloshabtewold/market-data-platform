@@ -71,6 +71,6 @@ def require(name: str):
     if value is None:
         raise RuntimeError(
             f"{name} is unset; it is measured from {_MEASURED_BY.get(name, _MEASURED_FALLBACK)} and written"
-            " into .env by hand; docs/QUERY_PERFORMANCE.md and docs/METHODOLOGY.md carry the value and the arithmetic"
+            " into .env by hand; docs/METHODOLOGY.md carries every measured value with its arithmetic"
         )
     return value

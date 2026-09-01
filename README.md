@@ -24,7 +24,8 @@ docker compose up -d --wait db
 ```
 
 Copy `.env.example` to `.env` first. The four measured constants in it are recorded rather
-than defaulted, because a silently-defaulted value is the failure they exist to prevent.
+than defaulted, because a silently-defaulted value is the failure they exist to prevent —
+[Methodology](docs/METHODOLOGY.md) carries each value and the arithmetic behind it.
 
 ## What's interesting here
 

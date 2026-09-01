@@ -51,6 +51,45 @@ The figure still moves with the network and with what else the host is doing. Th
 — 7,100 requests at 200 requests per minute — is ≈36 minutes, so the wall clock binds rather than
 the throttle, though no longer by much.
 
+## Measured constants
+
+Four values in `.env` are measured rather than defaulted, because a silently-defaulted one is the
+failure they exist to prevent. Values and arithmetic are here; the two ratios' full derivation,
+with the plans behind them, is in [Query performance](QUERY_PERFORMANCE.md).
+
+`N` below is the committed line count of `tickers.txt`, currently **100**, and not a literal — the
+universe may be cut, and a stale `N` overstates reachable page depth.
+
+| Key | Value | Arithmetic |
+| --- | --- | --- |
+| `BARS_PER_TICKER_DAY` | 387.36 | 40,673 regular-session bars ÷ (5 tickers × 21 trading days) |
+| `DEEP_PAGE_DEPTH` | 1,000,000 | `min(1e6, floor(0.8 × N × (40,673 ÷ 105) × TD))`, `TD` = 58, unclamped 1,797,359 |
+| `HEAP_INDEX_BYTE_RATIO` | 3.1656441717791411 | 4,227,072 heap bytes ÷ 1,335,296 primary-key index bytes |
+| `HEAP_INDEX_COVERING_RATIO` | 1.8924 | 4,211,064,832 heap bytes ÷ 2,225,233,920 covering-index bytes |
+
+`TD` is the **minimum** trading-day count over every 90-calendar-day window in the loaded calendar,
+read from `market_days` rather than assumed. It is a minimum and not a sample because the count
+swings **58–64** across this history, so an arbitrary start date makes the derived value a coin
+flip and two builders following the same instruction write configs 10% apart.
+
+`DEEP_PAGE_DEPTH` is derived from the unrounded 40,673 ÷ 105 rather than from the 387.36 in the row
+above — recomputing with the rounded figure gives 1,797,350, nine short. The rounded value is what
+`.env` carries, since that is the number config consumes; the depth is taken before the rounding.
+The clamp binds: without it the depth would be 1,797,359.
+
+`HEAP_INDEX_BYTE_RATIO` is the yardstick for the two coverage queries that scan the primary key,
+and for nothing else. It was measured on a 5-ticker, one-month partition and has since been
+re-checked against that same partition 17× fuller — **3.1654**, 0.008% from the published figure —
+and against all 71 pooled, **3.1584**. It is driven by B-tree leaf fill, so it is comparable only
+across partitions written in primary-key order, which this pipeline produces by construction: a
+unit's rows all belong to one partition and arrive in ascending `ts`. A hand-built fixture does not
+produce that order, and neither does a restore.
+
+`HEAP_INDEX_COVERING_RATIO` is a different index and a different number. Query 7's covering index
+carries four of nine columns, close to a second heap, so it is worth 1.89× where the primary key is
+worth 3.16× — the two are 67% apart on identical data. It is measured only inside the runs that
+build that index for a negative result and drop it again.
+
 ## Feed
 
 The stored data is **IEX minute bars**. SIP was available on this account rather than locked; IEX
