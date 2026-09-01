@@ -344,6 +344,15 @@ from the byte ratio. Narrowing the query to the four columns the index carries t
 falsifiable form is for, and the test that now guards it fails if any other `bars` column is
 read back in.
 
+**Query 7's row was re-derived from scratch on 2026-08-31**, because it is the one row here whose
+measurement is not a by-product of the before/after sweep — the covering index exists only inside
+the run that builds it. Rebuilt over the full 41.7M rows in 264 s, measured, and dropped again:
+byte ratio **1.8924**, forced block ratio **1.9019**, **0.50% apart**, with **71 index-only scans
+and 0 heap fetches**. The negative result came back in the same run — with the index on disk the
+planner still read 514,222 blocks, identical to its free choice, and chose no index-only scan.
+The block ratio differs from the 1.9021 above only in its numerator, 514,222 against 514,260,
+which is the same ≤40-block boundary either side of migration 005 noted under Item 1.
+
 Both forced scans are genuinely index-only where it matters: **every `bars` partition reports 0
 heap fetches**, in both queries, across all 71. Query 10 reports 0 in total.
 
