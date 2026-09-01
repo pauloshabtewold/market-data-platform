@@ -391,7 +391,7 @@ def test_a_run_that_dies_before_the_transport_still_reports(monkeypatch, tmp_pat
     assert "calendar_requests=0 symbols_requests=0 bars_requests=0" in aborted[0]
 
 
-# the autouse fixture patches names in this process and stops at the process boundary, so a child gets its floor from the environment instead. pydantic-settings ranks environment variables above env_file -- measured -- so these beat the repository's real .env without moving the child's cwd, and the cwd must not move: notes/tools/mutmut_run.sh runs this suite from a copied tree where a cwd- or __file__-derived import path resolves inside mutants/, and the child then imports an instrumented package whose trampoline cannot find its config.
+# the autouse fixture patches names in this process and stops at the process boundary, so a child gets its floor from the environment instead. pydantic-settings ranks environment variables above env_file -- measured -- so these beat the repository's real .env without moving the child's cwd, and the cwd must not move: the generated mutation harness runs this suite from a copied tree where a cwd- or __file__-derived import path resolves inside mutants/, and the child then imports an instrumented package whose trampoline cannot find its config.
 DEAD_ENV = {
     "ALPACA_KEY_ID": "dead",
     "ALPACA_SECRET_KEY": "dead",
