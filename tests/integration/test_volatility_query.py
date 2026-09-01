@@ -232,3 +232,17 @@ def test_the_span_lag_shares_the_named_window_rather_than_running_unpartitioned(
     # It shares the named window anyway, because that is what stops the two lags disagreeing
     # about which row is previous if the filter above them ever changes.
     assert "EXTRACT(epoch FROM ts - lag(ts) OVER w) / 60" in body
+
+
+def test_the_annualisation_scales_by_the_minutes_in_a_year_rather_than_the_days(migrated_dsn, query_sql):
+    dsn = load(migrated_dsn)
+
+    rows = _read(dsn, query_sql)
+
+    # the rows being aggregated are per-MINUTE returns, so the factor is sqrt(252 x 390) -- the
+    # session minutes a year holds. the textbook sqrt(252) annualises a daily series and understates
+    # this one by sqrt(390), a factor of 19.75, so the constant is pinned here rather than left to
+    # read like a typo someone corrects
+    scaled = [r[4] / r[3] for r in rows if r[3] >= Decimal("0.01")]
+    assert scaled
+    assert all(Decimal("313.49") < f < Decimal("313.50") for f in scaled), scaled
