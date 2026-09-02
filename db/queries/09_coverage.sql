@@ -30,11 +30,13 @@ expected AS (
     SELECT symbol, sum(session_minutes)::numeric AS minutes FROM sessions GROUP BY symbol
 ),
 actual AS (
-    -- joined to the 1,484-row calendar rather than to the 148,400-row session set, and grouped
-    -- after: the symbol equality key made the join sides 148k against 41.7M, which the planner
-    -- served with a merge join and a 1.2 GB external sort of every bar in the database. dropping
-    -- it costs nothing, because first_bar_ts is MIN(ts) so no bar can precede its own symbol's
-    -- floor, and the outer LEFT JOIN below already discards any symbol not in expected
+    -- joined to the 1,484-row calendar rather than to the 148,400-row session set: the symbol
+    -- equality key made the join sides 148k against 41.7M, which the planner served with a
+    -- merge join and a 5,264 kB spill. dropping it costs nothing, because first_bar_ts is
+    -- MIN(ts) so no bar can precede its own symbol's floor, and the outer LEFT JOIN below
+    -- already discards any symbol not in expected. the 1.2 GB that also appears against this
+    -- query in docs/QUERY_PERFORMANCE.md belongs to a variant that drops the key but still
+    -- materialises bounded, and ships nowhere
     SELECT b.symbol, count(*)::numeric AS bars
     FROM bounded d
     JOIN bars b
