@@ -58,7 +58,7 @@ _MEASURED_BY = {
     "BARS_PER_TICKER_DAY": "the sample ingest run",
     "DEEP_PAGE_DEPTH": "the sample ingest run against the loaded calendar",
     "HEAP_INDEX_BYTE_RATIO": "the loaded partition's heap and index sizes",
-    "HEAP_INDEX_COVERING_RATIO": "the covering index measured at Feature 4, in the only window it exists",
+    "HEAP_INDEX_COVERING_RATIO": "the loaded partition's heap against the covering index (symbol, ts) INCLUDE (vwap, volume)",
 }
 
 # a key added to Settings without a matching entry above would otherwise raise KeyError instead of this function's contract
