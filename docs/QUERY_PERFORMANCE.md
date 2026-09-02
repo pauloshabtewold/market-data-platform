@@ -9,10 +9,16 @@ one, so the parameters are part of every row.
 The full `EXPLAIN (ANALYZE, BUFFERS)` output behind the before/after and candidate-index tables
 — twenty plans, one file per variant with its bound parameters and session settings in the header
 — is kept alongside this document rather than quoted into it. For those, the tables are summaries
-and the plans are the evidence. The coverage-variant and Class A re-run tables come from separate
-harness runs whose output is kept beside them. The hot-index and BRIN tables are the exception:
-their harness wrote to a path that no longer exists, so those two tables are the record of that
-measurement rather than a summary of one.
+and the plans are the evidence. The coverage-variant table comes from a separate harness run
+whose output is kept beside it. The hot-index and BRIN tables are one exception: their harness
+wrote to a path that no longer exists, so those two tables are the record of that measurement
+rather than a summary of one. The Class A/B wall-clock re-run sweeps are a second: that harness
+overwrites a single output file on every run, so only the most recent survives as an artifact —
+the second sweep, 55.2, 25.6 and 29.6 ms with a 7.87× ratio for query 2. The main table's 49.0,
+26.8 and 26.7 ms with 7.00×, and the first re-run's 53.0, 28.2 and 30.0 ms with 7.19×, survive
+only as prose in this document. None of the gated block counts depend on the missing files —
+423, 431, 420, 830 and 25,125 triangulate exactly across the twenty captured plans, the
+surviving re-run and the narrative.
 
 ## What is being measured, and why it is mostly not wall-clock
 
@@ -50,13 +56,17 @@ an omission. Three things make it the right one:
 
 - The gated metric is `Shared Hit + Shared Read` off the root plan node. **A sort that spills
   writes to `Temp Read/Written`, which is a separate counter** — so a spill cannot inflate the
-  number being gated. Measured directly: at `work_mem` 4 MB, 64 MB and 256 MB, the root-node
-  block counts for a Class A and a Class C shape were **bit-identical** (417 and 514,152).
+  number being gated. At `work_mem` 4 MB, 64 MB and 256 MB, the root-node block counts for a
+  Class A and a Class C shape were **bit-identical** (417 and 514,152) — but all twelve sorts in
+  that probe are `Sort Method: quicksort` at 2,466 kB and 37 kB, so neither shape spills at any
+  of the three settings. The probe demonstrates work_mem-invariance of the gated total on a query
+  that does not spill; it is not a direct measurement of a spilling query's gated total holding
+  steady.
 - `shared_buffers` moves the split between `hit` and `read` and never their sum, which is the
   property that makes these figures portable to RDS.
 - Raising `work_mem` made a Class C shape measurably *slower* on this host — 29.8 s at 4 MB
-  against 46.9 s at 256 MB, one run each, with 64 MB between them at 43.7 s — because three
-  workers each claiming 256 MB against a 128 MB
+  against 46.9 s at 256 MB, one run each, with 64 MB between them at 43.7 s — because the leader
+  and its two workers — three processes, each claiming 256 MB — against a 128 MB
   `shared_buffers` displaces the page cache the query depends on.
 
 **Three Class C queries spill, and that is not a defect.** At 4 MB, measured on the queries as
@@ -86,7 +96,10 @@ nothing any query measures, and no figure in this document was taken while it wa
 wherever the visibility map says a page may hold invisible tuples, so a freshly-ingested
 partition reads far past its own byte ratio and the Class C ceilings look broken on a database
 that is fine. The map went from **89.7053%** all-visible to **100.0000%** across all 71
-partitions, in 92 s.
+partitions, in 92 s. The vacuum log backs the elapsed time — `Time: 91770.519 ms` — with
+per-partition output, but not the two percentages themselves: **100.0000%** over 514,046
+relpages is live-reproducible from `pg_class` and was reproduced exactly, while **89.7053%** is
+a pre-VACUUM state that cannot be reproduced and stands as recorded rather than as reproducible.
 
 That starting figure is worth recording, because the spec expects zero: the ingest never
 vacuums, but **autovacuum had already run**, on all 71 partitions, about six hours after the
@@ -125,7 +138,8 @@ these numbers has not found a defect.
 
 ## The heap the numbers rest on
 
-Class B's gated number moves by **54–64× on the heap's write order alone**, so the layout is
+Class B's gated number moves by **54–64× on the heap's write order alone** — a fixture
+measurement carried in from the design work, not one taken on this database — so the layout is
 part of the evidence rather than an assumption behind it. This database is also of mixed
 provenance — the first fifty symbols were restored from a `pg_dump` and the second fifty loaded
 live — and no before-measurement was taken at the time.
@@ -148,7 +162,7 @@ half, on the same four symbols across all 71 partitions:
 | restored | AAPL | 576,962 | 7,153 | 1.39 | 80.7 | 0 |
 | restored | MSFT | 544,918 | 6,795 | 1.32 | 80.2 | 0 |
 | live | HON | 343,634 | 4,310 | 0.84 | 79.7 | 0 |
-| live | LIN | 281,129 | 3,538 | 0.69 | 79.4 | 0 |
+| live | LIN | 281,129 | 3,538 | 0.69 | 79.5 | 0 |
 
 The two halves are indistinguishable. `pg_restore` replays a dump in source heap order and the
 source heap was pipeline order, so the restored half is laid out exactly as if it had been
@@ -172,7 +186,7 @@ and the whole-table figure sums over `pg_partition_tree`.
 
 **Feature 1's ratio survives the re-check.** It published `HEAP_INDEX_BYTE_RATIO =
 3.1656441717791411`, taken on a 5-ticker, one-month partition. That same partition,
-`bars_2026_06`, now holds 699,245 rows instead of 41,723 — 17× more — and reads **3.1654**, a
+`bars_2026_06`, now holds 699,245 rows instead of 41,723 — 16.76× more — and reads **3.1654**, a
 difference of **0.008%**. The pooled whole-table figure is 0.23% from the published one. The
 threshold that would require this document to explain a discrepancy is ~25%, so there is
 nothing to explain: the ratio is a property of the row width and the load order, not of the row
@@ -205,7 +219,10 @@ An earlier version of this table published one run per variant — 173,923 / 128
 **32,737** ms — taken back to back in that order, so each variant read a cache the ones before it
 had filled. The ordering it showed is right and survives repeats; the magnitude did not. It made
 the tuning look like **5.31×** where the medians make it **3.08×**. The superseded figures are
-named here rather than deleted, and `73164af`'s commit message still carries 32,737.
+named here rather than deleted: `73164af`'s commit message carries the whole table — 173,923,
+128,138, 112,306 and 32,737 — not only the last figure, and against the interleaved medians the
+middle two read **19.6% low** (128,138 against 159,437) and **13.9% low** (112,306 against
+130,421).
 
 **The counting join was against the 148,400-row session set, keyed on `symbol` as well as the
 trading date.** 148k against 41.7M is a shape the planner serves with a merge join, sorting
@@ -230,8 +247,8 @@ pipeline's gate reading `missing_units 0`, `coverage_pct 72.16`, `uningested_sym
 with a 1.2 GB spill, against 42.6 s with 71 parallel scans, 2 workers and no spill. **One
 observation per variant, not a median.** The structural half is a plan property and holds; treat
 the two timings as indicative rather than as a ratio. The 2026-08-31 re-capture read the shipped
-form at **89.3 s** — the same plan, the same 71 scans and 2 workers, twice the wall-clock — which
-is the run-to-run spread the coverage table above shows on query 9. 7,100 rows identical.
+form at **89.3 s** — the same plan, the same 71 scans and 2 workers, **2.1× the wall-clock** —
+which is the run-to-run spread the coverage table above shows on query 9. 7,100 rows identical.
 Its **pooled**
 complement of query 9 — `100 − 100 × sum(missing) / sum(expected)` over all 7,100 symbol-months —
 is **72.1564**, which is 72.16 at two decimals and
@@ -384,11 +401,12 @@ blocks changes nothing, and the prediction still holds at 0.42%.
 **Wall-clock at that ceiling is a wash and is not portable, exactly as the design predicted.**
 An earlier capture had query 9's forced scan at 105,024 ms against 92,575 free — 0.88×,
 *slower* — and query 10's at 102,370 ms against 133,978 free — 1.31×, faster. The 2026-08-31
-from-scratch re-capture reverses both: query 9 forced now runs
+from-scratch re-capture moves both: query 9 forced now runs
 **51,035 ms** against **122,178 ms** free — **2.39× faster** — and query 10 forced runs
-**50,361 ms** against **89,312 ms** free — **1.77× faster**. Which side wins flips completely
-between the two eras rather than merely disagreeing within one of them, and a full reversal
-argues the wash harder than the earlier split verdict did. The comparison is also serial against
+**50,361 ms** against **89,312 ms** free — **1.77× faster**. Query 9 flips sides entirely,
+slower becoming faster; query 10 stays on the faster side in both captures and only its
+magnitude moves. Neither outcome is stable across a from-scratch re-capture, which argues the
+wash at least as hard as the earlier split verdict did. The comparison is also serial against
 parallel, not two queries of the same shape against the same index: the forced variant runs at
 `max_parallel_workers_per_gather=0` while the free choice launches 2 workers over 71 parallel
 scans. The blocks, meanwhile, agree with the bytes to two figures on both. That gap is the whole
@@ -413,6 +431,12 @@ nothing wrong with it, so the parameters are half the measurement.
 | `03_gaps.sql` | 27 27 27 26 28 | **26.8 ms** | 431 | <100 ms | pass |
 | `06_daily_rollup.sql` | 27 29 28 26 27 | **26.7 ms** | 420 | <100 ms | pass |
 
+The run column is the harness's console output, rounded to whole milliseconds; the median is
+computed from the unrounded values to one decimal. That is why `03_gaps.sql`'s printed runs (27
+27 27 26 28) have an integer median of 27 against the reported 26.8, and `06_daily_rollup.sql`'s
+(27 29 28 26 27) likewise print a median of 27 against the reported 26.7 — a verifier
+recomputing the median from the printed column has not found a defect.
+
 Roughly 420 blocks each — about 3.4 MB — because partition pruning takes a 90-day window down
 to three monthly partitions and the PK then serves one symbol out of them.
 
@@ -422,10 +446,10 @@ mechanism that has existed since Feature 1:
 
 | query | before (constructed) | after | ratio | before plan | after plan |
 | --- | ---: | ---: | ---: | --- | --- |
-| `01_volatility.sql` | 25,088 | 423 | **59.31×** | 3 parallel seq scans, 2 workers | 1 index scan, 0 workers |
-| `03_gaps.sql` | 25,117 | 431 | **58.28×** | 3 parallel seq scans, 2 workers | 1 index scan, 0 workers |
-| `06_daily_rollup.sql` | 25,085 | 420 | **59.73×** | 3 parallel seq scans, 2 workers | 1 index scan, 0 workers |
-| `02_correlation.sql` (Class B) | 25,125 | 830 | 30.27× | 3 parallel seq scans, 2 workers | 1 index scan, 0 workers |
+| `01_volatility.sql` | 25,088 | 423 | **59.31×** | 3 parallel seq scans + seq scan on `market_days`, 2 workers | 3 bitmap index + 3 bitmap heap scans on `bars`, index scan on `market_days`, 0 workers |
+| `03_gaps.sql` | 25,117 | 431 | **58.28×** | 3 parallel seq scans + seq scan on `market_days`, 2 workers | 3 bitmap index + 3 bitmap heap scans on `bars`, index scan on `market_days`, 0 workers |
+| `06_daily_rollup.sql` | 25,085 | 420 | **59.73×** | 3 parallel seq scans + seq scan on `market_days`, 2 workers | 3 bitmap index + 3 bitmap heap scans on `bars`, index scan on `market_days`, 0 workers |
+| `02_correlation.sql` (Class B) | 25,125 | 830 | 30.27× | 3 parallel seq scans + seq scan on `market_days`, 2 workers | 3 bitmap index + 3 bitmap heap scans on `bars`, index scan on `market_days`, 0 workers |
 
 **Class A's block reduction is roughly double Class B's**, and the reason is the whole basis of
 the class split: these read one symbol where query 2 reads two. Selectivity is what the index
@@ -484,8 +508,10 @@ argument for gating on blocks: a 10× target read off the stopwatch **fails** th
 on the same runs where its block ratio passes three times over, and a colder cache would have
 moved that verdict again without a single block changing.
 
-This number is only meaningful because of the heap it was measured on. On a day-major heap the
-same query and the same index measure 1.13–1.42×, and the gate fails. See
+This number is only meaningful because of the heap it was measured on. On a day-major heap — a
+fixture measurement from the design work, not one taken on this database, since reproducing it
+here would mean rewriting 41.7M rows — the same query and the same index measure 1.13–1.42×, and
+the gate fails. See
 [The heap the numbers rest on](#the-heap-the-numbers-rest-on) — 0 inversions, 0 split runs,
 every symbol on ~1% of the pages.
 

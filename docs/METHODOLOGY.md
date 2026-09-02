@@ -79,7 +79,7 @@ The clamp binds: without it the depth would be 1,797,359.
 
 `HEAP_INDEX_BYTE_RATIO` is the yardstick for the two coverage queries that scan the primary key,
 and for nothing else. It was measured on a 5-ticker, one-month partition and has since been
-re-checked against that same partition 17× fuller — **3.1654**, 0.008% from the published figure —
+re-checked against that same partition 16.8× fuller — **3.1654**, 0.008% from the published figure —
 and against all 71 pooled, **3.1584**. It is driven by B-tree leaf fill, so it is comparable only
 across partitions written in primary-key order, which this pipeline produces by construction: a
 unit's rows all belong to one partition and arrive in ascending `ts`. A hand-built fixture does not
