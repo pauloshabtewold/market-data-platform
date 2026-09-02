@@ -4,7 +4,8 @@ import psycopg
 import pytest
 
 from db.session import connect
-from tests.market_fixture import PLAIN_TUESDAY, close_ts, ensure_partition, open_ts
+from ingest.pipeline import ensure_partition
+from tests.market_fixture import PLAIN_TUESDAY, close_ts, open_ts
 
 
 def _market_day(conn, day, open_ts_, close_ts_, minutes):

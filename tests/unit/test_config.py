@@ -13,7 +13,12 @@ REQUIRED = {
     "DATABASE_URL": "postgresql://postgres:postgres@127.0.0.1:5432/marketdata",
 }
 
-MEASURED = ("BARS_PER_TICKER_DAY", "DEEP_PAGE_DEPTH", "HEAP_INDEX_BYTE_RATIO")
+MEASURED = (
+    "BARS_PER_TICKER_DAY",
+    "DEEP_PAGE_DEPTH",
+    "HEAP_INDEX_BYTE_RATIO",
+    "HEAP_INDEX_COVERING_RATIO",
+)
 
 DEFAULTED = (
     "ALPACA_FEED",
@@ -35,6 +40,11 @@ def test_measured_keys_are_absent_legitimately(clean_env):
     settings = Settings(_env_file=None, **REQUIRED)
     for key in MEASURED:
         assert getattr(settings, key) is None
+
+
+def test_measured_and_measured_by_name_the_same_keys():
+    # a duplicated list is what let this tuple drift a key behind config.py's _MEASURED_BY once
+    assert set(MEASURED) == set(config._MEASURED_BY)
 
 
 def test_require_raises_naming_the_missing_key(monkeypatch):
@@ -93,8 +103,10 @@ def test_a_hot_window_too_short_for_the_widest_endpoint_window_is_refused():
 
 
 def test_the_hot_window_floor_follows_the_window_it_has_to_contain():
-    # the floor is derived, not the literal 4: widening the endpoint cap past what four months
-    # can guarantee has to fail here rather than leave the index quietly too short
-    assert Settings(_env_file=None, HOT_WINDOW_MONTHS=4, **REQUIRED).HOT_WINDOW_MONTHS == 4
+    # 120 is the exact minimum four months can guarantee -- pinned at both edges so a floor that
+    # were the literal 4 rather than this arithmetic could not also produce the 89-day rejection
+    Settings(_env_file=None, HOT_WINDOW_MONTHS=4, AGG_MAX_WINDOW_DAYS=120, **REQUIRED)
+    with pytest.raises(ValidationError, match="89 days"):
+        Settings(_env_file=None, HOT_WINDOW_MONTHS=3, AGG_MAX_WINDOW_DAYS=120, **REQUIRED)
     with pytest.raises(ValidationError, match="120 days"):
         Settings(_env_file=None, HOT_WINDOW_MONTHS=4, AGG_MAX_WINDOW_DAYS=121, **REQUIRED)
