@@ -10,6 +10,8 @@ from tests.market_fixture import (
     TRADING_DAYS,
     WINDOW_END,
     WINDOW_START,
+    bar_ts,
+    ensure_partition,
     expected_rollup,
     load,
     load_calendar,
@@ -107,6 +109,36 @@ def test_the_direction_counts_partition_the_gaps_exactly(migrated_dsn, query_sql
     row = _read(dsn, query_sql)
 
     assert row[9] + row[10] + row[11] == row[0]
+
+
+def test_a_flat_open_counts_as_neither_up_nor_down(migrated_dsn, query_sql):
+    load_calendar(migrated_dsn)
+    # one bar per session, priced so the second session's open lands on the first session's
+    # close exactly -- an exactly-0.00% gap, which no other fixture in this file produces
+    with connect(migrated_dsn) as conn:
+        for day in (PLAIN_TUESDAY, HALF_DAY):
+            ensure_partition(conn, day)
+        conn.execute(
+            "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+            " VALUES ('FLATGAP', 'FLATGAP', 'X', true, %s)",
+            (bar_ts(PLAIN_TUESDAY, 0),),
+        )
+        for day in (PLAIN_TUESDAY, HALF_DAY):
+            conn.execute(
+                "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                " VALUES ('FLATGAP', %s, 100, 100, 100, 100, 10, 1, 100)",
+                (bar_ts(day, 0),),
+            )
+        conn.commit()
+
+    row = _read(migrated_dsn, query_sql, symbol="FLATGAP")
+
+    # a gap_pct of exactly 0 belongs to gaps_flat alone -- gaps_up loosened from > 0 to >= 0
+    # would double-count this same gap into gaps_up as well
+    assert row[0] == 1
+    assert row[9] == 0
+    assert row[10] == 0
+    assert row[11] == 1
 
 
 def test_the_quartiles_stay_numeric_rather_than_crossing_into_double_precision(migrated_dsn, query_sql):

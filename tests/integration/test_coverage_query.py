@@ -303,8 +303,9 @@ def test_the_bounded_cte_is_inlined_rather_than_materialised(loaded, query_sql):
     # and this assertion is plan-shape independent. bounded is referenced three times, so without
     # it Postgres materialises the CTE, the planner loses market_days' statistics, and it cannot
     # cost a hash join -- it falls back to a merge join and sorts every bar in the database.
-    # Measured on the full universe: 173.9 s serial with a spill, against 32.7 s with 71 parallel
-    # scans, 2 workers launched and no spill at all
+    # Measured on the full universe, medians of three interleaved runs: 179.4 s serial with a
+    # merge join and a spill, against 58.3 s with 71 parallel scans, 2 workers and no spill at
+    # all. docs/QUERY_PERFORMANCE.md carries the four-variant table and the run spread.
     assert "CTE Scan on bounded" not in plan
     assert "CTE bounded" not in plan
 
@@ -329,3 +330,30 @@ def test_the_numerator_does_not_depend_on_the_first_bar_floor(migrated_dsn, quer
     # both bars reach the numerator; the denominator is floored to the second and third sessions,
     # 390 + 210 = 600 minutes, so 100 * 2 / 600 = 0.33
     assert detail["EARLYBIRD"] == Decimal("0.33")
+
+
+def test_a_symbol_ingested_but_silent_in_the_window_reports_zero_rather_than_null(loaded, query_sql):
+    # GHOST is ingested -- first_bar_ts is set -- but printed no bars anywhere in the window: a
+    # symbol delisted mid-window, or listed but silent. the LEFT JOIN in actual misses it entirely
+    _add_symbol(loaded, "GHOST", _ts(FULL_DAYS[0], OPEN_UTC))
+
+    detail = dict(_read(loaded, query_sql)[:-3])
+
+    # without the coalesce guard, actual and coverage_pct both come back NULL for a LEFT JOIN
+    # miss instead of the honest zero -- 0 bars over 990 minutes is 0.00, not "no data"
+    assert detail["GHOST"] == Decimal("0.00")
+
+
+def test_a_symbol_whose_first_bar_ts_lands_on_a_sessions_close_is_floored_past_that_session(migrated_dsn, query_sql):
+    _seed(migrated_dsn)
+    # BOUNDARY's first_bar_ts is FULL_DAYS[0]'s close_ts exactly: a > excludes that session from
+    # the denominator, since nothing of the symbol could have traded in it; a >= would wrongly
+    # count a session it never reached
+    _add_symbol(migrated_dsn, "BOUNDARY", _ts(FULL_DAYS[0], CLOSE_UTC))
+    _add_bars(migrated_dsn, "BOUNDARY", [_ts(FULL_DAYS[1], OPEN_UTC), _ts(FULL_DAYS[1], OPEN_UTC, 1)])
+
+    detail = dict(_read(migrated_dsn, query_sql)[:-3])
+
+    # floored past FULL_DAYS[0], the denominator is FULL_DAYS[1] + HALF_DAY = 600 minutes:
+    # 100 * 2 / 600 = 0.33; counting FULL_DAYS[0] too would give 100 * 2 / 990 = 0.20
+    assert detail["BOUNDARY"] == Decimal("0.33")

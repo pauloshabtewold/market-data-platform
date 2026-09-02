@@ -4,6 +4,7 @@ from db.session import connect
 from tests.market_fixture import (
     DST_FRIDAY_EST,
     DST_MONDAY_EDT,
+    PLAIN_TUESDAY,
     TRADING_DAYS,
     WINDOW_END,
     WINDOW_START,
@@ -245,4 +246,31 @@ def test_the_annualisation_scales_by_the_minutes_in_a_year_rather_than_the_days(
     # read like a typo someone corrects
     scaled = [r[4] / r[3] for r in rows if r[3] >= Decimal("0.01")]
     assert scaled
-    assert all(Decimal("313.49") < f < Decimal("313.50") for f in scaled), scaled
+    # sqrt(98280) is 313.4964114627..., and on this fixture the two roundings (annualized_pct to
+    # 4 places, stddev_pct to 6) leave the ratio within a few parts in a million of it. +-0.0005
+    # stays two orders of magnitude above that noise while still catching the constant drifting
+    # by even 1 -- its nearest integer neighbours move the ratio by ~0.0016, over three times as
+    # far as the tolerance allows
+    assert all(Decimal("313.4959") < f < Decimal("313.4969") for f in scaled), scaled
+
+
+def test_the_final_order_by_holds_even_under_a_forced_hash_aggregate(migrated_dsn, query_sql):
+    load_calendar(migrated_dsn)
+    # eleven distinct 30-minute buckets from twelve bars: the first two share bucket 0, and every
+    # bar after that opens a fresh bucket, so each of the eleven holds exactly one return
+    minutes = (0, 1, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300)
+    load_sparse_symbol(migrated_dsn, "MANY", (PLAIN_TUESDAY,), minutes)
+
+    with connect(migrated_dsn) as conn:
+        # the free-choice plan is a GroupAggregate fed by a Sort keyed on bucket_minute itself,
+        # which hands the final ORDER BY its order for free and hides a missing clause entirely.
+        # forcing a HashAggregate removes that incidental ordering -- a hash aggregate's output
+        # order tracks its hash table, not its input, regardless of how the rows arrived
+        conn.execute("SET enable_hashagg = on")
+        conn.execute("SET enable_sort = off")
+        rows = conn.execute(
+            query_sql("01_volatility.sql"),
+            {"symbol": "MANY", "start": WINDOW_START, "end": WINDOW_END},
+        ).fetchall()
+
+    assert [r[0] for r in rows] == sorted(r[0] for r in rows)

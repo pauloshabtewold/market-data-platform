@@ -115,6 +115,21 @@ def test_the_profile_pools_the_whole_universe_rather_than_one_symbol(migrated_ds
     assert rows[0]["bars"] == 3 * len(TRADING_DAYS) * BARS_PER_SESSION
 
 
+def test_the_volume_trade_and_mean_columns_are_pinned_to_the_fixture(migrated_dsn, query_sql):
+    load_calendar(migrated_dsn)
+    # every bar this fixture writes carries volume=100 and trade_count=1, so the sum and the
+    # mean of the same column diverge sharply and a swap between sum and avg cannot pass by
+    # coincidence the way it would if the totals happened to equal the averages
+    load_sparse_symbol(migrated_dsn, "SPREAD", TRADING_DAYS, (0, 65, 125))
+
+    rows = {r["session_hour"]: r for r in _read(migrated_dsn, query_sql)}
+
+    for hour in (0, 1, 2):
+        assert rows[hour]["volume"] == 100 * len(TRADING_DAYS)
+        assert rows[hour]["trades"] == len(TRADING_DAYS)
+        assert rows[hour]["mean_volume_per_bar"] == Decimal("100.0")
+
+
 def test_the_file_binds_no_parameters_at_all(query_sql, repo_root):
     rendered = query_sql("04_volume_profile.sql")
 

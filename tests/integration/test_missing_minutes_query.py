@@ -205,7 +205,28 @@ def test_the_bounded_cte_is_inlined_rather_than_materialised(migrated_dsn, query
             ).fetchall()
         )
 
-    # same directive and same reason as 09_coverage.sql's. measured on the full universe:
-    # 131.1 s serial with a 1.2 GB spill, against 42.6 s with 71 parallel scans and no spill
+    # same directive and same reason as 09_coverage.sql's. one observation per variant, not a
+    # median: 131.1 s serial with a 1.2 GB spill, against 42.6 s with 71 parallel scans, 2
+    # workers and no spill. treat the two timings as indicative rather than as a ratio.
     assert "CTE Scan on bounded" not in plan
     assert "CTE bounded" not in plan
+
+
+def test_a_symbol_ingested_but_silent_in_the_month_reports_full_absence_rather_than_null(migrated_dsn, query_sql):
+    load_calendar(migrated_dsn)
+    with connect(migrated_dsn) as conn:
+        conn.execute(
+            "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+            " VALUES ('GHOST','GHOST','X',true,%s)",
+            (open_ts(TRADING_DAYS[0]),),
+        )
+        conn.commit()
+
+    row = _read(migrated_dsn, query_sql)[0]
+
+    # GHOST is ingested -- first_bar_ts is set -- but printed no bars in the window at all: a
+    # symbol delisted mid-window, or listed but silent. without the coalesce guard the LEFT JOIN
+    # miss on actual propagates NULL through missing and missing_pct instead of the honest 100%
+    assert row["actual"] == 0
+    assert row["missing"] == TOTAL_SESSION_MINUTES
+    assert row["missing_pct"] == Decimal("100.00")

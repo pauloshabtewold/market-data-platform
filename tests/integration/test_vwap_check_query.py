@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 
 from psycopg.rows import dict_row
@@ -94,6 +95,9 @@ def test_the_session_bar_count_excludes_the_bar_exactly_on_close_ts(migrated_dsn
     assert row["extended_bars"] == 2
 
 
+_FORBIDDEN_COLUMN = re.compile(r"\b(high|low|close)\b", re.IGNORECASE)
+
+
 def test_the_query_reads_only_the_columns_the_covering_index_carries(query_sql, repo_root):
     body = (repo_root / "db" / "queries" / "07_vwap_check.sql").read_text()
 
@@ -103,12 +107,11 @@ def test_the_query_reads_only_the_columns_the_covering_index_carries(query_sql, 
     # VACUUM recovers it. An earlier draft reconstructed a typical price from high, low and
     # close; measured, the forced scan then reported 0 index-only scans and 682,813 root blocks
     # against the seq scan's 514,260 -- 0.75x, worse than what it replaced -- and the byte-ratio
-    # prediction missed by 60%. Asserting the file text is weak, and it is the only instrument
-    # that catches the column being added back.
+    # prediction missed by 60%. A plain substring scan for "b.high" reads straight through a
+    # quoted b."high", which names the same column, so this matches on a word boundary instead --
+    # quote characters are not word characters, so they cannot hide an identifier inside one.
     select_body = body[body.index("WITH stamped"):]
-    for forbidden in ("b.high", "b.low", "b.close", "s.high", "s.low", "s.close",
-                      "high +", "+ low", "+ close"):
-        assert forbidden not in select_body, forbidden
+    assert not _FORBIDDEN_COLUMN.search(select_body)
     for needed in ("b.vwap", "b.volume", "b.symbol", "b.ts"):
         assert needed in select_body, needed
 

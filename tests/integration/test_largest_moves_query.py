@@ -104,6 +104,18 @@ def test_the_limit_caps_the_result(planted, query_sql):
     assert [r["symbol"] for r in rows] == ["DOWN", "UP"]
 
 
+def test_a_bar_with_a_zero_open_is_excluded_rather_than_dividing_by_zero(planted, query_sql):
+    # ingest/validate.py rejects a zero open before it ever reaches the database, and that is
+    # the only thing that forbids one -- there is no CHECK on bars.open in db/schema.sql or any
+    # migration -- so this plants one directly, the way every fixture in this file does, rather
+    # than trust that a loader sitting in front of the database is never bypassed
+    _plant(planted, "ZERO", PLAIN_TUESDAY, 4, Decimal(0), Decimal(50))
+
+    rows = _read(planted, query_sql)
+
+    assert "ZERO" not in [r["symbol"] for r in rows]
+
+
 def test_the_ranking_is_deterministic_when_two_moves_tie(migrated_dsn, query_sql):
     load_calendar(migrated_dsn)
     for symbol in ("ZZZ", "AAA", "MMM"):
