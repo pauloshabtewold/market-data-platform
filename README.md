@@ -7,8 +7,9 @@ over 2020-08-01 to 2026-06-30, from Alpaca's IEX feed.
 
 ## Status
 
-The ingest pipeline and the database layer are built and tested. **The read API is not** —
-`api/` is a directory of empty files, so there is no HTTP surface yet.
+The ingest pipeline and the database layer are built and tested. The read API is a scaffold:
+`/health` is the only endpoint it serves. **The endpoints that read market data are not built
+yet** — the cursor, the error shape and the connection pool are in place ahead of them.
 
 Loaded: **41,668,537 bars** across the full universe, in **42.4 minutes**. That is measured
 on the loaded data, not projected onto it.
@@ -61,7 +62,7 @@ already recorded. Widening the window and re-running is the supported path.
 ```
 ingest/     feed client, retry/throttle, calendar, symbol resolution, validation, pipeline
 db/         schema, migrations, session
-api/        empty — the read API is not built yet
+api/        app factory, connection pool, keyset cursors, the one error shape, /health
 tests/      unit and integration suites, run in CI
 ```
 

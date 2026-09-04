@@ -1,3 +1,4 @@
+import logging
 from datetime import date
 
 from pydantic import model_validator
@@ -25,6 +26,14 @@ class Settings(BaseSettings):
     # at 4 because it must contain AGG_MAX_WINDOW_DAYS, the widest window an endpoint can ask for
     HOT_WINDOW_MONTHS: int = 4
 
+    BARS_PAGE_DEFAULT: int = 1000
+    BARS_PAGE_MAX: int = 10000
+    AGG_PAGE_DEFAULT: int = 100
+    AGG_PAGE_MAX: int = 1000
+    DB_POOL_MIN: int = 1
+    DB_POOL_MAX: int = 10
+    LOG_LEVEL: str = "INFO"
+
     BARS_PER_TICKER_DAY: float | None = None
     DEEP_PAGE_DEPTH: int | None = None
     HEAP_INDEX_BYTE_RATIO: float | None = None
@@ -48,6 +57,34 @@ class Settings(BaseSettings):
                 f"HOT_WINDOW_MONTHS={self.HOT_WINDOW_MONTHS} spans as few as {shortest} days,"
                 f" which cannot contain AGG_MAX_WINDOW_DAYS={self.AGG_MAX_WINDOW_DAYS};"
                 " the hot-window index would not cover the widest window an endpoint can ask for"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _page_pool_and_log_level_bounds_hold(self):
+        if self.BARS_PAGE_DEFAULT > self.BARS_PAGE_MAX:
+            raise ValueError(
+                f"BARS_PAGE_DEFAULT={self.BARS_PAGE_DEFAULT} exceeds"
+                f" BARS_PAGE_MAX={self.BARS_PAGE_MAX}"
+            )
+        if self.AGG_PAGE_DEFAULT > self.AGG_PAGE_MAX:
+            raise ValueError(
+                f"AGG_PAGE_DEFAULT={self.AGG_PAGE_DEFAULT} exceeds"
+                f" AGG_PAGE_MAX={self.AGG_PAGE_MAX}"
+            )
+        if self.DB_POOL_MIN > self.DB_POOL_MAX:
+            raise ValueError(
+                f"DB_POOL_MIN={self.DB_POOL_MIN} exceeds DB_POOL_MAX={self.DB_POOL_MAX}"
+            )
+        if self.DB_POOL_MAX < 1:
+            raise ValueError(
+                f"DB_POOL_MAX={self.DB_POOL_MAX} is below the minimum pool size of 1"
+            )
+        # checked here because basicConfig accepts a bad level silently once a handler already exists
+        if self.LOG_LEVEL not in logging.getLevelNamesMapping():
+            raise ValueError(
+                f"LOG_LEVEL={self.LOG_LEVEL!r} is not one of"
+                f" {sorted(logging.getLevelNamesMapping())}"
             )
         return self
 

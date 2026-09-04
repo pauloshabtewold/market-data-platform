@@ -27,6 +27,34 @@ DEFAULTED = (
     "RATE_LIMIT_RPM",
     "HTTP_MAX_ATTEMPTS",
     "AGG_MAX_WINDOW_DAYS",
+    "HOT_WINDOW_MONTHS",
+    "BARS_PAGE_DEFAULT",
+    "BARS_PAGE_MAX",
+    "AGG_PAGE_DEFAULT",
+    "AGG_PAGE_MAX",
+    "DB_POOL_MIN",
+    "DB_POOL_MAX",
+    "LOG_LEVEL",
+)
+
+# duplicated from config.py's _MEASURED_BY on purpose -- reading it back would let a changed
+# phrase move both sides of an equality assertion and the mutation it exists to catch would survive
+MEASURED_PHRASES = {
+    "BARS_PER_TICKER_DAY": "the sample ingest run",
+    "DEEP_PAGE_DEPTH": "the sample ingest run against the loaded calendar",
+    "HEAP_INDEX_BYTE_RATIO": "the loaded partition's heap and index sizes",
+    "HEAP_INDEX_COVERING_RATIO": (
+        "the loaded partition's heap against the covering index"
+        " (symbol, ts) INCLUDE (vwap, volume)"
+    ),
+}
+
+# same reasoning as MEASURED_PHRASES, for config.py's _MEASURED_FALLBACK
+MEASURED_FALLBACK_PHRASE = "a measurement recorded in docs/"
+
+EXPECTED_REQUIRE_MESSAGE = (
+    "{key} is unset; it is measured from {phrase} and written into .env by hand;"
+    " docs/METHODOLOGY.md carries every measured value with its arithmetic"
 )
 
 
@@ -51,7 +79,9 @@ def test_require_raises_naming_the_missing_key(monkeypatch):
     monkeypatch.setattr(config.settings, "DEEP_PAGE_DEPTH", None)
     with pytest.raises(RuntimeError) as excinfo:
         config.require("DEEP_PAGE_DEPTH")
-    assert "DEEP_PAGE_DEPTH" in str(excinfo.value)
+    assert str(excinfo.value) == EXPECTED_REQUIRE_MESSAGE.format(
+        key="DEEP_PAGE_DEPTH", phrase=MEASURED_PHRASES["DEEP_PAGE_DEPTH"]
+    )
 
 
 def test_require_returns_the_value_once_measured(monkeypatch):
@@ -75,14 +105,24 @@ def test_defaults_match_the_documented_values(clean_env):
     assert settings.RATE_LIMIT_RPM == 200
     assert settings.HTTP_MAX_ATTEMPTS == 5
     assert settings.AGG_MAX_WINDOW_DAYS == 90
+    assert settings.BARS_PAGE_DEFAULT == 1000
+    assert settings.BARS_PAGE_MAX == 10000
+    assert settings.AGG_PAGE_DEFAULT == 100
+    assert settings.AGG_PAGE_MAX == 1000
+    assert settings.DB_POOL_MIN == 1
+    assert settings.DB_POOL_MAX == 10
+    assert settings.LOG_LEVEL == "INFO"
 
 
 def test_require_raises_runtime_error_for_a_key_no_one_mapped(monkeypatch):
     # a later feature adds the Settings field and forgets the _MEASURED_BY entry: still RuntimeError, never KeyError
     monkeypatch.setattr(config, "_MEASURED_BY", {})
     monkeypatch.setattr(config.settings, "DEEP_PAGE_DEPTH", None)
-    with pytest.raises(RuntimeError, match="DEEP_PAGE_DEPTH"):
+    with pytest.raises(RuntimeError) as excinfo:
         config.require("DEEP_PAGE_DEPTH")
+    assert str(excinfo.value) == EXPECTED_REQUIRE_MESSAGE.format(
+        key="DEEP_PAGE_DEPTH", phrase=MEASURED_FALLBACK_PHRASE
+    )
 
 
 def test_every_optional_setting_is_reachable_through_require(monkeypatch):
@@ -110,3 +150,61 @@ def test_the_hot_window_floor_follows_the_window_it_has_to_contain():
         Settings(_env_file=None, HOT_WINDOW_MONTHS=3, AGG_MAX_WINDOW_DAYS=120, **REQUIRED)
     with pytest.raises(ValidationError, match="120 days"):
         Settings(_env_file=None, HOT_WINDOW_MONTHS=4, AGG_MAX_WINDOW_DAYS=121, **REQUIRED)
+
+
+def test_a_bars_page_default_over_its_max_is_refused(clean_env):
+    with pytest.raises(ValidationError, match="BARS_PAGE_DEFAULT"):
+        Settings(_env_file=None, BARS_PAGE_DEFAULT=20000, **REQUIRED)
+
+
+def test_an_agg_page_default_over_its_max_is_refused(clean_env):
+    with pytest.raises(ValidationError, match="AGG_PAGE_DEFAULT"):
+        Settings(_env_file=None, AGG_PAGE_DEFAULT=5000, **REQUIRED)
+
+
+def test_a_pool_minimum_over_its_maximum_is_refused(clean_env):
+    with pytest.raises(ValidationError, match="DB_POOL_MIN"):
+        Settings(_env_file=None, DB_POOL_MIN=11, **REQUIRED)
+
+
+def test_a_pool_maximum_below_one_is_refused(clean_env):
+    # DB_POOL_MIN=0 alongside DB_POOL_MAX=0 so this trips only the floor rule, not DB_POOL_MIN > DB_POOL_MAX too
+    with pytest.raises(ValidationError, match="DB_POOL_MAX"):
+        Settings(_env_file=None, DB_POOL_MIN=0, DB_POOL_MAX=0, **REQUIRED)
+
+
+def test_an_unknown_log_level_is_refused(clean_env):
+    with pytest.raises(ValidationError, match="LOG_LEVEL"):
+        Settings(_env_file=None, LOG_LEVEL="NOTALEVEL", **REQUIRED)
+
+
+def test_require_names_the_measurement_behind_every_measured_key(monkeypatch):
+    for key, phrase in MEASURED_PHRASES.items():
+        monkeypatch.setattr(config.settings, key, None)
+        with pytest.raises(RuntimeError) as excinfo:
+            config.require(key)
+        assert str(excinfo.value) == EXPECTED_REQUIRE_MESSAGE.format(key=key, phrase=phrase)
+
+
+def test_the_page_and_pool_keys_are_integers(clean_env, monkeypatch):
+    numeric_keys = (
+        "BARS_PAGE_DEFAULT",
+        "BARS_PAGE_MAX",
+        "AGG_PAGE_DEFAULT",
+        "AGG_PAGE_MAX",
+        "DB_POOL_MIN",
+        "DB_POOL_MAX",
+    )
+    defaults = Settings(_env_file=None, **REQUIRED)
+    for key in numeric_keys:
+        assert type(getattr(defaults, key)) is int
+    assert type(defaults.LOG_LEVEL) is str
+
+    # values supplied as environment strings, the way a real .env supplies them -- proves
+    # coercion happens rather than that a literal of the right type was written in the class body
+    for key in numeric_keys:
+        monkeypatch.setenv(key, str(getattr(defaults, key)))
+    from_env = Settings(_env_file=None, **REQUIRED)
+    for key in numeric_keys:
+        assert type(getattr(from_env, key)) is int
+    assert type(from_env.LOG_LEVEL) is str
