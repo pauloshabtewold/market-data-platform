@@ -42,6 +42,23 @@ class _RecordingPool:
         self.closed = True
 
 
+def _served(router, prefix=""):
+    """Every (path, method) a router answers, descending into the routers included in it."""
+    for route in router.routes:
+        methods = getattr(route, "methods", None)
+        if methods is not None:
+            for method in methods:
+                yield prefix + route.path, method
+            continue
+        inner = getattr(route, "original_router", None)
+        context = getattr(route, "include_context", None)
+        # a container this cannot descend into -- a Mount, a WebSocketRoute, whatever a later
+        # fastapi introduces. It fails rather than skipping: a route object nobody enumerates is
+        # exactly how four routes were served for a feature whose README said it served one.
+        assert inner is not None, f"cannot enumerate a {type(route).__name__}; extend this"
+        yield from _served(inner, prefix + (getattr(context, "prefix", "") or ""))
+
+
 @pytest.fixture
 def _reset_root_log_level():
     original = logging.getLogger().level
@@ -151,23 +168,16 @@ def test_the_app_serves_exactly_the_routes_this_feature_claims():
     # chose, so four routes FastAPI mounts by default were served for a feature whose README,
     # commit message and plan all say /health is the only one.
     #
-    # Two sources, because neither is the surface on its own. /docs, /redoc and /openapi.json are
-    # plain Starlette routes that never appear in the OpenAPI document, so the document alone is
-    # blind to the defect this test exists for; and include_router appends one opaque wrapper with
-    # no .path and no .methods rather than copying its routes in, so app.routes alone is blind to
-    # every endpoint the next feature adds -- and reads as a clean pass while they are served.
-    # A route object with no .methods is therefore expected here rather than an error.
-    # Out of scope, deliberately: an app mounted with app.mount() is in neither collection, and
-    # redirect_slashes is a property of this app's own router and does not reach one.
+    # The router tree, not app.routes and not the OpenAPI document. app.routes stops being the
+    # surface at the first include_router -- since 0.141 fastapi appends one opaque wrapper rather
+    # than copying the routes in -- and the document omits anything carrying include_in_schema=False
+    # as well as /docs and /openapi.json themselves, so either alone reads as a clean pass while
+    # routes are served. Verified across both prefix forms, nesting, and include_in_schema=False.
+    # Out of scope, deliberately: redirect_slashes is a property of this app's own router and does
+    # not reach a mounted sub-application.
     app = create_app(dsn=DEAD_DSN)
-    served = {(route.path, method) for route in app.routes for method in getattr(route, "methods", ())}
-    served |= {
-        (path, method.upper())
-        for path, operations in app.openapi()["paths"].items()
-        for method in operations
-    }
     # GET alone: FastAPI's APIRoute does not add the implicit HEAD that Starlette's Route does
-    assert served == {("/health", "GET")}
+    assert set(_served(app.router)) == {("/health", "GET")}
 
 
 def test_a_trailing_slash_is_refused_in_the_one_error_shape_rather_than_redirected():

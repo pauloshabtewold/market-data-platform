@@ -40,8 +40,14 @@ def built(repo_root, tmp_path_factory):
     tracked = [name for name in listing.split("\0") if name]
     assert tracked, "git ls-files returned nothing, so this fixture would build an empty tree"
     # git excludes the credential file because it is untracked, which is a weaker guarantee than the
-    # denylist's -- the denylist named it and would have held even against a `git add -f`
-    assert ".env" not in tracked, "the credential file is tracked; it must never reach a build copy"
+    # denylist's -- the denylist named it and would have held even against a `git add -f`. Every
+    # .env* but the committed example, because .gitignore has had to be extended for a variant once
+    # already and the next one is a file nobody remembers to add.
+    leaked = [
+        name for name in tracked
+        if name.rsplit("/", 1)[-1].startswith(".env") and name != ".env.example"
+    ]
+    assert not leaked, f"a credential file is tracked and must not reach a build copy: {leaked}"
     for name in tracked:
         origin = repo_root / name
         # a submodule is a gitlink and a symlink to a directory resolves to one; copy2 raises
