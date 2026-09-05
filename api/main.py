@@ -41,7 +41,9 @@ def create_app(dsn: str | None = None) -> FastAPI:
         redoc_url=None,
         openapi_url=None,
         # a 307 to the unslashed path carries no body, so it is the one response that escapes the
-        # single error shape; off, an unrouted /health/ is the 404 the handler already builds
+        # single error shape; off, an unrouted /health/ is the 404 the handler already builds.
+        # It governs this app's own router, which every include_router route joins -- a sub-app
+        # added with app.mount() keeps its own router and its own 307.
         redirect_slashes=False,
     )
     install_error_handlers(app)

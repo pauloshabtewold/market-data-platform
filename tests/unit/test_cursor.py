@@ -22,17 +22,32 @@ def test_a_cursor_round_trips_through_encode_and_decode():
 
     # encode validates nothing, so the renderer refusing a wrong type is the only loud failure --
     # and datetime subclasses date, so a lenient day renderer would drop the time and hand two
-    # different rows the same cursor instead of raising
-    with pytest.raises(TypeError):
+    # different rows the same cursor instead of raising.
+    # The message is pinned by full-string equality for all three, written out rather than imported:
+    # building the expected from the renderer moves both sides and the mutation survives (DL-010).
+    with pytest.raises(TypeError) as excinfo:
         encode_cursor(DAILY_CURSOR, {"day": datetime(2026, 6, 30, 20, 54, tzinfo=timezone.utc)})
+    assert str(excinfo.value) == "day renders a date, not datetime"
     # and the mirror: a naive ts encodes fine but this module's own decoder refuses it, so the
     # endpoint would issue a next_cursor that its own next request is then refused for
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError) as excinfo:
         encode_cursor(BARS_CURSOR, {"ts": datetime(2026, 6, 30, 20, 54)})
+    assert str(excinfo.value) == "ts renders an aware datetime, not datetime"
     # and the third renderer: bare str renders every type, so a NULL symbol column would encode to
     # the literal cursor value "None" and page against a symbol that does not exist
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError) as excinfo:
         encode_cursor(UNIVERSE_CURSOR, {"ts": values["ts"], "symbol": None})
+    assert str(excinfo.value) == "symbol renders a str, not NoneType"
+
+    # exact type and not isinstance, which is what the day renderer's own comment and the decoder's
+    # wrong_types guard both say this family must stay: a str subclass is the value that separates
+    # them, and nothing else in this suite supplies one
+    class _Symbolish(str):
+        pass
+
+    with pytest.raises(TypeError) as excinfo:
+        encode_cursor(UNIVERSE_CURSOR, {"ts": values["ts"], "symbol": _Symbolish("AAPL")})
+    assert str(excinfo.value) == "symbol renders a str, not _Symbolish"
 
 
 def test_each_decode_step_reports_the_step_that_rejected_it():
@@ -43,6 +58,10 @@ def test_each_decode_step_reports_the_step_that_rejected_it():
         (base64.urlsafe_b64encode(b"{not json").decode(), "not_json"),
         (enc({"day": "2026-06-30"}), "wrong_fields"),
         (enc({"ts": "2026-06-30T20:54:00+00:00", "extra": "x"}), "wrong_fields"),
+        # the missing-field direction, where a subset check would accept and the parser would then
+        # raise KeyError -- an unhandled 500 where spec line 503 requires a 400. The two cases above
+        # are both rejected by a subset check as well, so neither of them can see it.
+        (enc({}), "wrong_fields"),
         (enc({"ts": 12345}), "wrong_types"),
         (enc({"ts": "the thirtieth of June"}), "unparsable_ts"),
     ]

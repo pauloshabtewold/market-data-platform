@@ -75,15 +75,17 @@ def test_measured_and_measured_by_name_the_same_keys():
     assert set(MEASURED) == set(config._MEASURED_BY)
 
 
-def test_the_two_tuples_between_them_name_every_optional_and_defaulted_setting():
+def test_the_three_lists_between_them_name_every_setting_on_the_right_side():
     # clean_env deletes exactly what these tuples name, so a key added to config.py and not to
     # DEFAULTED is read from the real environment by every test that asks for a clean one -- which
-    # is what HOT_WINDOW_MONTHS did from Feature 4 until Feature 5, with no test able to notice
-    covered = set(MEASURED) | set(DEFAULTED)
-    declared = {
-        name for name, field in Settings.model_fields.items() if name not in REQUIRED
-    }
-    assert declared == covered
+    # is what HOT_WINDOW_MONTHS did from Feature 4 until Feature 5, with no test able to notice.
+    #
+    # REQUIRED is asserted against the same source rather than used to define "not covered". As the
+    # excluded side it was a third hand-written list that nothing compared with anything, so moving
+    # a key into it at its own default hid that key from clean_env exactly as the drift above did.
+    required = {name for name, field in Settings.model_fields.items() if field.is_required()}
+    assert set(REQUIRED) == required
+    assert set(MEASURED) | set(DEFAULTED) == set(Settings.model_fields) - required
 
 
 def test_require_raises_naming_the_missing_key(monkeypatch):
