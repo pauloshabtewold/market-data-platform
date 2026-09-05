@@ -1,5 +1,6 @@
 import contextlib
 import logging
+from importlib.metadata import version
 
 import psycopg_pool
 import pytest
@@ -26,6 +27,8 @@ class _RecordingPool:
     def __init__(self):
         self.statements = []
         self.timeouts = []
+        self.opened = False
+        self.closed = False
 
     @contextlib.contextmanager
     def connection(self, timeout=None):
@@ -33,10 +36,10 @@ class _RecordingPool:
         yield _RecordingConnection(self.statements)
 
     def open(self, wait=False):
-        pass
+        self.opened = True
 
     def close(self):
-        pass
+        self.closed = True
 
 
 @pytest.fixture
@@ -88,6 +91,11 @@ def test_health_runs_its_probe_query_on_the_pooled_connection():
         response = client.get("/health")
     assert response.status_code == 200
     assert pool.statements == ["SELECT 1"]
+    # the installed metadata, not just a present key: a build_version naming the wrong distribution
+    # reports "unknown" forever and every "version" in body assertion stays green
+    assert response.json() == {"status": "ok", "version": version("market-data-platform")}
+    # the lifespan's two halves, which nothing else in this suite observes
+    assert (pool.opened, pool.closed) == (True, True)
 
 
 def test_the_health_timeout_is_passed_to_the_pool(monkeypatch):
@@ -111,3 +119,33 @@ def test_the_lifespan_applies_the_configured_log_level(monkeypatch, _reset_root_
     app.state.pool = _RecordingPool()
     with TestClient(app):
         assert logging.getLogger().getEffectiveLevel() == logging.ERROR
+        # httpx arrives through the vendor client at INFO and is not this app's traffic, so it is
+        # pinned above the configured level rather than following it
+        assert logging.getLogger("httpx").level == logging.WARNING
+
+
+def test_the_app_serves_exactly_the_routes_this_feature_claims():
+    # enumerated rather than probed by name: every other test in this suite requests a path it
+    # chose, so four routes FastAPI mounts by default were served for a feature whose README,
+    # commit message and plan all say /health is the only one
+    app = create_app(dsn=DEAD_DSN)
+    served = {(route.path, method) for route in app.routes for method in route.methods}
+    # GET alone: FastAPI's APIRoute does not add the implicit HEAD that Starlette's Route does
+    assert served == {("/health", "GET")}
+
+
+def test_a_trailing_slash_is_refused_in_the_one_error_shape_rather_than_redirected():
+    # a 307 carries no body, so it is the one response that escapes the single error shape
+    app = create_app(dsn=DEAD_DSN)
+    app.state.pool = _RecordingPool()
+    with TestClient(app) as client:
+        for response in (client.get("/health/"), client.post("/health/")):
+            assert response.status_code == 404
+            assert response.headers["content-type"] == "application/json"
+            assert response.json() == {
+                "error": {
+                    "code": "invalid_params",
+                    "message": "no route matches this path and method",
+                    "detail": {"reason": "unknown_route", "path": "/health/"},
+                }
+            }

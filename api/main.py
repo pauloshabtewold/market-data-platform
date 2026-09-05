@@ -32,7 +32,18 @@ async def _lifespan(app: FastAPI):
 
 
 def create_app(dsn: str | None = None) -> FastAPI:
-    app = FastAPI(lifespan=_lifespan)
+    app = FastAPI(
+        lifespan=_lifespan,
+        # section 1 assigns the OpenAPI surface to Feature 7; left at its defaults FastAPI mounts
+        # /docs, /redoc, /docs/oauth2-redirect and /openapi.json, which publishes the service
+        # description of a scaffold that is about to go behind an ALB
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        # a 307 to the unslashed path carries no body, so it is the one response that escapes the
+        # single error shape; off, an unrouted /health/ is the 404 the handler already builds
+        redirect_slashes=False,
+    )
     install_error_handlers(app)
     # an explicit dsn lets tests and the testcontainer avoid ever touching settings.DATABASE_URL
     app.state.pool = build_pool(dsn or settings.DATABASE_URL)

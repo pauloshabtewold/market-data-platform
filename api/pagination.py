@@ -46,6 +46,14 @@ def _render_day(value: date) -> str:
     return value.isoformat()
 
 
+def _render_symbol(value: str) -> str:
+    # bare str renders anything -- None becomes the literal cursor value "None" and round-trips
+    # cleanly, so a NULL column would page against a symbol that does not exist
+    if type(value) is not str:
+        raise TypeError(f"symbol renders a str, not {type(value).__name__}")
+    return value
+
+
 def _render_instant(value: datetime) -> str:
     # a naive value renders happily and then fails this module's own decoder, so the endpoint would
     # hand a client a next_cursor its next request is refused for
@@ -79,7 +87,7 @@ UNIVERSE_CURSOR = CursorShape(
     fields=("ts", "symbol"),
     types={"ts": str, "symbol": str},
     parsers={"ts": _parse_utc_instant, "symbol": str},
-    renderers={"ts": _render_instant, "symbol": str},
+    renderers={"ts": _render_instant, "symbol": _render_symbol},
     window_field="ts",
     window_bounds=_instant_bounds,
 )

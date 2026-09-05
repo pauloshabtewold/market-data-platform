@@ -75,6 +75,17 @@ def test_measured_and_measured_by_name_the_same_keys():
     assert set(MEASURED) == set(config._MEASURED_BY)
 
 
+def test_the_two_tuples_between_them_name_every_optional_and_defaulted_setting():
+    # clean_env deletes exactly what these tuples name, so a key added to config.py and not to
+    # DEFAULTED is read from the real environment by every test that asks for a clean one -- which
+    # is what HOT_WINDOW_MONTHS did from Feature 4 until Feature 5, with no test able to notice
+    covered = set(MEASURED) | set(DEFAULTED)
+    declared = {
+        name for name, field in Settings.model_fields.items() if name not in REQUIRED
+    }
+    assert declared == covered
+
+
 def test_require_raises_naming_the_missing_key(monkeypatch):
     monkeypatch.setattr(config.settings, "DEEP_PAGE_DEPTH", None)
     with pytest.raises(RuntimeError) as excinfo:

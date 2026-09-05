@@ -7,12 +7,6 @@ import pytest
 
 from db.session import connect
 
-# .env is in here because this copies the tree out of the repository, and the credential file must not travel with it.
-IGNORED = shutil.ignore_patterns(
-    ".git", ".venv", "venv", "build", "dist", "*.egg-info", ".pytest_cache", "__pycache__",
-    "notes", ".env",
-)
-
 # enough to import config in a subprocess that has no .env; only DATABASE_URL is read by db.migrate.
 STUB_ENV = {
     "ALPACA_KEY_ID": "unused",
@@ -28,7 +22,18 @@ def built(repo_root, tmp_path_factory):
     # built from a copy so an in-tree setuptools build leaves no artifacts in the working tree
     work = tmp_path_factory.mktemp("dist")
     source = work / "src"
-    shutil.copytree(repo_root, source, ignore=IGNORED)
+    # copied from what git tracks rather than from a denylist of directory names: a denylist has to
+    # be extended for every new working directory, and it silently ships a credential file or a
+    # build artifact the day someone forgets. This also builds exactly what a fresh clone builds.
+    listing = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=repo_root, check=True, capture_output=True, text=True
+    ).stdout
+    tracked = [name for name in listing.split("\0") if name]
+    assert tracked, "git ls-files returned nothing, so this fixture would build an empty tree"
+    for name in tracked:
+        destination = source / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(repo_root / name, destination)
     # enumerated before the build, which writes its own copy of everything it ships into build/lib
     found = sorted(str(path.relative_to(source)) for path in source.rglob("*.sql"))
     subprocess.run(
@@ -63,7 +68,18 @@ def test_every_sql_file_in_the_tree_reaches_the_built_distribution(built):
 
 def test_the_built_distribution_carries_the_python_modules_and_not_the_tests(built):
     _, _, shipped = built
-    assert {"config.py", "db/migrate.py", "db/session.py", "ingest/client.py"} <= shipped
+    # every top-level package pyproject.toml declares has an entry here: dropping one from that
+    # list produced a wheel with no api module and left this whole suite green
+    assert {
+        "config.py",
+        "db/migrate.py",
+        "db/session.py",
+        "ingest/client.py",
+        "api/main.py",
+        "api/deps.py",
+        "api/errors.py",
+        "api/pagination.py",
+    } <= shipped
     assert not [name for name in shipped if name.startswith("tests/")]
 
 

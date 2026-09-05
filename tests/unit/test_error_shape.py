@@ -65,8 +65,12 @@ def test_a_method_the_route_does_not_serve_answers_the_same_shape_with_405(clien
     }
 
 
-def test_an_unhandled_exception_answers_internal_with_no_traceback(permissive_client):
-    response = permissive_client.get("/boom")
+def test_an_unhandled_exception_answers_internal_with_no_traceback(permissive_client, caplog):
+    with caplog.at_level("ERROR", logger="api.errors"):
+        response = permissive_client.get("/boom")
+    # the body deliberately says nothing, so the log record is the only account of the cause
+    assert [r.message for r in caplog.records] == ["unhandled exception"]
+    assert caplog.records[0].exc_info[0] is ZeroDivisionError
     assert response.status_code == 500
     assert response.json() == {
         "error": {
@@ -83,6 +87,9 @@ def test_a_malformed_parameter_is_a_four_hundred(client):
     query_response = client.get("/probe", params={"limit": "not-an-int"})
     assert query_response.status_code == 400
     assert query_response.json()["error"]["code"] == "invalid_params"
+    # full-string equality, not a substring: building the expected value from the constant would
+    # move both sides of the assertion together and the mutation it exists to catch would survive
+    assert query_response.json()["error"]["message"] == "one or more parameters are not valid"
     assert query_response.json()["error"]["detail"] == {
         "reason": "invalid_parameter",
         "parameter": "limit",
@@ -113,6 +120,9 @@ def test_an_http_exception_raised_in_an_endpoint_is_internal_rather_than_unknown
 
 
 def test_the_code_vocabulary_is_closed():
+    # the type is the claim -- "a sixth code cannot enter by accident" is false for a mutable set,
+    # which satisfies every other assertion in this test
+    assert type(ERROR_CODES) is frozenset
     assert sorted(ERROR_CODES) == [
         "internal",
         "invalid_cursor",

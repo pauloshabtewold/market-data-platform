@@ -29,6 +29,10 @@ def test_a_cursor_round_trips_through_encode_and_decode():
     # endpoint would issue a next_cursor that its own next request is then refused for
     with pytest.raises(TypeError):
         encode_cursor(BARS_CURSOR, {"ts": datetime(2026, 6, 30, 20, 54)})
+    # and the third renderer: bare str renders every type, so a NULL symbol column would encode to
+    # the literal cursor value "None" and page against a symbol that does not exist
+    with pytest.raises(TypeError):
+        encode_cursor(UNIVERSE_CURSOR, {"ts": values["ts"], "symbol": None})
 
 
 def test_each_decode_step_reports_the_step_that_rejected_it():
@@ -38,6 +42,7 @@ def test_each_decode_step_reports_the_step_that_rejected_it():
     cases = [
         (base64.urlsafe_b64encode(b"{not json").decode(), "not_json"),
         (enc({"day": "2026-06-30"}), "wrong_fields"),
+        (enc({"ts": "2026-06-30T20:54:00+00:00", "extra": "x"}), "wrong_fields"),
         (enc({"ts": 12345}), "wrong_types"),
         (enc({"ts": "the thirtieth of June"}), "unparsable_ts"),
     ]
@@ -46,7 +51,19 @@ def test_each_decode_step_reports_the_step_that_rejected_it():
             decode_cursor(BARS_CURSOR, cursor)
         assert excinfo.value.status == 400
         assert excinfo.value.code == "invalid_cursor"
+        assert excinfo.value.message == "the cursor is not one this endpoint issued"
         assert excinfo.value.detail["reason"] == expected_reason
+
+
+def test_a_cursor_in_another_offset_decodes_to_the_same_instant_in_utc():
+    # aware comparison is by instant, so every other assertion in this file passes whether or not
+    # the parser normalises -- the tzinfo has to be read directly
+    offset = base64.urlsafe_b64encode(
+        json.dumps({"ts": "2026-06-30T22:54:00+02:00"}).encode()
+    ).decode()
+    decoded = decode_cursor(BARS_CURSOR, offset)["ts"]
+    assert decoded.tzinfo is timezone.utc
+    assert (decoded.hour, decoded.minute) == (20, 54)
 
 
 def test_a_tampered_cursor_is_refused_rather_than_silently_decoded():
