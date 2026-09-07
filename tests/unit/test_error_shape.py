@@ -1,8 +1,17 @@
+from datetime import date
+
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from api.errors import ERROR_CODES, ApiError, error_body, install_error_handlers
+from api.errors import (
+    ERROR_CODES,
+    INVALID_RANGE_MESSAGE,
+    UNKNOWN_SYMBOL_MESSAGE,
+    ApiError,
+    error_body,
+    install_error_handlers,
+)
 
 app = FastAPI()
 install_error_handlers(app)
@@ -16,6 +25,16 @@ def probe(limit: int = 10):
 @app.get("/item/{item_id}")
 def item(item_id: int):
     return {"item_id": item_id}
+
+
+@app.get("/two")
+def two(a: int | None = None, b: int | None = None):
+    return {"a": a, "b": b}
+
+
+@app.get("/win")
+def win(start: date, end: date):
+    return {"start": start, "end": end}
 
 
 @app.get("/boom")
@@ -99,6 +118,7 @@ def test_a_malformed_parameter_is_a_four_hundred(client):
         "reason": "invalid_parameter",
         "parameter": "limit",
         "location": "query",
+        "errors": [{"parameter": "limit", "location": "query", "type": "int_parsing"}],
     }
 
     path_response = client.get("/item/not-an-int")
@@ -107,6 +127,7 @@ def test_a_malformed_parameter_is_a_four_hundred(client):
         "reason": "invalid_parameter",
         "parameter": "item_id",
         "location": "path",
+        "errors": [{"parameter": "item_id", "location": "path", "type": "int_parsing"}],
     }
 
 
@@ -154,3 +175,55 @@ def test_the_code_vocabulary_is_closed():
     # the wire shape's own constructor, which a later feature's handler can reach without ApiError
     with pytest.raises(ValueError):
         error_body("not_found", "m", None)
+
+
+def test_a_request_missing_both_required_parameters_names_both_in_the_errors_list(client):
+    response = client.get("/win")
+    assert response.status_code == 400
+    detail = response.json()["error"]["detail"]
+    # the case the additive list exists for: the three first-error keys can only ever name one of
+    # the two, so before this list a request missing both reported only start
+    assert detail["errors"] == [
+        {"parameter": "start", "location": "query", "type": "missing"},
+        {"parameter": "end", "location": "query", "type": "missing"},
+    ]
+
+
+def test_the_first_error_keys_survive_alongside_the_errors_list(client):
+    response = client.get("/two", params={"a": "x", "b": "y"})
+    assert response.status_code == 400
+    detail = response.json()["error"]["detail"]
+    # the backward-compatibility kill: the Feature 5 wire contract is these three keys, and
+    # replacing them with the list rather than adding it breaks every client already reading them
+    assert detail["reason"] == "invalid_parameter"
+    assert detail["parameter"] == "a"
+    assert detail["location"] == "query"
+    assert [e["parameter"] for e in detail["errors"]] == ["a", "b"]
+
+
+def test_each_kind_of_wrong_request_carries_its_own_pydantic_type_slug(client):
+    # one test iterating five cases, never a parametrize: a parametrize collects as five items and
+    # moves this file's gated count from 10 to 14
+    cases = [
+        ("/probe", {"limit": "not-an-int"}, ["int_parsing"]),
+        ("/two", {"a": "x", "b": "y"}, ["int_parsing", "int_parsing"]),
+        ("/win", {}, ["missing", "missing"]),
+        ("/win", {"start": "2026-01-01"}, ["missing"]),
+        ("/win", {"start": "nope", "end": "2026-01-01"}, ["date_from_datetime_parsing"]),
+    ]
+    for path, params, expected in cases:
+        response = client.get(path, params=params)
+        body = response.json()["error"]
+        assert response.status_code == 400, f"{path} {params}"
+        assert body["code"] == "invalid_params", f"{path} {params}"
+        assert body["detail"]["reason"] == "invalid_parameter", f"{path} {params}"
+        # the slugs are pydantic's own vocabulary, written out as literals so a rename fails here
+        # by name rather than reaching a client silently
+        assert [e["type"] for e in body["detail"]["errors"]] == expected, f"{path} {params}"
+
+
+def test_the_two_new_message_constants_are_the_strings_the_endpoints_publish():
+    # full-string equality against a literal written out here, never read back from api.errors:
+    # building the expected from the thing under test moves both sides and the mutation survives
+    assert UNKNOWN_SYMBOL_MESSAGE == "no symbol by that name has been ingested"
+    assert INVALID_RANGE_MESSAGE == "the requested date range is not one this endpoint serves"

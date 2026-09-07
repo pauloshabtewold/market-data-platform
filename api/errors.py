@@ -16,6 +16,8 @@ INTERNAL_MESSAGE = "the request could not be completed"
 UNKNOWN_ROUTE_MESSAGE = "no route matches this path and method"
 INVALID_PARAMS_MESSAGE = "one or more parameters are not valid"
 INVALID_CURSOR_MESSAGE = "the cursor is not one this endpoint issued"
+UNKNOWN_SYMBOL_MESSAGE = "no symbol by that name has been ingested"
+INVALID_RANGE_MESSAGE = "the requested date range is not one this endpoint serves"
 
 
 class ApiError(RuntimeError):
@@ -54,6 +56,13 @@ def _api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
 def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     loc = exc.errors()[0]["loc"]
     detail = {"reason": "invalid_parameter", "parameter": loc[-1], "location": loc[0]}
+    # additive, so the three keys above stay the contract they were: the per-entry type is
+    # pydantic's own slug, and it is what tells apart five wrong requests that otherwise return an
+    # identical body -- a request missing both start and end named only start
+    detail["errors"] = [
+        {"parameter": e["loc"][-1], "location": e["loc"][0], "type": e["type"]}
+        for e in exc.errors()
+    ]
     return JSONResponse(
         status_code=400, content=error_body("invalid_params", INVALID_PARAMS_MESSAGE, detail)
     )
