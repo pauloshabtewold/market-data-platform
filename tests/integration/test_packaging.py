@@ -8,6 +8,53 @@ import pytest
 
 from db.session import connect
 
+# a credential file is recognised by role: any tracked path whose case-folded basename carries one
+# of these words as a whole dot-separated segment, minus a template extension.
+# Case-folded because .gitignore is a case-sensitive pathspec on the platform CI runs on -- .ENV
+# and .ENV.production are staged there with no -f, and this list is what is left to catch them.
+# These six are never an ordinary source basename, so an extension does not disarm them:
+# credentials.json is the canonical name for one and secrets.yaml for another.
+_SECRET_WORDS = frozenset({"secret", "secrets", "credential", "credentials", "netrc", "pgpass",
+                           "envrc"})
+# env and environment are ordinary English, so these two alone are disarmed by a source or document
+# extension: environment.py is a module and env/settings.py is a package, while env.local is not.
+_ENV_WORDS = frozenset({"env", "environment"})
+_READABLE_SUFFIXES = frozenset({
+    "py", "pyi", "md", "rst", "txt", "toml", "cfg", "ini", "yml", "yaml", "json", "sql", "sh",
+    "html", "css", "js", "ts", "lock", "in",
+})
+# matched on the basename, because .gitignore's `!.env.example` re-admits the template at every
+# depth -- deploy/.env.example stages under `git add -A`, and a full-path compare flags it
+_TEMPLATE_SUFFIXES = frozenset({"example", "sample", "template"})
+# written out rather than generated from the words above, which would move both sides of the
+# comparison together. Every one of these stages under `git add -A` with no -f on a Linux checkout.
+_CREDENTIAL_POSITIVES = (
+    ".env", ".ENV", ".env.local", ".env.production", ".ENV.production", ".env.staging.local",
+    "deploy/.env", "secrets.env", "prod.env", "env", "env.local", "environment",
+    # direnv's script: ignored, and flagged as well, because a force-add of one is a leak
+    ".envrc",
+    "config/secrets.env", "credentials", "credentials.json", ".netrc", ".pgpass",
+    # the negation cannot reach inside a directory .env.* already matched, so a force-add of this
+    # one is the case the family-by-spelling rule read as clean
+    ".env.d/credentials",
+)
+_CREDENTIAL_NEGATIVES = (
+    ".env.example", "deploy/.env.example", "deeply/nested/dir/.env.example", ".envs/.env.example",
+    # ordinary source, and the reason env and environment need the extension test
+    "environment.py", "env/settings.py", "config.py", "tests/unit/test_config.py",
+    "docs/METHODOLOGY.md", ".github/workflows/ci.yml", ".gitignore", "envelope.py",
+)
+
+
+def _is_credential_file(name: str) -> bool:
+    segments = [part for part in name.rsplit("/", 1)[-1].lower().split(".") if part]
+    if not segments or segments[-1] in _TEMPLATE_SUFFIXES:
+        return False
+    if _SECRET_WORDS & set(segments):
+        return True
+    return bool(_ENV_WORDS & set(segments)) and segments[-1] not in _READABLE_SUFFIXES
+
+
 # enough to import config in a subprocess that has no .env; only DATABASE_URL is read by db.migrate.
 STUB_ENV = {
     "ALPACA_KEY_ID": "unused",
@@ -40,13 +87,13 @@ def built(repo_root, tmp_path_factory):
     tracked = [name for name in listing.split("\0") if name]
     assert tracked, "git ls-files returned nothing, so this fixture would build an empty tree"
     # git excludes the credential file because it is untracked, which is a weaker guarantee than the
-    # denylist's -- the denylist named it and would have held even against a `git add -f`. Every
-    # .env* but the committed example, because .gitignore has had to be extended for a variant once
-    # already and the next one is a file nobody remembers to add.
-    leaked = [
-        name for name in tracked
-        if name.rsplit("/", 1)[-1].startswith(".env") and name != ".env.example"
-    ]
+    # denylist's in one direction only: the denylist was an fnmatch on `.env` and nothing else, so it
+    # held against a `git add -f` of that one name and would have copied .env.local, .env.production
+    # and .env.staging.local straight into the build tree.
+    # Recognised by role rather than by spelling: .gitignore covers no member of the family that is
+    # not spelled .env, so secrets.env, env.local and credentials each stage with no -f and each
+    # holds exactly what the one name it does cover holds.
+    leaked = [name for name in tracked if _is_credential_file(name)]
     assert not leaked, f"a credential file is tracked and must not reach a build copy: {leaked}"
     for name in tracked:
         origin = repo_root / name
@@ -106,6 +153,12 @@ def test_the_built_distribution_carries_the_python_modules_and_not_the_tests(bui
     assert {f"{name}.py" for name in declared["py-modules"]} == {n for n in modules if "/" not in n}
     assert modules <= shipped
     assert not [name for name in shipped if name.startswith("tests/")]
+
+    # the other half of what must not ship, pinned here because the fixture's own guard runs over 84
+    # tracked names that are every one of them a negative: a predicate hardcoded to False passes the
+    # whole suite, and so does one that has quietly stopped recognising a member of the family.
+    assert [name for name in _CREDENTIAL_POSITIVES if not _is_credential_file(name)] == []
+    assert [name for name in _CREDENTIAL_NEGATIVES if _is_credential_file(name)] == []
 
 
 def test_the_installed_distribution_migrates_a_database_from_zero(built, installed, fresh_dsn, tmp_path):

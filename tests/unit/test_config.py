@@ -84,6 +84,9 @@ def test_the_three_lists_between_them_name_every_setting_on_the_right_side():
     # excluded side it was a third hand-written list that nothing compared with anything, so moving
     # a key into it at its own default hid that key from clean_env exactly as the drift above did.
     required = {name for name, field in Settings.model_fields.items() if field.is_required()}
+    # a config.py mutation of a required key has to be applied in isolating form -- for LOG_LEVEL's
+    # default that means LOG_LEVEL=INFO in the environment -- or module-level settings = Settings()
+    # turns the kill into six collection errors that name no test, which is D-222's shape
     assert set(REQUIRED) == required
     assert set(MEASURED) | set(DEFAULTED) == set(Settings.model_fields) - required
 
@@ -103,6 +106,17 @@ def test_require_returns_the_value_once_measured(monkeypatch):
 
 
 def test_missing_credential_fails_at_construction(monkeypatch):
+    # the positive control first, because Settings declares no rule over a required value beyond its
+    # type -- both model validators read defaulted keys -- so REQUIRED reaches every construction in
+    # this file unchecked, and each ValidationError below would still be raised against a
+    # configuration no operator could use: empty credentials, a plaintext host, an unusable DSN or an
+    # ingest window that runs backwards
+    supplied = Settings(_env_file=None, **REQUIRED)
+    assert supplied.ALPACA_KEY_ID and supplied.ALPACA_SECRET_KEY
+    assert supplied.ALPACA_TRADING_HOST.startswith("https://")
+    assert supplied.DATABASE_URL.startswith("postgresql://")
+    assert supplied.INGEST_START < supplied.INGEST_END
+
     monkeypatch.delenv("ALPACA_KEY_ID", raising=False)
     without_key_id = {k: v for k, v in REQUIRED.items() if k != "ALPACA_KEY_ID"}
     with pytest.raises(ValidationError) as excinfo:

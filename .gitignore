@@ -1,5 +1,11 @@
 # Secrets
-.env*
+# .env.* rather than .env*, which also swallows .environment -- not a credential file, and an
+# ignore rule takes a name out of the trackable set without saying so. .envrc is named back in
+# deliberately: a direnv script is exactly where `export ALPACA_SECRET_KEY=...` lives on a
+# developer machine, so widening the trackable set to un-shadow it would open what .env closes.
+.env
+.env.*
+.envrc
 !.env.example
 
 # Python

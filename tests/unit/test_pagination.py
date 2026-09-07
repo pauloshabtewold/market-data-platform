@@ -32,3 +32,8 @@ def test_an_over_fetch_is_refused_rather_than_truncated():
     # the other end of the same contract: at limit=0, rows[limit - 1] is the probe row itself
     with pytest.raises(PaginationError):
         paginate(rows[:1], limit=0, shape=BARS_CURSOR)
+    # and the smallest value that must be accepted, which a floor tested only from below cannot see:
+    # `< 1` written as `<= 1` or `< 2` refuses it, and a ?limit=1 request would answer 500
+    page = paginate(rows[:2], limit=1, shape=BARS_CURSOR)
+    assert len(page.data) == 1
+    assert decode_cursor(BARS_CURSOR, page.next_cursor)["ts"].minute == 0

@@ -39,8 +39,8 @@ def test_a_cursor_round_trips_through_encode_and_decode():
         encode_cursor(UNIVERSE_CURSOR, {"ts": values["ts"], "symbol": None})
     assert str(excinfo.value) == "symbol renders a str, not NoneType"
 
-    # exact type and not isinstance, which is what the day renderer's own comment and the decoder's
-    # wrong_types guard both say this family must stay: a str subclass is the value that separates
+    # exact type and not isinstance for the symbol renderer, which is what the day renderer's own
+    # comment and the decoder's wrong_types guard say: a str subclass is the value that separates
     # them, and nothing else in this suite supplies one
     class _Symbolish(str):
         pass
@@ -48,6 +48,24 @@ def test_a_cursor_round_trips_through_encode_and_decode():
     with pytest.raises(TypeError) as excinfo:
         encode_cursor(UNIVERSE_CURSOR, {"ts": values["ts"], "symbol": _Symbolish("AAPL")})
     assert str(excinfo.value) == "symbol renders a str, not _Symbolish"
+
+    # the instant renderer is deliberately isinstance: for the other two the type check IS the whole
+    # rule, so it is spelled exactly, while here the rule is aware versus naive -- a value -- and an
+    # aware datetime subclass renders the identical bytes and decodes back to a plain datetime, so
+    # exact type would refuse a value the rule accepts. A datetime through the DAY renderer is the
+    # opposite case and stays exact: it renders differently and hands two rows one cursor.
+    class _Instantish(datetime):
+        pass
+
+    subclassed = encode_cursor(BARS_CURSOR, {"ts": _Instantish(2026, 6, 30, 20, 54, tzinfo=timezone.utc)})
+    raw_subclassed = base64.urlsafe_b64decode(subclassed.encode()).decode()
+    assert raw_subclassed == '{"ts":"2026-06-30T20:54:00+00:00"}'
+    assert type(decode_cursor(BARS_CURSOR, subclassed)["ts"]) is datetime
+    # and the isinstance half still carries its own weight: without it a date reaches .tzinfo and
+    # raises AttributeError, which nothing in this module turns into the 400 a bad cursor owes
+    with pytest.raises(TypeError) as excinfo:
+        encode_cursor(BARS_CURSOR, {"ts": date(2026, 6, 30)})
+    assert str(excinfo.value) == "ts renders an aware datetime, not date"
 
 
 def test_each_decode_step_reports_the_step_that_rejected_it():
@@ -93,6 +111,9 @@ def test_a_tampered_cursor_is_refused_rather_than_silently_decoded():
         decode_cursor(BARS_CURSOR, tampered)
     assert excinfo.value.status == 400
     assert excinfo.value.code == "invalid_cursor"
+    # written out rather than imported (DL-010): building the expected from the constant moves both
+    # sides, and this step's message is the one the other five steps' test does not reach
+    assert excinfo.value.message == "the cursor is not one this endpoint issued"
     assert excinfo.value.detail["reason"] == "not_base64"
 
 
@@ -105,11 +126,20 @@ def test_a_cursor_whose_bytes_are_not_utf_eight_is_a_four_hundred():
 
 
 def test_a_cursor_outside_the_requested_window_is_refused():
-    cursor = encode_cursor(BARS_CURSOR, {"ts": datetime(2026, 6, 30, 20, 54, tzinfo=timezone.utc)})
+    # both sides, because they are two separate raise sites and every other test here drives the
+    # end one: past the end, and before the start
+    past_end = encode_cursor(BARS_CURSOR, {"ts": datetime(2026, 6, 30, 20, 54, tzinfo=timezone.utc)})
+    before_start = encode_cursor(BARS_CURSOR, {"ts": datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc)})
 
-    with pytest.raises(ApiError) as excinfo:
-        decode_cursor(BARS_CURSOR, cursor, start=date(2025, 1, 1), end=date(2025, 3, 1))
-    assert excinfo.value.detail["reason"] == "cursor_outside_window"
+    for cursor in (past_end, before_start):
+        with pytest.raises(ApiError) as excinfo:
+            decode_cursor(BARS_CURSOR, cursor, start=date(2025, 1, 1), end=date(2025, 3, 1))
+        # the whole error and not just its slug: neither branch's status or message was asserted by
+        # anything, so either could answer 401, or carry a status of None and fail to serialise
+        assert excinfo.value.status == 400
+        assert excinfo.value.code == "invalid_cursor"
+        assert excinfo.value.message == "the cursor is not one this endpoint issued"
+        assert excinfo.value.detail["reason"] == "cursor_outside_window"
 
 
 def test_a_cursor_exactly_on_either_window_bound_is_accepted():

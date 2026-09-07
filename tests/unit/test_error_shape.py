@@ -28,6 +28,11 @@ def raiser():
     raise HTTPException(404, "no such symbol")
 
 
+@app.get("/refuser")
+def refuser():
+    raise ApiError(404, "unknown_symbol", "no such symbol", {"reason": "unknown_symbol"})
+
+
 @pytest.fixture
 def client():
     return TestClient(app)
@@ -115,6 +120,20 @@ def test_an_http_exception_raised_in_an_endpoint_is_internal_rather_than_unknown
             "code": "internal",
             "message": "the request could not be completed",
             "detail": None,
+        }
+    }
+
+    # the sibling an endpoint raises deliberately, and the one shape whose detail comes from the
+    # caller rather than from the handler: every other case here carries None, so a handler passing
+    # None in place of exc.detail is invisible -- and this is what unknown_symbol and invalid_range
+    # publish on every endpoint that raises them
+    response = permissive_client.get("/refuser")
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "unknown_symbol",
+            "message": "no such symbol",
+            "detail": {"reason": "unknown_symbol"},
         }
     }
 
