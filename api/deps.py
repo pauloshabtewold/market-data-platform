@@ -1,6 +1,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from fastapi import Request
+from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from config import settings
@@ -23,6 +24,12 @@ def build_pool(
         min_size=min_size,
         max_size=max_size,
         open=False,
+        # paginate indexes a row by the cursor's field names, so a pooled connection yielding
+        # psycopg's default tuples 500s on the first page that has a successor -- and never
+        # before, since paginate returns early whenever the rows fit inside the limit.
+        # declared here rather than inside the configure callback so it survives a later feature
+        # replacing that callback
+        kwargs={"row_factory": dict_row},
         configure=_pin_utc,
         check=ConnectionPool.check_connection,
     )
