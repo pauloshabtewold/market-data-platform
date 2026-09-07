@@ -5,7 +5,15 @@ from datetime import date, datetime, timezone
 import pytest
 
 from api.errors import ApiError
-from api.pagination import BARS_CURSOR, DAILY_CURSOR, UNIVERSE_CURSOR, decode_cursor, encode_cursor
+from api.pagination import (
+    BARS_CURSOR,
+    DAILY_CURSOR,
+    SYMBOLS_CURSOR,
+    UNIVERSE_CURSOR,
+    CursorWindowMisuse,
+    decode_cursor,
+    encode_cursor,
+)
 
 
 def test_a_cursor_round_trips_through_encode_and_decode():
@@ -172,3 +180,45 @@ def test_a_cursor_just_past_the_end_of_day_bound_is_refused():
         with pytest.raises(ApiError) as excinfo:
             decode_cursor(shape, cursor, *window)
         assert excinfo.value.detail["reason"] == "cursor_outside_window"
+
+
+def test_the_symbols_cursor_round_trips_through_encode_and_decode():
+    cursor = encode_cursor(SYMBOLS_CURSOR, {"symbol": "AAA"})
+
+    # exact bytes, not just a successful round trip: this is what catches a fields or renderers
+    # entry naming the wrong key
+    raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+    assert raw == '{"symbol":"AAA"}'
+    assert decode_cursor(SYMBOLS_CURSOR, cursor) == {"symbol": "AAA"}
+
+    # bare str renders everything, so a NULL symbol column would encode to the literal cursor
+    # value "None" and page against a symbol that does not exist
+    with pytest.raises(TypeError) as excinfo:
+        encode_cursor(SYMBOLS_CURSOR, {"symbol": None})
+    assert str(excinfo.value) == "symbol renders a str, not NoneType"
+
+
+def test_the_symbols_cursor_refuses_a_date_window_rather_than_comparing_a_string_to_a_date():
+    cursor = encode_cursor(SYMBOLS_CURSOR, {"symbol": "AAA"})
+
+    # both sides, because the two window checks are separate raise sites
+    for window in ({"start": date(2026, 1, 1)}, {"end": date(2026, 1, 1)}):
+        with pytest.raises(CursorWindowMisuse) as excinfo:
+            decode_cursor(SYMBOLS_CURSOR, cursor, **window)
+        assert "has no date window" in str(excinfo.value)
+        # the assertion that survives the two window checks ever being moved inside decode_cursor's
+        # own `except (ValueError, TypeError)`, which would turn this programming error into a
+        # 400 unparsable_ts and page from a cursor nothing validated. The class is what this pins,
+        # not the status: over HTTP a plausible-but-wrong window_bounds answers 500 internal too.
+        assert not isinstance(excinfo.value, (ValueError, TypeError))
+
+
+def test_a_cursor_carrying_a_urlsafe_alphabet_character_decodes_rather_than_being_refused():
+    # synthetic, and it has to be: base64 emits "-" or "_" only from group4 = b2 & 63, which needs
+    # a payload byte of ">", "?", "~" or 0x7f at an index congruent to 2 mod 3 -- and the 11-byte
+    # JSON prefix puts those at symbol[0] and symbol[3], where no ticker over [A-Z0-9.] and no ISO
+    # date can reach one. No payload this project can produce ever exercises the altchars argument,
+    # which is why it is unreachable rather than merely unobserved -- do not delete this test.
+    cursor = encode_cursor(SYMBOLS_CURSOR, {"symbol": "?ABC"})
+    assert cursor == "eyJzeW1ib2wiOiI_QUJDIn0="
+    assert decode_cursor(SYMBOLS_CURSOR, cursor) == {"symbol": "?ABC"}

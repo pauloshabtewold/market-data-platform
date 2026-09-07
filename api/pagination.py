@@ -38,6 +38,19 @@ def _day_bounds(start: date, end: date) -> tuple[date, date]:
     return (start, end)
 
 
+class CursorWindowMisuse(RuntimeError):
+    """decode_cursor was given a window for a shape that has none: a structurally wrong call."""
+
+
+def _no_window(start: date, end: date) -> tuple:
+    # RuntimeError and not TypeError: TypeError is what the parsers comprehension below already
+    # catches, so a later edit moving the two window checks inside that try would turn this
+    # programming error into a 400 unparsable_ts and page from a cursor nothing validated
+    raise CursorWindowMisuse(
+        "the symbols cursor has no date window; decode_cursor must be called without start or end"
+    )
+
+
 def _render_day(value: date) -> str:
     # datetime subclasses date, so date.isoformat would silently drop the time and render two
     # different rows to the same cursor rather than failing on the wrong type
@@ -80,6 +93,18 @@ DAILY_CURSOR = CursorShape(
     renderers={"day": _render_day},
     window_field="day",
     window_bounds=_day_bounds,
+)
+
+SYMBOLS_CURSOR = CursorShape(
+    name="symbols",
+    fields=("symbol",),
+    types={"symbol": str},
+    parsers={"symbol": str},
+    renderers={"symbol": _render_symbol},
+    # a real field because decode_cursor reads values[shape.window_field] unconditionally; the
+    # bounds refuse instead, since /symbols has no date window and never supplies one
+    window_field="symbol",
+    window_bounds=_no_window,
 )
 
 UNIVERSE_CURSOR = CursorShape(
