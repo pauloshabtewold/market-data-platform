@@ -11,9 +11,11 @@ from fastapi.testclient import TestClient
 from starlette.routing import BaseRoute
 
 import api.main
+import api.routes
 import config
 from api.deps import build_pool
 from api.main import create_app
+from api.pagination import _instant_bounds
 
 DEAD_DSN = "postgresql://nobody:nobody@127.0.0.1:1/none"
 # a second unreachable dsn, never the one the environment supplies: an argument the app drops in
@@ -258,7 +260,12 @@ def test_the_app_serves_exactly_the_routes_this_feature_claims(tmp_path, monkeyp
     # A guard that must never read clean over a served route can be wrong in that direction only.
     app = create_app(dsn=DEAD_DSN)
     # GET alone: FastAPI's APIRoute does not add the implicit HEAD that Starlette's Route does
-    assert set(_served(app.router)) == {("/health", "GET")}
+    assert set(_served(app.router)) == {
+        ("/health", "GET"),
+        ("/symbols", "GET"),
+        ("/symbols/{symbol}/bars", "GET"),
+        ("/symbols/{symbol}/daily", "GET"),
+    }
 
     # and the walk against a scratch app that reaches the branches this one does not: the shipped
     # app is a single APIRoute with no prefix, no include and no container, which is the one shape
@@ -359,3 +366,32 @@ def test_a_trailing_slash_is_refused_in_the_one_error_shape_rather_than_redirect
                     "detail": {"reason": "unknown_route", "path": "/health/"},
                 }
             }
+
+
+def test_the_sentinel_used_for_a_first_page_is_below_every_ingestible_bar():
+    # page 1 binds a sentinel to the same exclusive cursor predicate page 2 uses, so one SQL text
+    # serves both. A sentinel above the window's own lower bound silently drops page 1's earliest
+    # bars, and no row count anywhere would notice
+    lo, _ = _instant_bounds(config.settings.INGEST_START, config.settings.INGEST_END)
+    assert api.routes._BEFORE_ANY_BAR < lo
+    # and the symbol key's: symbol is the primary key and therefore NOT NULL, so every real row
+    # sorts strictly above the empty string
+    assert api.routes._BEFORE_ANY_SYMBOL == ""
+
+
+def test_each_endpoint_carries_its_own_page_caps_and_defaults_to_its_own():
+    bars_pair = (config.settings.BARS_PAGE_DEFAULT, config.settings.BARS_PAGE_MAX)
+    agg_pair = (config.settings.AGG_PAGE_DEFAULT, config.settings.AGG_PAGE_MAX)
+    # asserted first, and it is what makes the two below discriminate rather than tautologise:
+    # if the two pairs held the same values, handing one to all three endpoints would pass
+    assert bars_pair != agg_pair
+
+    # spec line 508 classes /symbols and /bars raw-row and /daily aggregating
+    assert api.routes._SYMBOLS_CAPS == bars_pair
+    assert api.routes._BARS_CAPS == bars_pair
+    assert api.routes._DAILY_CAPS == agg_pair
+
+    # an omitted limit resolves to the DEFAULT and not to the cap -- unobservable from any
+    # response this feature can produce, since 100 and 1000 are both above every fixture
+    _, resolved = api.routes.resolve_request(raw_limit=None, page_default=3, page_max=50)
+    assert resolved == 3

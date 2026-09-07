@@ -6,6 +6,7 @@ from psycopg_pool import ConnectionPool
 
 from api.deps import build_pool, build_version, get_pool
 from api.errors import INTERNAL_MESSAGE, ApiError, install_error_handlers
+from api.routes import router
 from config import settings
 
 # bounded well under an ALB's 5 s default health-check timeout, with room for the probe itself
@@ -47,6 +48,7 @@ def create_app(dsn: str | None = None) -> FastAPI:
         redirect_slashes=False,
     )
     install_error_handlers(app)
+    app.include_router(router)
     # an explicit dsn lets tests and the testcontainer avoid ever touching settings.DATABASE_URL
     app.state.pool = build_pool(dsn or settings.DATABASE_URL)
 
