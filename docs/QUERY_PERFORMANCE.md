@@ -479,6 +479,120 @@ The medians above stand as the original measurement; these are a different day's
 recorded as corroboration rather than as a replacement. All three queries pass on all three
 sweeps, and no block count has moved across any of them.
 
+### The endpoint forms — `/bars` per-page cost and the `/daily` wrapper
+
+Measured 2026-09-07 against the same database, read-only: `EXPLAIN (ANALYZE, BUFFERS, FORMAT
+JSON)` on the exact statements the endpoints run, five runs each, median reported, root-node
+`Shared Hit + Shared Read` only. Every figure below is a block count first and a wall-clock
+second, for the reason the table above already records: across five runs the blocks were
+identical to the block on every row while the first run's milliseconds carried the cold cache.
+
+#### `/bars` — three windows, because two of them control the smaller variable
+
+`BARS_PAGE_DEFAULT` and `BARS_PAGE_MAX` govern `/bars` over the whole ingested span. That span
+is 71 monthly partitions, of which four carry the hot-window partial index and 67 do not, and
+the endpoint accepts any window inside it. So the per-page cost is measured on both axes rather
+than on one: the index set, and the number of partitions a request opens.
+
+| window | parameters | days | partitions | index the planner chose |
+| --- | --- | ---: | ---: | --- |
+| W-HOT | `AAPL`, 2026-04-01 → 2026-06-30 | 90 | 3 | per-partition `_pkey` |
+| W-COLD | `AAPL`, 2025-04-01 → 2025-06-30 | 90 | 3 | per-partition `_pkey` |
+| W-WIDE | `AAPL`, 2020-08-01 → 2026-06-30 | 2,159 | 71 | per-partition `_pkey` |
+
+W-HOT is the window this document already binds Class A at, so its number is comparable with the
+table above. W-COLD is the same calendar window one year earlier and lies entirely in partitions
+that carry no hot index. W-WIDE is `INGEST_START` to `INGEST_END`, the widest request the spec
+permits on this endpoint.
+
+| window | fetch = 101 | fetch = 1,001 | fetch = 10,001 |
+| --- | ---: | ---: | ---: |
+| W-HOT | **5** blocks, 0.04 ms | **19**, 0.32 ms | **168**, 2.45 ms |
+| W-COLD | **5** blocks, 0.03 ms | **19**, 0.25 ms | **401**, 10.18 ms |
+| W-WIDE | **5** blocks, 0.04 ms | **19**, 0.23 ms | **167**, 2.39 ms |
+
+`fetch` is the page limit plus one, so these are the caps as the endpoint binds them: 1,001 is
+`BARS_PAGE_DEFAULT` and 10,001 is `BARS_PAGE_MAX`.
+
+**The planner chose the per-partition primary key on all three windows and never a hot-window
+index, and that was measured rather than assumed.** It is the load-bearing fact about
+reproducibility here: the four `bars_2026_0N_hot_idx` partial indexes exist in no migration and
+no `db/schema.sql`, so a number that depended on one would hold on this database and nowhere
+else. None of these does. The index set behind every row above is the set a fresh database gets
+from the migrations.
+
+**Two residuals, stated rather than left implicit.** W-HOT covers three of 71 partitions, so on
+its own it would have measured the best-indexed six percent of the table — that is why W-COLD
+exists. And W-WIDE's *index set* reproduces on a fresh database while its *data* does not: no CI
+or testcontainer database holds 41.7M bars over 71 partitions.
+
+**Opening 71 partitions instead of three costs nothing per page, and that is the surprise.**
+W-WIDE and W-HOT are within one block of each other at every fetch. A keyset page is an index
+descent per partition under a Merge Append with a bound `LIMIT`, not a scan, so the partition
+count moves the setup and not the work. The larger spread is on the other axis and in the
+opposite direction from the one the partition count predicts: at `BARS_PAGE_MAX` the worst
+window is **W-COLD at 401 blocks**, against W-WIDE's 167 — 2.4× — because page 1 of W-WIDE
+starts in 2020-08 where AAPL's rows are contiguous, while W-COLD's 10,001 rows span a range the
+heap holds less tightly.
+
+**Verdict: `BARS_PAGE_DEFAULT = 1000` and `BARS_PAGE_MAX = 10000` are confirmed, not moved.**
+The cap is set from the worse of W-COLD and W-WIDE, which is measured to be W-COLD, and W-HOT is
+reported beside them. At the default a page costs 19 blocks — 152 kB — on every window; at the
+cap the worst page costs 401 blocks, about 3.1 MB, in 10.2 ms. Neither is near a limit worth
+lowering a cap for, and raising the cap has no measurement asking for it. Confirming a value
+with evidence is the revision; changing it without evidence would not be.
+
+#### `/daily` — the wrapper, and the endpoint number Class A's table does not carry
+
+The endpoint wraps `06_daily_rollup.sql` in an outer `SELECT … ORDER BY day LIMIT`, and a page
+narrows the committed query's own `:start` from the cursor rather than filtering its output.
+Measured at W-HOT's parameters, page 1:
+
+| fetch | root blocks | median ms | rows returned |
+| ---: | ---: | ---: | ---: |
+| 51 | 414 | 24.08 | 51 |
+| 65 | 414 | 24.51 | 62 |
+| 101 | 414 | 24.05 | 62 |
+
+**The prediction that cost is flat in the limit is confirmed**: the aggregation spans the
+window, not the page, so 414 blocks is the whole window's cost at every limit. The window holds
+62 trading days, which is why fetch 65 and 101 return the same 62 rows — a legal `/daily`
+window cannot fill a page at `AGG_PAGE_DEFAULT = 100`, so there is no page 2 at the default
+limit and the aggregating caps are not what bounds this endpoint's cost. `AGG_PAGE_DEFAULT` and
+`AGG_PAGE_MAX` are measured here and recorded; they are revised at Feature 7, which is where the
+other endpoints reading them exist.
+
+**This is the wrapper's number and not the file's.** The table above publishes the unwrapped
+`06_daily_rollup.sql` at 26.7 ms over 420 blocks for these same bound parameters. The wrapper
+reads 414 blocks in about 24 ms. The two are recorded separately and neither is quoted for the
+other; that they land within 1.5% of each other is what says the outer `LIMIT` and `ORDER BY`
+cost a sort over at most 65 rows and nothing else.
+
+**The Class A number for the `/daily` rollup path in its endpoint form is 24.05–24.51 ms,
+against the <100 ms target.** Section 3's gate for the feature that ships it is the test suite,
+so this number is measured and reported rather than gating anything.
+
+**Narrowing against filtering, on the same page 2.** Page 1 at limit 30 returns its 30th row on
+2026-05-13, so page 2 binds `:start = 2026-05-14`. The alternative leaves `:start` at
+2026-04-01 and cuts the page with an outer `WHERE day > '2026-05-13'`:
+
+| page 2, fetch = 31 | root blocks | median ms | partitions opened |
+| --- | ---: | ---: | ---: |
+| narrowing `:start` | **221** | 14.08 | 2 |
+| outer `WHERE day >` | **414** | 24.05 | 3 |
+
+The narrowed form reads 47% fewer blocks, because `:start` also drives the scan bound inside the
+committed query while the outer predicate throws away rows the aggregate has already built. The
+plan carries a `Limit` above the aggregate, which is what distinguishes the outer bound from an
+inner one.
+
+The partition count is an observation and not a target: `bars` is partitioned by month, so
+narrowing removes a partition only on the pages where it crosses a month boundary. This page
+does — `:start` moves from April into May — which is why the narrowed plan opens two children
+and the filtering plan three. A page landing mid-month would show the same block reduction and
+no partition difference at all.
+
+
 ## Class B — query 2, the one query with a selective filter
 
 Query 2 touches 2 symbols of 100. That is the only query in the set where an index can make it

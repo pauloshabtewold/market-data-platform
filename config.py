@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     # at 4 because it must contain AGG_MAX_WINDOW_DAYS, the widest window an endpoint can ask for
     HOT_WINDOW_MONTHS: int = 4
 
+    # confirmed against the loaded database rather than left at a guess: a default page costs
+    # 19 root blocks and a page at the cap costs 401 on the worst of three measured windows.
+    # docs/QUERY_PERFORMANCE.md carries the windows, the counts and the index behind each
     BARS_PAGE_DEFAULT: int = 1000
     BARS_PAGE_MAX: int = 10000
     AGG_PAGE_DEFAULT: int = 100
