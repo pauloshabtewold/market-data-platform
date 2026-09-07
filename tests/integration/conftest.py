@@ -4,6 +4,7 @@ from uuid import uuid4
 import pytest
 from testcontainers.community.postgres import PostgresContainer
 
+from db import sql
 from db.migrate import apply
 from db.session import connect
 
@@ -51,7 +52,6 @@ def schema_ref_dsn(fresh_dsn, repo_root) -> str:
     return dsn
 
 
-_PLACEHOLDER = re.compile(r":'([a-z_]+)'")
 # stripped from a copy of the body before the placeholder scan below: a name whose only
 # occurrence is inside one of these is not actually bound, and the real predicate is
 # hardcoding a value instead
@@ -63,9 +63,10 @@ _DOLLAR_QUOTED = re.compile(r"\$\$.*?\$\$", re.DOTALL)
 def query_sql(repo_root):
     # rendered rather than run through psql in the container: the generated mutation harness substitutes a stub container fixture carrying no get_wrapped_container, so a fixture reaching for one errors on every test in a campaign
     def render(name: str) -> str:
+        # the four assertions below read the RAW file text and intermediates built from it -- a
+        # rendered string carries no :' by construction, so running them against db.sql.render's
+        # output would pass on every file including a broken one
         text = (repo_root / "db" / "queries" / name).read_text()
-        # an empty file renders to "" with no error here, and the failure it causes several calls later names neither the file nor the cause
-        assert text.strip(), f"{name}: file is empty"
         # a file that declares none is legal -- the spec binds no parameters for several of the ten -- and must render rather than raise
         header = re.findall(r"-- parameters:([^\n]*)", text)
         # only header[0] is ever read below, so a second declaration is a stale leftover from an earlier edit that would otherwise go unnoticed forever
@@ -76,15 +77,14 @@ def query_sql(repo_root):
             f"{name}: the parameter header names neither a :parameter nor 'none'"
         )
         body = _DOLLAR_QUOTED.sub("", _LINE_COMMENT.sub("", text))
-        substituted = {f":{n}" for n in _PLACEHOLDER.findall(body)}
+        substituted = {f":{n}" for n in sql.PLACEHOLDER.findall(body)}
         # a parameter added to the body without being declared in the header would otherwise be bound silently and never checked
         assert substituted == declared, f"{name}: body binds {substituted}, header declares {declared}"
-        # the substitution below runs over the whole text, comments included, so a placeholder written only in a comment would still be rendered and then demanded at bind time by a name the check above cannot see
-        in_comments = {f":{n}" for n in _PLACEHOLDER.findall(text)} - substituted
+        # the substitution runs over the whole text, comments included, so a placeholder written only in a comment would still be rendered and then demanded at bind time by a name the check above cannot see
+        in_comments = {f":{n}" for n in sql.PLACEHOLDER.findall(text)} - substituted
         assert not in_comments, f"{name}: {in_comments} appears only in a comment or literal and would still be bound"
-        # every other percent is doubled first: psycopg reads a bare % as its own placeholder, so a "100%" in a comment fails the bind with an error naming neither comments nor that file
-        rendered = _PLACEHOLDER.sub(r"%(\1)s", text.replace("%", "%%"))
-        assert ":'" not in rendered, f"{name}: a psql placeholder survived the render"
-        return rendered
+        # the shipped loader, not a second copy: a fixture with its own substitution would pin the
+        # renderer /daily does not use
+        return sql.render(name)
 
     return render
