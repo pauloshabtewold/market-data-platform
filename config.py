@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     AGG_MAX_WINDOW_DAYS: int = 90
     # the hot-window partial index's predicate AND the month list Feature 10 copies to RDS -- one
     # value doing both jobs, so the local index and the deployed copy cannot drift apart. floored
-    # at 4 because it must contain AGG_MAX_WINDOW_DAYS, the widest window an endpoint can ask for
+    # at 4 because it must contain AGG_MAX_WINDOW_DAYS, the widest window the AGGREGATING
+    # endpoints accept -- /bars passes no window cap at all and takes the whole ingested range
     HOT_WINDOW_MONTHS: int = 4
 
     # confirmed against the loaded database rather than left at a guess: a default page costs

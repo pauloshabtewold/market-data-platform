@@ -89,7 +89,9 @@ def resolve_request(
 
     That ordering is structural rather than conventional: the existence check needs a connection
     and nothing acquires one until this has returned, so a 404 cannot precede a 400 or a 422 --
-    and a request that is about to be refused never spends one of DB_POOL_MAX checkouts.
+    and a request refused BY THESE TWO TIERS never spends one of DB_POOL_MAX checkouts. The 404
+    is not covered: require_symbol runs inside the connection block, so an unknown symbol is
+    refused holding a checkout.
     """
     # the cursor is decoded before the window is range-validated, so an inverted start/end makes
     # almost any cursor a 400 cursor_outside_window rather than a 422 start_after_end. That looks
