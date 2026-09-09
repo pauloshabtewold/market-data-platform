@@ -1,6 +1,11 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from api.errors import (
+    INVALID_PARAMS_MESSAGE,
+    INVALID_RANGE_MESSAGE,
+    UNKNOWN_SYMBOL_MESSAGE,
+)
 from api.main import create_app
 from api.pagination import DAILY_CURSOR, decode_cursor
 from db.session import connect
@@ -119,6 +124,9 @@ def test_a_window_one_day_over_the_cap_is_refused_with_the_bound_and_the_value(c
     assert body["code"] == "invalid_range"
     # the bound AND the value, so the client is shown the number that failed the check
     assert body["detail"] == {"reason": "window_too_long", "max_days": 90, "requested_days": 91}
+    # the message and not only the code: ApiError carries it to error.message, and a raise
+    # site that passed None would publish a null message with the code and detail intact
+    assert body["message"] == INVALID_RANGE_MESSAGE
 
 
 def test_an_unknown_symbol_on_daily_is_a_four_oh_four(client):
@@ -132,6 +140,7 @@ def test_an_unknown_symbol_on_daily_is_a_four_oh_four(client):
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "unknown_symbol"
     assert response.json()["error"]["detail"] == {"reason": "unknown_symbol", "symbol": "NOSUCH"}
+    assert response.json()["error"]["message"] == UNKNOWN_SYMBOL_MESSAGE
 
 
 def test_a_limit_above_the_aggregating_cap_names_the_aggregating_cap(client):
@@ -146,6 +155,7 @@ def test_a_limit_above_the_aggregating_cap_names_the_aggregating_cap(client):
     # same request is a 200, so a constant read correctly and handed to the wrong call site is
     # visible nowhere else in this feature
     assert body["detail"] == {"reason": "limit_out_of_range", "limit": 5000, "max": 1000}
+    assert body["message"] == INVALID_PARAMS_MESSAGE
     assert (
         client.get(
             "/symbols/AAA/daily",

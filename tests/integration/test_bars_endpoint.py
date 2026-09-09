@@ -3,8 +3,10 @@ from datetime import datetime
 import pytest
 from fastapi.testclient import TestClient
 
+from api.errors import INVALID_RANGE_MESSAGE
 from api.main import create_app
 from api.pagination import BARS_CURSOR, decode_cursor, encode_cursor
+from config import settings
 from db.session import connect
 from tests.market_fixture import load
 
@@ -124,6 +126,20 @@ def test_a_cursor_outside_the_requested_window_is_a_four_hundred(client):
     assert beats_422.status_code == 400
     assert beats_422.json()["error"]["detail"]["reason"] == "cursor_outside_window"
 
+    # THE OTHER BOUND. Every case above sits below `start`, so all three pass with `end`
+    # dropped from the decode_cursor call -- and a cursor past the window would then be paged
+    # from instead of refused. decode_cursor resolves each bound from its own date alone, so
+    # this is the only assertion that reaches the second one from an endpoint
+    later = encode_cursor(
+        BARS_CURSOR, {"ts": datetime.fromisoformat("2026-04-01T14:30:00+00:00")}
+    )
+    beyond = client.get(
+        "/symbols/AAA/bars",
+        params={"start": "2026-03-06", "end": "2026-03-12", "cursor": later},
+    )
+    assert beyond.status_code == 400
+    assert beyond.json()["error"]["detail"]["reason"] == "cursor_outside_window"
+
 
 def test_an_inverted_window_is_a_four_twenty_two_naming_start_after_end(client):
     # no cursor, deliberately: with one the request is a 400 by design and cannot see this rule
@@ -136,6 +152,9 @@ def test_an_inverted_window_is_a_four_twenty_two_naming_start_after_end(client):
     # the whole dict and not a subset: an extra key is a wire change this catches and a subset
     # comparison would not. With no rule at all the answer is 200 {"data": [], ...}
     assert body["detail"] == {"reason": "start_after_end"}
+    # the message and not only the code: ApiError carries it to error.message on the wire, and a
+    # raise site that passed None would publish a null message against a green suite
+    assert body["message"] == INVALID_RANGE_MESSAGE
     # and a single-day window stays legal, which is what stops the rule being written as >=
     assert (
         client.get(
@@ -143,6 +162,14 @@ def test_an_inverted_window_is_a_four_twenty_two_naming_start_after_end(client):
         ).status_code
         == 200
     )
+    # the LOW edge of the limit rule, which is the half paginate's own floor cannot reach: the
+    # resolved limit is checked as 1 <= limit, and both ways of writing that one higher make a
+    # legal ?limit=1 a 400 while every other limit in this suite is 10 or 50
+    one = client.get(
+        "/symbols/AAA/bars", params={"start": "2026-03-06", "end": "2026-03-12", "limit": 1}
+    )
+    assert one.status_code == 200
+    assert len(one.json()["data"]) == 1
 
 
 def test_a_window_outside_the_ingested_range_is_refused_with_the_bounds(client):
@@ -159,6 +186,20 @@ def test_a_window_outside_the_ingested_range_is_refused_with_the_bounds(client):
         "min": "2020-08-01",
         "max": "2026-06-30",
     }
+    assert body["message"] == INVALID_RANGE_MESSAGE
+    # BOTH edges are legal, which is what stops either bound being written with an equals: the
+    # rule is start < INGEST_START or end > INGEST_END, and this test drove only the outside of
+    # the low end. Read off settings rather than retyped -- the literals above already pin the
+    # values, so this pins the COMPARISON without a second copy to keep in step
+    edges = client.get(
+        "/symbols/AAA/bars",
+        params={
+            "start": settings.INGEST_START.isoformat(),
+            "end": settings.INGEST_END.isoformat(),
+            "limit": 50,
+        },
+    )
+    assert edges.status_code == 200
 
 
 def test_a_window_wider_than_the_aggregation_cap_is_served_here(client):

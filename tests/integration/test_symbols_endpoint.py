@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from api.errors import INVALID_PARAMS_MESSAGE
 from api.main import create_app
 from api.pagination import SYMBOLS_CURSOR, decode_cursor
 from db.session import connect
@@ -78,5 +79,8 @@ def test_a_limit_above_the_cap_names_the_cap_and_the_value(client):
     # 10000 and not 1000: spec line 508 classes /symbols with /bars as a raw-row endpoint, so a
     # swap to the aggregating pair fails here by value
     assert body["detail"] == {"reason": "limit_out_of_range", "limit": 10001, "max": 10000}
+    # the message and not only the code: ApiError carries it to error.message on the wire,
+    # and a raise site that passed None would publish a null message against a green suite
+    assert body["message"] == INVALID_PARAMS_MESSAGE
     # and the cap itself is legal, which is what stops the check being written as >=
     assert client.get("/symbols", params={"limit": 10000}).status_code == 200
