@@ -187,6 +187,11 @@ def test_the_wire_types_are_numbers_for_prices_and_iso_strings_for_instants(clie
     # must read these as numbers, not as floats
     for field in ("open", "high", "low", "close", "vwap"):
         assert type(row[field]) in (int, float), (field, row[field])
+    # `is int` and not `== 110`, which 110.0 also satisfies: the integer is the whole subject of
+    # this assertion, and an encoder that started emitting 110.0 would leave `== 110` green while
+    # breaking every client written against the type. The two prices are asserted as a PAIR
+    # because it is the disagreement between them, inside one response, that a client trips on
+    assert type(row["open"]) is int
     assert row["open"] == 110
     assert row["close"] == 110.5
     assert type(row["close"]) is float

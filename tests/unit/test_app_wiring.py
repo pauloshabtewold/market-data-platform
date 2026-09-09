@@ -1,5 +1,6 @@
 import contextlib
 import logging
+from datetime import date
 from importlib.metadata import PackageNotFoundError, version
 
 import psycopg_pool
@@ -14,6 +15,7 @@ import api.main
 import api.routes
 import config
 from api.deps import build_pool
+from api.errors import ApiError
 from api.main import create_app
 from api.pagination import _instant_bounds
 
@@ -379,7 +381,7 @@ def test_the_sentinel_used_for_a_first_page_is_below_every_ingestible_bar():
     assert api.routes._BEFORE_ANY_SYMBOL == ""
 
 
-def test_each_endpoint_carries_its_own_page_caps_and_defaults_to_its_own():
+def test_each_endpoint_carries_its_own_page_caps_and_defaults_to_its_own(monkeypatch):
     bars_pair = (config.settings.BARS_PAGE_DEFAULT, config.settings.BARS_PAGE_MAX)
     agg_pair = (config.settings.AGG_PAGE_DEFAULT, config.settings.AGG_PAGE_MAX)
     # asserted first, and it is what makes the two below discriminate rather than tautologise:
@@ -395,3 +397,24 @@ def test_each_endpoint_carries_its_own_page_caps_and_defaults_to_its_own():
     # response this feature can produce, since 100 and 1000 are both above every fixture
     _, resolved = api.routes.resolve_request(raw_limit=None, page_default=3, page_max=50)
     assert resolved == 3
+
+    # WHICH pair each endpoint READS, which the three equalities above cannot see: _SYMBOLS_CAPS
+    # and _BARS_CAPS hold identical values, so a transposition between them -- or /bars reading
+    # the aggregating pair -- changes no response the suite asks for. Every /bars limit in the
+    # integration files is 10 or 50, both under AGG_PAGE_DEFAULT, so the cap is never reached
+    # there. Each constant gets a distinct sentinel and each endpoint must name its own back.
+    sentinels = {"_SYMBOLS_CAPS": (11, 12), "_BARS_CAPS": (21, 22), "_DAILY_CAPS": (31, 32)}
+    for name, pair in sentinels.items():
+        monkeypatch.setattr(api.routes, name, pair)
+    window = {"start": date(2026, 3, 9), "end": date(2026, 3, 12)}
+    # pool=None is safe and is the point: resolve_request runs the 400 tier and raises before
+    # pool.connection() is entered, so a handler that reached for a connection first would fail
+    # here with AttributeError rather than the ApiError this asserts
+    for endpoint, kwargs, expected in (
+        (api.routes.list_symbols, {}, 12),
+        (api.routes.list_bars, {"symbol": "AAA"} | window, 22),
+        (api.routes.list_daily, {"symbol": "AAA"} | window, 32),
+    ):
+        with pytest.raises(ApiError) as excinfo:
+            endpoint(limit=9999, pool=None, **kwargs)
+        assert excinfo.value.detail["max"] == expected, endpoint.__name__

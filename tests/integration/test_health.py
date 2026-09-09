@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from api.main import create_app
+from api.pagination import BARS_CURSOR, decode_cursor, encode_cursor
 from db.session import connect
 
 
@@ -43,4 +44,13 @@ def test_a_pooled_connection_yields_dict_rows_so_a_next_cursor_can_be_built(migr
     app = create_app(migrated_dsn)
     with TestClient(app):
         with app.state.pool.connection() as conn:
-            assert conn.execute("SHOW TimeZone").fetchone() == {"TimeZone": "UTC"}
+            # the coupling itself, and not a second SHOW TimeZone: asserting the row shape is
+            # what the test above already does, so repeating it here adds no kill. What nothing
+            # else reaches without a page boundary is encode_cursor being handed a POOLED row --
+            # it indexes by shape.fields, so a tuple row raises TypeError on the index and a
+            # column aliased anything but `ts` raises KeyError
+            row = conn.execute(
+                "SELECT now() AT TIME ZONE 'UTC' AT TIME ZONE 'UTC' AS ts, 1 AS ignored"
+            ).fetchone()
+            assert set(row) == {"ts", "ignored"}
+            assert decode_cursor(BARS_CURSOR, encode_cursor(BARS_CURSOR, row))["ts"] == row["ts"]
