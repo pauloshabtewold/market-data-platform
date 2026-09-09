@@ -122,19 +122,24 @@ per level of the tree. On this database's own query 9 the root reports **514,251
 the sum over all nodes reports **4,943,377** — **9.61× more**, for one identical execution. The
 inflation factor is plan-shape dependent, so it is not a constant that can be divided back out.
 
-Every count in this document was **cross-checked two ways before it was recorded**: the root
-object of `EXPLAIN (…, FORMAT JSON)` and the first `Buffers: shared hit=… read=…` line of the
-same plan in text form. These are different output paths in Postgres, and the harness raises
-rather than warns if they disagree.
+Every count in the Class A, B and C tables below was **cross-checked two ways before it was
+recorded**: the root object of `EXPLAIN (…, FORMAT JSON)` and the first `Buffers: shared hit=…
+read=…` line of the same plan in text form. These are different output paths in Postgres, and
+the harness raises rather than warns if they disagree. **The endpoint-forms subsection is the
+one exception and says so in place**: its harnesses carry no such check, and the pass that
+corrected its figures added one after the fact rather than at the time.
 
-**Every measurement here is also a fresh connection.** Each harness spawns a new `docker compose
-exec` per query, which pays catalog and sort-operator lookups a warm backend already has cached
-— so the published counts are cold and self-consistent with each other. Running the ten
+**Every measurement here is also a fresh connection — with the same one exception.** Each
+harness spawns a new `docker compose exec` per query, which pays catalog and sort-operator
+lookups a warm backend already has cached — so the published counts are cold and self-consistent with each other. Running the ten
 committed query files five times inside one continuous `psql` session instead gives root-block
 counts a few blocks lower — `06_daily_rollup.sql` settles at 414 against the published 420, six
 blocks and 1.43%; `03_gaps.sql` at 418 against 431, thirteen blocks and 3.02%. Neither moves a
 target or a ratio in this document, and a verifier who re-runs them in one session and finds
-these numbers has not found a defect.
+these numbers has not found a defect. **The endpoint-forms subsection under Class A is measured
+inside one continuous session and is therefore already on the lower side of this pair**, which
+is exactly why a figure from it must not be compared against a published fresh-connection count
+without saying so — one paragraph there did, and is corrected in place.
 
 ## The heap the numbers rest on
 
@@ -482,10 +487,23 @@ sweeps, and no block count has moved across any of them.
 ### The endpoint forms — `/bars` per-page cost and the `/daily` wrapper
 
 Measured 2026-09-07 against the same database, read-only: `EXPLAIN (ANALYZE, BUFFERS, FORMAT
-JSON)` on the exact statements the endpoints run, five runs each, median reported, root-node
-`Shared Hit + Shared Read` only. Every figure below is a block count first and a wall-clock
-second, for the reason the table above already records: across five runs the blocks were
-identical to the block on every row while the first run's milliseconds carried the cold cache.
+JSON)` on the exact statements the endpoints run, five runs each, median reported. Corrected and
+extended 2026-09-08 by a second read-only pass, which is what the planning columns and the
+`fetch = 1,001` row for `/daily` come from.
+
+**Two conditions this subsection does not inherit from the rest of the document, stated here
+because they change how its numbers compare with the tables above.** First, these figures come
+from **one continuous psycopg session**, not a fresh `docker compose exec` per query — so the
+caveat under "Measurement conditions" applies to them and not to the Class A/B/C tables, and the
+first execution of any statement in the session reads a few blocks more than the rest. Second,
+the harnesses behind this subsection do **not** perform the JSON-versus-text cross-check that
+every other count in this document was recorded under; the 2026-09-08 pass added it and every
+figure below survived it, but the original run did not have it.
+
+**The block counts below are execution only.** Root-node `Shared Hit + Shared Read` excludes
+planning, which Postgres reports separately, and on a partitioned table planning is not a
+rounding error — see "What the per-page block counts leave out" below, which is the most
+important paragraph in this subsection.
 
 #### `/bars` — three windows, because two of them control the smaller variable
 
@@ -505,42 +523,85 @@ table above. W-COLD is the same calendar window one year earlier and lies entire
 that carry no hot index. W-WIDE is `INGEST_START` to `INGEST_END`, the widest request the spec
 permits on this endpoint.
 
-| window | fetch = 101 | fetch = 1,001 | fetch = 10,001 |
-| --- | ---: | ---: | ---: |
-| W-HOT | **5** blocks, 0.04 ms | **19**, 0.32 ms | **168**, 2.45 ms |
-| W-COLD | **5** blocks, 0.03 ms | **19**, 0.25 ms | **401**, 10.18 ms |
-| W-WIDE | **5** blocks, 0.04 ms | **19**, 0.23 ms | **167**, 2.39 ms |
+**Every row below is page 1**, bound with the endpoint's own first-page sentinel. Nothing here
+measures a deep page; `DEEP_PAGE_DEPTH` exists because that is a separate question.
+
+| window | fetch = 101 | fetch = 1,001 | fetch = 10,001 | planning |
+| --- | ---: | ---: | ---: | ---: |
+| W-HOT | **5** blocks, 0.04 ms | **19**, 0.32 ms | **168**, 2.45 ms | 36 blocks, 0.11 ms |
+| W-COLD | **5** blocks, 0.03 ms | **19**, 0.25 ms | **401**, 10.18 ms | 36 blocks, 0.11 ms |
+| W-WIDE | **5** blocks, 0.04 ms | **19**, 0.23 ms | **167**, 2.39 ms | 852 blocks, 1.62 ms |
 
 `fetch` is the page limit plus one, so these are the caps as the endpoint binds them: 1,001 is
-`BARS_PAGE_DEFAULT` and 10,001 is `BARS_PAGE_MAX`.
+`BARS_PAGE_DEFAULT` and 10,001 is `BARS_PAGE_MAX`. Planning does not vary with `fetch` and is
+therefore reported once per window rather than per cell.
+
+**One cell is not invariant across its five runs, and it is the cell the cap is set from.**
+W-COLD at fetch = 10,001 read `404, 401, 401, 401, 401` — the first run's cold cache moved the
+*blocks*, not only the milliseconds. Every other cell in this subsection is identical to the
+block across all five runs. The published 401 is the median and the steady-state value; it
+reproduced as `401` five times out of five on 2026-09-08. The worst single observation is 404.
+
+**A request is two statements, and only one of them is in the table.** Every `/bars` and
+`/daily` request also runs `SELECT 1 FROM symbols WHERE symbol = …` for the 404 tier. Measured
+2026-09-08: **2 blocks, 0 planning blocks, 0.01 ms**, identical on a hit and a miss. It is not
+included in any figure above.
 
 **The planner chose the per-partition primary key on all three windows and never a hot-window
-index, and that was measured rather than assumed.** It is the load-bearing fact about
-reproducibility here: the four `bars_2026_0N_hot_idx` partial indexes exist in no migration and
-no `db/schema.sql`, so a number that depended on one would hold on this database and nowhere
-else. None of these does. The index set behind every row above is the set a fresh database gets
-from the migrations.
+index, and that was measured rather than assumed** — on 2026-09-08 across all five runs of every
+window, not only the first. It is the load-bearing fact about reproducibility here: the four
+`bars_2026_0N_hot_idx` partial indexes exist in no migration and no `db/schema.sql`, so a number
+that depended on one would hold on this database and nowhere else. None of these does. The index
+set behind every row above is the set a fresh database gets from the migrations.
 
 **Two residuals, stated rather than left implicit.** W-HOT covers three of 71 partitions, so on
-its own it would have measured the best-indexed six percent of the table — that is why W-COLD
-exists. And W-WIDE's *index set* reproduces on a fresh database while its *data* does not: no CI
-or testcontainer database holds 41.7M bars over 71 partitions.
+its own it would have measured the best-indexed **4.2 percent** of the table — the hot index
+itself covers four of 71, or 5.6 percent, and W-HOT spans three of those four. That is why
+W-COLD exists. And W-WIDE's *index set* reproduces on a fresh database while its *data* does
+not: no CI or testcontainer database holds 41.7M bars over 71 partitions.
 
-**Opening 71 partitions instead of three costs nothing per page, and that is the surprise.**
-W-WIDE and W-HOT are within one block of each other at every fetch. A keyset page is an index
-descent per partition under a Merge Append with a bound `LIMIT`, not a scan, so the partition
-count moves the setup and not the work. The larger spread is on the other axis and in the
-opposite direction from the one the partition count predicts: at `BARS_PAGE_MAX` the worst
-window is **W-COLD at 401 blocks**, against W-WIDE's 167 — 2.4× — because page 1 of W-WIDE
-starts in 2020-08 where AAPL's rows are contiguous, while W-COLD's 10,001 rows span a range the
-heap holds less tightly.
+**What the per-page block counts leave out, and it is the largest single quantity in this
+subsection.** Root-node blocks are execution only. Postgres reports planning separately, and a
+`Merge Append` over 71 children has to plan 71 children:
+
+| window | partitions | planning | execution at fetch = 1,001 | whole page |
+| --- | ---: | ---: | ---: | ---: |
+| W-HOT | 3 | 36 blocks | 19 blocks | **55 blocks** |
+| W-COLD | 3 | 36 blocks | 19 blocks | **55 blocks** |
+| W-WIDE | 71 | 852 blocks | 19 blocks | **871 blocks** |
+
+**So opening 71 partitions instead of three costs a default page 15.8× more blocks, not
+nothing.** The execution halves are within one block of each other at every fetch, which is a
+real result and the reason a keyset page is an index descent per partition under a `Merge
+Append` with a bound `LIMIT` rather than a scan — the partition count moves the setup and not
+the work. But the setup is what it moves, and the setup is 852 blocks: **23.7× the planning of a
+three-partition window, 14.7× its planning time, and 7.0× W-WIDE's own execution time.** A page
+whose execution is 0.23 ms spends 1.62 ms being planned.
+
+Worse on a connection that has not planned the statement before, which is what a pooled
+connection's first use of it is. Single observation, 2026-09-08: W-WIDE at fetch = 10,001 read
+**6,348 planning blocks in 5.893 ms** against 167 execution blocks in 2.39 ms.
+
+This is why the index-set axis and the partition axis are not comparable as published: the index
+set was identical on all three windows, so there is no index-set spread to compare against. The
+remaining execution spread — W-COLD's 401 blocks against W-WIDE's 167 at the cap, 2.4× — is not
+on either declared axis, and the heap-contiguity explanation for it is a hypothesis this
+document has not measured.
 
 **Verdict: `BARS_PAGE_DEFAULT = 1000` and `BARS_PAGE_MAX = 10000` are confirmed, not moved.**
-The cap is set from the worse of W-COLD and W-WIDE, which is measured to be W-COLD, and W-HOT is
-reported beside them. At the default a page costs 19 blocks — 152 kB — on every window; at the
-cap the worst page costs 401 blocks, about 3.1 MB, in 10.2 ms. Neither is near a limit worth
-lowering a cap for, and raising the cap has no measurement asking for it. Confirming a value
-with evidence is the revision; changing it without evidence would not be.
+On execution blocks the worst window at the cap is **W-COLD at 401**; on whole-page blocks it is
+**W-WIDE at 1,019** against W-COLD's 437. The cap is confirmed against both readings, which is
+why the disagreement does not change it. At the default a page costs 19 execution blocks —
+152 kB — on every window, 55 blocks whole-page on a narrow one and 871 on the widest; at the cap
+the worst execution page costs 401 blocks, about 3.2 MB, in 10.2 ms. Neither is near a limit
+worth lowering a cap for, and raising the cap has no measurement asking for it. Confirming a
+value with evidence is the revision; changing it without evidence would not be.
+
+**What this leaves for Feature 7.** The hot-window index's verdict is not settled by "the
+planner never chose one": on the widest window the dominant per-page cost is planning over 71
+children, which no index on any child changes. An endpoint that routinely serves W-WIDE-shaped
+requests is arguing for a narrower default window or for `DEEP_PAGE_DEPTH`, not for or against
+`hot_idx`.
 
 #### `/daily` — the wrapper, and the endpoint number Class A's table does not carry
 
@@ -553,44 +614,61 @@ Measured at W-HOT's parameters, page 1:
 | 51 | 414 | 24.08 | 51 |
 | 65 | 414 | 24.51 | 62 |
 | 101 | 414 | 24.05 | 62 |
+| 1,001 | 414 | 24.36 | 62 |
 
 **The prediction that cost is flat in the limit is confirmed**: the aggregation spans the
-window, not the page, so 414 blocks is the whole window's cost at every limit. The window holds
-62 trading days, which is why fetch 65 and 101 return the same 62 rows — a legal `/daily`
-window cannot fill a page at `AGG_PAGE_DEFAULT = 100`, so there is no page 2 at the default
-limit and the aggregating caps are not what bounds this endpoint's cost. `AGG_PAGE_DEFAULT` and
-`AGG_PAGE_MAX` are measured here and recorded; they are revised at Feature 7, which is where the
-other endpoints reading them exist.
+window, not the page, so 414 blocks is the whole window's cost at every limit measured. The
+1,001 row is `AGG_PAGE_MAX` plus one and was measured on 2026-09-08 for that reason — the
+original run stopped at 101, so the cap itself had been inferred from flatness rather than run.
 
-**This is the wrapper's number and not the file's.** The table above publishes the unwrapped
-`06_daily_rollup.sql` at 26.7 ms over 420 blocks for these same bound parameters. The wrapper
-reads 414 blocks in about 24 ms. The two are recorded separately and neither is quoted for the
-other; that they land within 1.5% of each other is what says the outer `LIMIT` and `ORDER BY`
-cost a sort over at most 65 rows and nothing else.
+This window holds 62 trading days, which is why fetch 65 and 101 return the same 62 rows. The
+bound is not 62: `AGG_MAX_WINDOW_DAYS = 90` is checked as `(end - start).days > 90`, so a legal
+window spans at most 91 calendar days, and this document already records **58 minimum and 64
+maximum trading days over every 90-day window** in the sizing section. 64 is the bound, and it
+is below `AGG_PAGE_DEFAULT = 100` — so no legal `/daily` window can fill a page at the default,
+there is no page 2 at the default limit, and the aggregating caps are not what bounds this
+endpoint's cost. `AGG_PAGE_DEFAULT` and `AGG_PAGE_MAX` are both measured here and recorded; they
+are revised at Feature 7, which is where the other endpoints reading them exist.
 
-**The Class A number for the `/daily` rollup path in its endpoint form is 24.05–24.51 ms,
-against the <100 ms target.** Section 3's gate for the feature that ships it is the test suite,
-so this number is measured and reported rather than gating anything.
+Planning, which the block counts above exclude as they do for `/bars`: **571 blocks, 1.93 ms**,
+flat across every fetch. The whole page is therefore 985 blocks, not 414.
+
+**This is the wrapper's number and not the file's, and the two are not directly comparable.**
+The table above publishes the unwrapped `06_daily_rollup.sql` at 26.7 ms over 420 blocks for
+these same bound parameters — but under a fresh connection per query, where this subsection
+measures inside one session. Measured like for like on 2026-09-08, both forms in one session at
+the same parameters, the unwrapped file reads `420, 414, 414, 414, 414` and the wrapper reads
+`414` five times out of five. **The outer `LIMIT` and `ORDER BY` cost zero blocks, not six**;
+the six-block difference between 420 and 414 is the first-execution catalog read this document
+already attributes to the connection model under "Measurement conditions". An earlier form of
+this paragraph read the six blocks as the wrapper's cost, which would have made a strict
+superset of work measure cheaper than the work it contains.
+
+**The Class A number for the `/daily` rollup path in its endpoint form is 24.05–24.51 ms
+execution — 22.95–26.34 ms across the fifteen underlying runs, and about 26.3 ms once planning
+is counted — against the <100 ms target.** Section 3's gate for the feature that ships it is the
+test suite, so this number is measured and reported rather than gating anything.
 
 **Narrowing against filtering, on the same page 2.** Page 1 at limit 30 returns its 30th row on
 2026-05-13, so page 2 binds `:start = 2026-05-14`. The alternative leaves `:start` at
-2026-04-01 and cuts the page with an outer `WHERE day > '2026-05-13'`:
+2026-04-01 and cuts the page with an outer `WHERE day > '2026-05-13'`. **Both rows below are a
+single observation each, not a median**, which is why the column is headed as it is:
 
-| page 2, fetch = 31 | root blocks | median ms | partitions opened |
+| page 2, fetch = 31 | root blocks | ms (n=1) | partitions opened |
 | --- | ---: | ---: | ---: |
 | narrowing `:start` | **221** | 14.08 | 2 |
-| outer `WHERE day >` | **414** | 24.05 | 3 |
+| outer `WHERE day >` | **414** | 18.09 | 3 |
 
-The narrowed form reads 47% fewer blocks, because `:start` also drives the scan bound inside the
-committed query while the outer predicate throws away rows the aggregate has already built. The
-plan carries a `Limit` above the aggregate, which is what distinguishes the outer bound from an
-inner one.
+The narrowed form reads 47% fewer blocks and runs 1.3× faster, because `:start` also drives the
+scan bound inside the committed query while the outer predicate throws away rows the aggregate
+has already built. The plan carries a `Limit` above the aggregate, which is what distinguishes
+the outer bound from an inner one.
 
 The partition count is an observation and not a target: `bars` is partitioned by month, so
 narrowing removes a partition only on the pages where it crosses a month boundary. This page
 does — `:start` moves from April into May — which is why the narrowed plan opens two children
-and the filtering plan three. A page landing mid-month would show the same block reduction and
-no partition difference at all.
+and the filtering plan three. A page landing mid-month would not open a third child and would
+therefore save less than this one; how much less has not been measured.
 
 
 ## Class B — query 2, the one query with a selective filter
