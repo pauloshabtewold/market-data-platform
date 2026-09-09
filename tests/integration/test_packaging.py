@@ -1,3 +1,4 @@
+import re
 import shutil
 import subprocess
 import sys
@@ -185,3 +186,30 @@ def test_the_installed_distribution_migrates_a_database_from_zero(built, install
         tables = {row[0] for row in conn.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'public'")}
     assert {"bars", "symbols", "market_days", "ingest_progress"} <= tables
+
+
+def test_every_document_a_committed_file_points_an_operator_at_is_tracked_and_carries_text(
+    repo_root,
+):
+    # config.py and .env.example route an operator to docs/ for the arithmetic behind four
+    # measured constants, and nothing else in the suite reads those files at all -- so deleting
+    # one, or emptying it, leaves CI green and the pointers dangling. This asserts the RELATION
+    # rather than a filename, so a document renamed without its pointers fails here too.
+    #
+    # It deliberately asserts no figure out of either document. The Feature 4 gate turns on
+    # numbers those files publish, and a test that read one back would make the gate circular.
+    named = set()
+    for source in ("config.py", ".env.example", "README.md"):
+        named |= set(re.findall(r"docs/[A-Za-z0-9_]+\.md", (repo_root / source).read_text()))
+    assert named, "no committed file names a docs/ path, so this test would pass vacuously"
+
+    tracked = set(
+        subprocess.run(
+            ["git", "ls-files", "-z"], cwd=repo_root, capture_output=True, text=True, check=True
+        ).stdout.split("\0")
+    )
+    for path in sorted(named):
+        assert path in tracked, f"{path} is named by a committed file and is not tracked"
+        # non-empty and not a stub: the smallest of the two is 14 kB, and a pointer at a file
+        # holding a heading and nothing else is the failure this is aimed at
+        assert len((repo_root / path).read_text().split()) > 100, path
