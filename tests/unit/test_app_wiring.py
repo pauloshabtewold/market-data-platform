@@ -398,23 +398,41 @@ def test_each_endpoint_carries_its_own_page_caps_and_defaults_to_its_own(monkeyp
     _, resolved = api.routes.resolve_request(raw_limit=None, page_default=3, page_max=50)
     assert resolved == 3
 
-    # WHICH pair each endpoint READS, which the three equalities above cannot see: _SYMBOLS_CAPS
-    # and _BARS_CAPS hold identical values, so a transposition between them -- or /bars reading
-    # the aggregating pair -- changes no response the suite asks for. Every /bars limit in the
-    # integration files is 10 or 50, both under AGG_PAGE_DEFAULT, so the cap is never reached
-    # there. Each constant gets a distinct sentinel and each endpoint must name its own back.
-    sentinels = {"_SYMBOLS_CAPS": (11, 12), "_BARS_CAPS": (21, 22), "_DAILY_CAPS": (31, 32)}
+    # WHICH pair each endpoint READS, and which HALF of it, neither of which the three equalities
+    # above can see: _SYMBOLS_CAPS and _BARS_CAPS hold identical values, so a transposition
+    # between them -- or /bars reading the aggregating pair -- changes no response the suite asks
+    # for. Every /bars and /daily limit in the integration files is 10 or 50, and every fixture is
+    # smaller than either default, so nothing this feature can produce distinguishes a default of
+    # 100 from one of 1000 either. Each constant gets a distinct sentinel and each endpoint must
+    # name its own back.
+    #
+    # Each pair is deliberately INVERTED -- default above max -- which config's validator forbids
+    # of the real settings and nothing checks of these module constants. That is what lets one
+    # call pin both halves: an omitted limit resolves to the default and then fails the same range
+    # check, so the refusal names the default in `limit` and the cap in `max`. Pinning `max` alone
+    # leaves the default free, and /bars taking the aggregating default while keeping its own cap
+    # then serves a 100-row page where 1000 is specified, with the whole suite green.
+    sentinels = {"_SYMBOLS_CAPS": (11, 10), "_BARS_CAPS": (21, 20), "_DAILY_CAPS": (31, 30)}
     for name, pair in sentinels.items():
         monkeypatch.setattr(api.routes, name, pair)
     window = {"start": date(2026, 3, 9), "end": date(2026, 3, 12)}
     # pool=None is safe and is the point: resolve_request runs the 400 tier and raises before
     # pool.connection() is entered, so a handler that reached for a connection first would fail
     # here with AttributeError rather than the ApiError this asserts
-    for endpoint, kwargs, expected in (
-        (api.routes.list_symbols, {}, 12),
-        (api.routes.list_bars, {"symbol": "AAA"} | window, 22),
-        (api.routes.list_daily, {"symbol": "AAA"} | window, 32),
+    for endpoint, kwargs, pair in (
+        (api.routes.list_symbols, {}, sentinels["_SYMBOLS_CAPS"]),
+        (api.routes.list_bars, {"symbol": "AAA"} | window, sentinels["_BARS_CAPS"]),
+        (api.routes.list_daily, {"symbol": "AAA"} | window, sentinels["_DAILY_CAPS"]),
     ):
+        default, cap = pair
         with pytest.raises(ApiError) as excinfo:
             endpoint(limit=9999, pool=None, **kwargs)
-        assert excinfo.value.detail["max"] == expected, endpoint.__name__
+        assert excinfo.value.detail["max"] == cap, endpoint.__name__
+        # and the DEFAULT half, which the call above cannot see because it supplies a raw limit
+        with pytest.raises(ApiError) as excinfo:
+            endpoint(limit=None, pool=None, **kwargs)
+        assert excinfo.value.detail == {
+            "reason": "limit_out_of_range",
+            "limit": default,
+            "max": cap,
+        }, endpoint.__name__
