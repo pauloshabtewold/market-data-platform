@@ -122,12 +122,22 @@ per level of the tree. On this database's own query 9 the root reports **514,251
 the sum over all nodes reports **4,943,377** — **9.61× more**, for one identical execution. The
 inflation factor is plan-shape dependent, so it is not a constant that can be divided back out.
 
-Every count in the Class A, B and C tables below was **cross-checked two ways before it was
-recorded**: the root object of `EXPLAIN (…, FORMAT JSON)` and the first `Buffers: shared hit=…
-read=…` line of the same plan in text form. These are different output paths in Postgres, and
-the harness raises rather than warns if they disagree. **The endpoint-forms subsection is the
-one exception and says so in place**: its harnesses carry no such check, and the pass that
-corrected its figures added one after the fact rather than at the time.
+Every count in the **Class A and Class B** tables below was **cross-checked two ways before it
+was recorded**: the root object of `EXPLAIN (…, FORMAT JSON)` and the first `Buffers: shared
+hit=… read=…` line of the same plan in text form. These are different output paths in Postgres,
+and the harness raises rather than warns if they disagree. **Two sets of figures here do not
+carry that check, and both are named where they appear.** The first is **Class C**, whose
+tables come from a harness that emits no JSON plan at all — there is no second output path for
+them to be checked against, so their agreement is unverified rather than verified. The second
+is the **endpoint-forms subsection** under Class A, whose original run had no check and whose
+correcting pass added one that compares execution blocks only.
+
+One limitation of the check itself, stated because it bounds what "cross-checked" buys. It
+matches the first `Buffers: shared hit=…` line of the text plan. A node that read only misses
+prints `Buffers: shared read=N` with no `hit=` at all — 231 of the 1,021 such lines in the
+captured plan set — so on a root node in that shape the match walks past it and compares a
+descendant's number, or the planning group's, against the root's. Every figure below was taken
+on a warm root, where that cannot happen; a cold one is outside what the check covers.
 
 **Every measurement here is also a fresh connection — with the same one exception.** Each
 harness spawns a new `docker compose exec` per query, which pays catalog and sort-operator
@@ -442,8 +452,9 @@ computed from the unrounded values to one decimal. That is why `03_gaps.sql`'s p
 (27 29 28 26 27) likewise print a median of 27 against the reported 26.7 — a verifier
 recomputing the median from the printed column has not found a defect.
 
-Roughly 420 blocks each — about 3.4 MB — because partition pruning takes a 90-day window down
-to three monthly partitions and the PK then serves one symbol out of them.
+Roughly 420 blocks each — 3.28 MiB, since a block is 8 KiB and every byte figure in this
+document is binary — because partition pruning takes a 90-day window down to three monthly
+partitions and the PK then serves one symbol out of them.
 
 **Against the same constructed before Class B uses** — `enable_indexscan`, `enable_bitmapscan`
 and `enable_indexonlyscan` all off, which is the only way to get an untuned state for a
@@ -536,16 +547,37 @@ measures a deep page; `DEEP_PAGE_DEPTH` exists because that is a separate questi
 `BARS_PAGE_DEFAULT` and 10,001 is `BARS_PAGE_MAX`. Planning does not vary with `fetch` and is
 therefore reported once per window rather than per cell.
 
-**One cell is not invariant across its five runs, and it is the cell the cap is set from.**
-W-COLD at fetch = 10,001 read `404, 401, 401, 401, 401` — the first run's cold cache moved the
-*blocks*, not only the milliseconds. Every other cell in this subsection is identical to the
-block across all five runs. The published 401 is the median and the steady-state value; it
-reproduced as `401` five times out of five on 2026-09-08. The worst single observation is 404.
+**One EXECUTION cell is not invariant across its five runs, and it is the cell the cap is set
+from.** W-COLD at fetch = 10,001 read `404, 401, 401, 401, 401` — the first run's cold cache
+moved the *blocks*, not only the milliseconds. Every other execution cell in this subsection is
+identical to the block across all five runs. The published 401 is the median and the
+steady-state value; it reproduced as `401` five times out of five on 2026-09-08. The worst
+single observation is 404.
+
+**The planning column is a different matter and the invariance above is not true of it.** Every
+planning cell's first run is higher than its other four, because the first execution of a
+statement on a connection populates the relcache the planner reads:
+
+    W-HOT  fetch=101   68, 36, 36, 36, 36        W-WIDE fetch=101   1242, 852, 852, 852, 852
+    W-COLD fetch=101   54, 36, 36, 36, 36        /daily              5729, 571, 571, 571, 571
+
+The published planning figures are the steady-state medians, which is the right number for a
+connection that has served a request before. It is not the right number for one that has not,
+and the size of the gap is the subject of the fresh-connection paragraphs below — one for
+`/bars`, one for `/daily`, and one for the 404-tier statement. **Read the first run of a
+planning cell before quoting its median as flat.**
 
 **A request is two statements, and only one of them is in the table.** Every `/bars` and
 `/daily` request also runs `SELECT 1 FROM symbols WHERE symbol = …` for the 404 tier. Measured
-2026-09-08: **2 blocks, 0 planning blocks, 0.01 ms**, identical on a hit and a miss. It is not
-included in any figure above.
+2026-09-08 in a warm session: **2 blocks, 0 planning blocks, 0.01 ms**, identical on a hit and a
+miss. On a connection that has not planned it before, measured 2026-09-09 over five fresh
+connections, it reads **70 planning blocks** (identical on all five, 0.10–0.19 ms) against those
+same 2 execution blocks — thirty-five times the statement's own execution cost, once per
+connection. It is not included in any figure above.
+
+Postgres omits the `Planning:` section from a text plan entirely when planning read no buffers,
+so in that output form "0" and "not reported" are the same string. The warm figure above is
+taken from the JSON plan, where the zero is explicit.
 
 **The planner chose the per-partition primary key on all three windows and never a hot-window
 index, and that was measured rather than assumed** — on 2026-09-08 across all five runs of every
@@ -579,8 +611,12 @@ three-partition window, 14.7× its planning time, and 7.0× W-WIDE's own executi
 whose execution is 0.23 ms spends 1.62 ms being planned.
 
 Worse on a connection that has not planned the statement before, which is what a pooled
-connection's first use of it is. Single observation, 2026-09-08: W-WIDE at fetch = 10,001 read
-**6,348 planning blocks in 5.893 ms** against 167 execution blocks in 2.39 ms.
+connection's first use of it is. W-WIDE at fetch = 10,001 reads **6,348 planning blocks**
+against 167 execution blocks. The block count is exact and reproduces: five fresh connections on
+2026-09-09 read 6,348 on every one. The time does not reproduce as narrowly — the same five read
+6.40, 6.70, 7.17, 7.89 and 10.55 ms, median **7.17 ms**, so the 5.893 ms recorded from a single
+observation on 2026-09-08 is below the whole of that range and should not be quoted as typical.
+Take the blocks as the measurement and the milliseconds as an order of magnitude.
 
 This is why the index-set axis and the partition axis are not comparable as published: the index
 set was identical on all three windows, so there is no index-set spread to compare against. The
@@ -592,8 +628,8 @@ document has not measured.
 On execution blocks the worst window at the cap is **W-COLD at 401**; on whole-page blocks it is
 **W-WIDE at 1,019** against W-COLD's 437. The cap is confirmed against both readings, which is
 why the disagreement does not change it. At the default a page costs 19 execution blocks —
-152 kB — on every window, 55 blocks whole-page on a narrow one and 871 on the widest; at the cap
-the worst execution page costs 401 blocks, about 3.2 MB, in 10.2 ms. Neither is near a limit
+152 KiB — on every window, 55 blocks whole-page on a narrow one and 871 on the widest; at the
+cap the worst execution page costs 401 blocks, 3.13 MiB, in 10.2 ms. Neither is near a limit
 worth lowering a cap for, and raising the cap has no measurement asking for it. Confirming a
 value with evidence is the revision; changing it without evidence would not be.
 
@@ -623,15 +659,35 @@ original run stopped at 101, so the cap itself had been inferred from flatness r
 
 This window holds 62 trading days, which is why fetch 65 and 101 return the same 62 rows. The
 bound is not 62: `AGG_MAX_WINDOW_DAYS = 90` is checked as `(end - start).days > 90`, so a legal
-window spans at most 91 calendar days, and this document already records **58 minimum and 64
-maximum trading days over every 90-day window** in the sizing section. 64 is the bound, and it
-is below `AGG_PAGE_DEFAULT = 100` — so no legal `/daily` window can fill a page at the default,
-there is no page 2 at the default limit, and the aggregating caps are not what bounds this
-endpoint's cost. `AGG_PAGE_DEFAULT` and `AGG_PAGE_MAX` are both measured here and recorded; they
-are revised at Feature 7, which is where the other endpoints reading them exist.
+window spans at most 91 calendar days. Measured against the loaded calendar on 2026-09-09 — the
+1,484 rows of `market_days`, every 91-day span in them — the maximum is **64 trading days**, and
+the maximum over a 90-day span is also 64. (`docs/METHODOLOGY.md` records the 58 minimum and 64
+maximum over 90-day windows as a sizing input; the 91-day figure is measured here because a
+legal window is 91 days and a maximum over a narrower class cannot bound a wider one. The
+arithmetic ceiling is 65, since 91 days is exactly 13 weeks and so exactly 65 weekdays; holidays
+hold the observed maximum at 64.) 64 is the bound, and it is below `AGG_PAGE_DEFAULT = 100` — so
+no legal `/daily` window can fill a page at the default, there is no page 2 at the default limit,
+and the aggregating caps are not what bounds this endpoint's cost. `AGG_PAGE_DEFAULT` and
+`AGG_PAGE_MAX` are both measured here and recorded; they are revised at Feature 7, which is where
+the other endpoints reading them exist.
 
 Planning, which the block counts above exclude as they do for `/bars`: **571 blocks, 1.93 ms**,
-flat across every fetch. The whole page is therefore 985 blocks, not 414.
+flat across every fetch — measured at 51, 65, 101 and 1,001, and re-measured at all four on
+2026-09-09. On a warm connection the whole page is therefore 985 blocks, not 414.
+
+**On a connection that has not planned the statement, the whole page is 6,149 blocks.** Measured
+2026-09-09 over three fresh connections, first statement on each: **5,729 planning blocks** on
+all three, against 420 execution blocks — the 420 rather than 414 being the same first-execution
+catalog read this subsection discusses two paragraphs below. That is **6.2× the warm whole-page
+figure**, and it is the same shape as `/bars`'s 6,348: on a partitioned table the first plan of
+a statement on a connection is where the partition count is paid, and a pool hands every new
+connection that cost once.
+
+This bears directly on the Class A number below. **The <100 ms comparison that follows is a
+warm-connection number.** Planning on a fresh connection measured 5.98, 6.03 and 6.35 ms in the
+three runs above, so the first request a pooled connection serves costs roughly 6 ms of planning
+on top of its execution rather than 1.93 — still inside the target, but the target is met by the
+warm figure and not by the cold one being small.
 
 **This is the wrapper's number and not the file's, and the two are not directly comparable.**
 The table above publishes the unwrapped `06_daily_rollup.sql` at 26.7 ms over 420 blocks for
@@ -645,9 +701,12 @@ this paragraph read the six blocks as the wrapper's cost, which would have made 
 superset of work measure cheaper than the work it contains.
 
 **The Class A number for the `/daily` rollup path in its endpoint form is 24.05–24.51 ms
-execution — 22.95–26.34 ms across the fifteen underlying runs, and about 26.3 ms once planning
-is counted — against the <100 ms target.** Section 3's gate for the feature that ships it is the
-test suite, so this number is measured and reported rather than gating anything.
+execution — 22.95–28.41 ms across the twenty underlying runs, and about 26.3 ms once warm
+planning is counted — against the <100 ms target.** The twenty are four fetches at five runs
+each; the worst single observation, 28.41 ms, is in the fetch = 1,001 row this document added
+after the first three were published, which is why an earlier form of this sentence gave the
+spread over fifteen. Section 3's gate for the feature that ships it is the test suite, so this
+number is measured and reported rather than gating anything.
 
 **Narrowing against filtering, on the same page 2.** Page 1 at limit 30 returns its 30th row on
 2026-05-13, so page 2 binds `:start = 2026-05-14`. The alternative leaves `:start` at
@@ -659,16 +718,32 @@ single observation each, not a median**, which is why the column is headed as it
 | narrowing `:start` | **221** | 14.08 | 2 |
 | outer `WHERE day >` | **414** | 18.09 | 3 |
 
-The narrowed form reads 47% fewer blocks and runs 1.3× faster, because `:start` also drives the
-scan bound inside the committed query while the outer predicate throws away rows the aggregate
-has already built. The plan carries a `Limit` above the aggregate, which is what distinguishes
-the outer bound from an inner one.
+On execution the narrowed form reads 47% fewer blocks and runs 1.3× faster, because `:start`
+also drives the scan bound inside the committed query while the outer predicate throws away rows
+the aggregate has already built. The plan carries a `Limit` above the aggregate, which is what
+distinguishes the outer bound from an inner one.
+
+**Both rows above are execution only, like every other cell in this subsection, and here the
+omission changes the size of the result rather than only adding to it.** The saved plans carry
+planning for both variants — narrowed **567 blocks / 2.427 ms**, filtering **574 / 2.123** —
+and planning barely moves between them, because both forms plan the same committed query over
+nearly the same children. Whole page:
+
+| page 2, fetch = 31 | whole-page blocks | whole-page ms (n=1) |
+| --- | ---: | ---: |
+| narrowing `:start` | **788** | 16.503 |
+| outer `WHERE day >` | **988** | 20.216 |
+
+**20.2% fewer blocks and 1.22× faster, not 47% and 1.3×.** Narrowing is still the right design
+and the reason for it is unchanged; its measured advantage over the alternative is a little less
+than half what the execution-only figures imply.
 
 The partition count is an observation and not a target: `bars` is partitioned by month, so
 narrowing removes a partition only on the pages where it crosses a month boundary. This page
 does — `:start` moves from April into May — which is why the narrowed plan opens two children
-and the filtering plan three. A page landing mid-month would not open a third child and would
-therefore save less than this one; how much less has not been measured.
+and the filtering plan three. On a page landing mid-month the narrowed form would open the same
+three children as the filtering form, so no partition drops out and the saving is smaller than
+this page's; how much smaller has not been measured.
 
 
 ## Class B — query 2, the one query with a selective filter
