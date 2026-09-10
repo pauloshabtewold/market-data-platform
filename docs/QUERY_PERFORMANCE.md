@@ -130,14 +130,19 @@ carry that check, and both are named where they appear.** The first is **Class C
 tables come from a harness that emits no JSON plan at all — there is no second output path for
 them to be checked against, so their agreement is unverified rather than verified. The second
 is the **endpoint-forms subsection** under Class A, whose original run had no check and whose
-correcting pass added one that compares execution blocks only.
+correcting pass added one. (That added check compared execution blocks only when this sentence
+was first written; it compares execution **and planning** blocks now, and raises on either.)
 
-One limitation of the check itself, stated because it bounds what "cross-checked" buys. It
-matches the first `Buffers: shared hit=…` line of the text plan. A node that read only misses
-prints `Buffers: shared read=N` with no `hit=` at all — 231 of the 1,021 such lines in the
-captured plan set — so on a root node in that shape the match walks past it and compares a
-descendant's number, or the planning group's, against the root's. Every figure below was taken
-on a warm root, where that cannot happen; a cold one is outside what the check covers.
+One limitation the check used to carry, stated because it bounds what "cross-checked" buys for
+the figures already recorded. It matched the first `Buffers: shared hit=…` line of the text plan,
+requiring `hit=`. A node that read only misses prints `Buffers: shared read=N` with no `hit=` at
+all — **231 of the 1,021 Buffers lines in the captured plan set** — so on a root in that shape
+the match walked past it and compared a descendant's number, or the planning group's, against
+the root's. Every figure below was taken on a warm root, where that cannot happen. The
+cross-checking harness makes both fields optional now and raises on a line carrying neither, so
+no figure moves;
+the `hit=`-requiring form survives in the three harnesses that perform **no** cross-check at all,
+which is where the residual risk actually sits.
 
 **Every measurement here is also a fresh connection — with the same one exception.** Each
 harness spawns a new `docker compose exec` per query, which pays catalog and sort-operator
@@ -452,9 +457,10 @@ computed from the unrounded values to one decimal. That is why `03_gaps.sql`'s p
 (27 29 28 26 27) likewise print a median of 27 against the reported 26.7 — a verifier
 recomputing the median from the printed column has not found a defect.
 
-Roughly 420 blocks each — 3.28 MiB, since a block is 8 KiB and every byte figure in this
-document is binary — because partition pruning takes a 90-day window down to three monthly
-partitions and the PK then serves one symbol out of them.
+Roughly 420 blocks each — 3.28 MiB, since a block is 8 KiB and every figure converted FROM A
+BLOCK COUNT in this document is binary (the "5.3 GB working set" above is not one of those; it is
+a decimal rendering of 5,302 MiB) — because partition pruning takes a 90-day window down to
+three monthly partitions and the PK then serves one symbol out of them.
 
 **Against the same constructed before Class B uses** — `enable_indexscan`, `enable_bitmapscan`
 and `enable_indexonlyscan` all off, which is the only way to get an untuned state for a
@@ -508,8 +514,10 @@ from **one continuous psycopg session**, not a fresh `docker compose exec` per q
 caveat under "Measurement conditions" applies to them and not to the Class A/B/C tables, and the
 first execution of any statement in the session reads a few blocks more than the rest. Second,
 the harnesses behind this subsection do **not** perform the JSON-versus-text cross-check that
-every other count in this document was recorded under; the 2026-09-08 pass added it and every
-figure below survived it, but the original run did not have it.
+the Class A and Class B tables were recorded under — **not "every other count in this document",
+which is what this sentence read until 2026-09-10 and is the claim the "Measurement conditions"
+section above withdrew; Class C carries no such check either**; the 2026-09-08 pass added it
+and every figure below survived it, but the original run did not have it.
 
 **The block counts below are execution only.** Root-node `Shared Hit + Shared Read` excludes
 planning, which Postgres reports separately, and on a partitioned table planning is not a
@@ -554,23 +562,32 @@ identical to the block across all five runs. The published 401 is the median and
 steady-state value; it reproduced as `401` five times out of five on 2026-09-08. The worst
 single observation is 404.
 
-**The planning column is a different matter and the invariance above is not true of it.** Every
-planning cell's first run is higher than its other four, because the first execution of a
-statement on a connection populates the relcache the planner reads:
+**The planning column is not invariant either, but only in three of the nine cells, and the
+reason is not the one you would guess.** The elevated runs are the three `fetch = 101` cells —
+the first time each WINDOW was planned on the connection, not the first time the statement was:
 
     W-HOT  fetch=101   68, 36, 36, 36, 36        W-WIDE fetch=101   1242, 852, 852, 852, 852
-    W-COLD fetch=101   54, 36, 36, 36, 36        /daily              5729, 571, 571, 571, 571
+    W-COLD fetch=101   54, 36, 36, 36, 36
 
-The published planning figures are the steady-state medians, which is the right number for a
-connection that has served a request before. It is not the right number for one that has not,
-and the size of the gap is the subject of the fresh-connection paragraphs below — one for
-`/bars`, one for `/daily`, and one for the 404-tier statement. **Read the first run of a
-planning cell before quoting its median as flat.**
+`fetch`, `lo` and `hi` are bind parameters, so all nine cells run the *same statement text*.
+W-COLD's elevated run came after that text had already executed fifteen times on the connection,
+and W-WIDE's after thirty. What is new in each is the set of **partitions** the window opens, and
+the excess is exactly **6 blocks per newly-planned child**: W-COLD adds 3 children,
+`54 − 36 = 18`; W-WIDE adds the remaining 65, `1242 − 852 = 390`. Both divide to 6.0.
+
+The other six `/bars` cells and **all four measured `/daily` cells are flat** — `/daily` reads
+`571, 571, 571, 571, 571` at fetch 51, 65, 101 and 1,001. An earlier form of this paragraph
+printed `5729, 571, …` as a `/daily` row; that array is the first statement of a fresh *session*
+and is the subject of the `/daily` paragraph further down, not a cell of this table.
+
+The published planning figures are the steady-state medians. **Before quoting one as flat, ask
+whether the connection has planned that WINDOW before — not merely that statement.**
 
 **A request is two statements, and only one of them is in the table.** Every `/bars` and
 `/daily` request also runs `SELECT 1 FROM symbols WHERE symbol = …` for the 404 tier. Measured
-2026-09-08 in a warm session: **2 blocks, 0 planning blocks, 0.01 ms**, identical on a hit and a
-miss. On a connection that has not planned it before, measured 2026-09-09 over five fresh
+2026-09-08 in a warm session: **2 blocks, 0 planning blocks, 0.01 ms** — the blocks and the
+planning blocks identical on a hit and a miss, the milliseconds not quite (a miss reads
+0.00). On a connection that has not planned it before, measured 2026-09-09 over five fresh
 connections, it reads **70 planning blocks** (identical on all five, 0.10–0.19 ms) against those
 same 2 execution blocks — thirty-five times the statement's own execution cost, once per
 connection. It is not included in any figure above.
@@ -610,8 +627,11 @@ the work. But the setup is what it moves, and the setup is 852 blocks: **23.7× 
 three-partition window, 14.7× its planning time, and 7.0× W-WIDE's own execution time.** A page
 whose execution is 0.23 ms spends 1.62 ms being planned.
 
-Worse on a connection that has not planned the statement before, which is what a pooled
-connection's first use of it is. W-WIDE at fetch = 10,001 reads **6,348 planning blocks**
+Worse on a connection that has planned nothing at all — and that is a narrower condition than
+"has not planned this statement". The artifact holds **three** states, not two: steady **852**;
+**1,242** when the connection is warm but this window's partitions are new to it; and **6,348**
+on a brand-new connection. A pooled connection that has already served any request pays the
+middle one. W-WIDE at fetch = 10,001 reads **6,348 planning blocks**
 against 167 execution blocks. The block count is exact and reproduces: five fresh connections on
 2026-09-09 read 6,348 on every one. The time does not reproduce as narrowly — the same five read
 6.40, 6.70, 7.17, 7.89 and 10.55 ms, median **7.17 ms**, so the 5.893 ms recorded from a single
@@ -735,8 +755,10 @@ nearly the same children. Whole page:
 | outer `WHERE day >` | **988** | 20.216 |
 
 **20.2% fewer blocks and 1.22× faster, not 47% and 1.3×.** Narrowing is still the right design
-and the reason for it is unchanged; its measured advantage over the alternative is a little less
-than half what the execution-only figures imply.
+and the reason for it is unchanged. The two halves shrink by different amounts and the sentence
+that said "a little less than half" was distributing one fraction across both: whole-page keeps
+**43.4%** of the block advantage (20.24 of 46.62 percentage points) and **79.0%** of the time
+advantage (1.2250 against 1.2848).
 
 The partition count is an observation and not a target: `bars` is partitioned by month, so
 narrowing removes a partition only on the pages where it crosses a month boundary. This page
