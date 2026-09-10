@@ -132,9 +132,10 @@ def test_a_malformed_parameter_is_a_four_hundred(client):
 
 
 def test_an_http_exception_raised_in_an_endpoint_is_internal_rather_than_unknown_route(
-    permissive_client,
+    permissive_client, caplog
 ):
-    response = permissive_client.get("/raiser")
+    with caplog.at_level("ERROR", logger="api.errors"):
+        response = permissive_client.get("/raiser")
     assert response.status_code == 500
     assert response.json() == {
         "error": {
@@ -143,6 +144,12 @@ def test_an_http_exception_raised_in_an_endpoint_is_internal_rather_than_unknown
             "detail": None,
         }
     }
+    # the traceback, at THIS call site of _internal_response and not only the other one. The body
+    # deliberately says nothing, so the log record is the whole account of a 500 -- and the two
+    # call sites are separate: the unhandled-exception test above pins exc_info on its own, and
+    # passing None here instead of exc leaves this response byte-identical with a green suite
+    assert [r.message for r in caplog.records] == ["unhandled exception"]
+    assert caplog.records[0].exc_info[0] is HTTPException
 
     # the sibling an endpoint raises deliberately, and the one shape whose detail comes from the
     # caller rather than from the handler: every other case here carries None, so a handler passing
