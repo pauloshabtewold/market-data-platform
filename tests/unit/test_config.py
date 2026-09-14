@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -35,6 +37,10 @@ DEFAULTED = (
     "DB_POOL_MIN",
     "DB_POOL_MAX",
     "LOG_LEVEL",
+    "E2E_BASE_URL",
+    "E2E_START",
+    "E2E_END",
+    "E2E_SYMBOLS",
 )
 
 # duplicated from config.py's _MEASURED_BY on purpose -- reading it back would let a changed
@@ -125,6 +131,7 @@ def test_missing_credential_fails_at_construction(monkeypatch):
 
 
 def test_defaults_match_the_documented_values(clean_env):
+    # every default pinned by value: the three-list guard above reads names and never values
     settings = Settings(_env_file=None, **REQUIRED)
     assert settings.ALPACA_FEED == "iex"
     assert settings.ALPACA_ADJUSTMENT == "split,spin-off"
@@ -132,6 +139,7 @@ def test_defaults_match_the_documented_values(clean_env):
     assert settings.RATE_LIMIT_RPM == 200
     assert settings.HTTP_MAX_ATTEMPTS == 5
     assert settings.AGG_MAX_WINDOW_DAYS == 90
+    assert settings.HOT_WINDOW_MONTHS == 4
     assert settings.BARS_PAGE_DEFAULT == 1000
     assert settings.BARS_PAGE_MAX == 10000
     assert settings.AGG_PAGE_DEFAULT == 100
@@ -139,6 +147,10 @@ def test_defaults_match_the_documented_values(clean_env):
     assert settings.DB_POOL_MIN == 1
     assert settings.DB_POOL_MAX == 10
     assert settings.LOG_LEVEL == "INFO"
+    assert settings.E2E_BASE_URL == "http://127.0.0.1:8000"
+    assert settings.E2E_START == date(2026, 4, 1)
+    assert settings.E2E_END == date(2026, 6, 30)
+    assert settings.E2E_SYMBOLS == "AAPL,MSFT,NVDA"
 
 
 def test_require_raises_runtime_error_for_a_key_no_one_mapped(monkeypatch):

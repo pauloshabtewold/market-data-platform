@@ -34,5 +34,6 @@ packages = ["ingest", "api", "db"]
 db = ["schema.sql", "migrations/*.sql", "queries/*.sql"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# tests/e2e is named explicitly and never collected by a bare run: it needs a running service
+testpaths = ["tests/unit", "tests/integration"]
 pythonpath = ["."]

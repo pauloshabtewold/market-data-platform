@@ -20,5 +20,33 @@ services:
       retries: 12
       start_period: 30s
 
+  # a stock image over a bind mount, never an image built here -- the service Dockerfile belongs
+  # to the deploy milestone, and this service exists so the end-to-end suite can drive the API
+  # against db
+  app:
+    image: python:3.13-slim
+    working_dir: /app
+    # installed on every start so importlib.metadata can report the package version /health returns
+    command: ["sh", "-c", "pip install --quiet -e . && exec uvicorn api.main:app --host 0.0.0.0 --port 8000"]
+    environment:
+      # the whole DSN, not only the host: inside the network the database is db, so .env's own
+      # DATABASE_URL is ignored here and this service always serves marketdata
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/marketdata
+      # the working tree is bind-mounted, so bytecode would otherwise be written into it
+      PYTHONDONTWRITEBYTECODE: "1"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 120s
+
 volumes:
   pgdata:

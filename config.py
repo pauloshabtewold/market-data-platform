@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     DB_POOL_MIN: int = 1
     DB_POOL_MAX: int = 10
     LOG_LEVEL: str = "INFO"
+    # the end-to-end suite's target, defaulted because CI starts no service and exports none of
+    # them. The window is exactly AGG_MAX_WINDOW_DAYS and sits inside the hot window Feature 10
+    # copies to RDS, so the identical suite runs against the deployed database unchanged
+    E2E_BASE_URL: str = "http://127.0.0.1:8000"
+    E2E_START: date = date(2026, 4, 1)
+    E2E_END: date = date(2026, 6, 30)
+    E2E_SYMBOLS: str = "AAPL,MSFT,NVDA"
 
     BARS_PER_TICKER_DAY: float | None = None
     DEEP_PAGE_DEPTH: int | None = None

@@ -30,12 +30,16 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 docker compose up -d --wait db
 .venv/bin/python -m db.migrate            # separate operator action; ingest never migrates
 .venv/bin/python -m ingest --tickers-file tickers.txt
-.venv/bin/python -m pytest
+.venv/bin/python -m pytest                # unit and integration, what CI runs
+docker compose up -d --wait db app
+.venv/bin/python -m pytest tests/e2e      # end-to-end; runs only when named
 ```
 
 Copy `.env.example` to `.env` first. The four measured constants in it are recorded rather
 than defaulted, because a silently-defaulted value is the failure they exist to prevent —
 [Methodology](docs/METHODOLOGY.md) carries each value and the arithmetic behind it.
+
+The end-to-end suite needs the `app` service running against the loaded database.
 
 ## What's interesting here
 
@@ -72,7 +76,7 @@ already recorded. Widening the window and re-running is the supported path.
 ingest/     feed client, retry/throttle, calendar, symbol resolution, validation, pipeline
 db/         schema, migrations, session
 api/        app factory, connection pool, keyset cursors, the one error shape, endpoints
-tests/      unit and integration suites, run in CI
+tests/      unit and integration suites, run in CI; e2e/, run by name against the app service
 ```
 
 [Query performance](docs/QUERY_PERFORMANCE.md) has the before/after plans for all ten queries,
