@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from psycopg_pool import ConnectionPool
 
 import db.sql
@@ -15,6 +16,7 @@ from api.pagination import (
     BARS_CURSOR,
     DAILY_CURSOR,
     SYMBOLS_CURSOR,
+    UNIVERSE_CURSOR,
     CursorShape,
     _instant_bounds,
     decode_cursor,
@@ -37,6 +39,11 @@ _BEFORE_ANY_SYMBOL = ""
 _SYMBOLS_CAPS = (settings.BARS_PAGE_DEFAULT, settings.BARS_PAGE_MAX)
 _BARS_CAPS = (settings.BARS_PAGE_DEFAULT, settings.BARS_PAGE_MAX)
 _DAILY_CAPS = (settings.AGG_PAGE_DEFAULT, settings.AGG_PAGE_MAX)
+# one per analytics endpoint rather than one shared tuple: three byte-identical pairs cannot be
+# told apart by value, so only a named constant makes the one a handler READS observable
+_VOLATILITY_CAPS = (settings.AGG_PAGE_DEFAULT, settings.AGG_PAGE_MAX)
+_GAPS_CAPS = (settings.AGG_PAGE_DEFAULT, settings.AGG_PAGE_MAX)
+_MOVES_CAPS = (settings.AGG_PAGE_DEFAULT, settings.AGG_PAGE_MAX)
 
 # the table is symbols and never bars: a known symbol with no rows in the requested window is a
 # 200 with an empty list, and an existence check against bars cannot tell that from a 404
@@ -72,6 +79,35 @@ _DAILY_SQL = (
     f"{_DAILY_ROLLUP}\n"
     ") AS page ORDER BY day LIMIT %(fetch)s"
 )
+# no wrapper on these two: neither paginates, and each committed file already projects exactly the
+# response columns in the response order, so a subquery would only move the plan the Class A
+# number is taken on
+_VOLATILITY_SQL = db.sql.render("01_volatility.sql")
+_GAPS_SQL = db.sql.render("03_gaps.sql")
+
+# the endpoint form of query 5, which 05_largest_moves.sql is deliberately not: that file ranks by
+# magnitude, and a ranking has to read the whole window before it knows its first row, so nothing
+# streams it in order and no cursor over it is stable. This one is chronological on (ts, symbol),
+# which is an index this database already has. The projection stops at open and close because the
+# hot-window partial index covers those two and nothing else
+_MOVES_SQL = """
+SELECT b.ts, b.symbol,
+       round(b.open, 4)                            AS open,
+       round(b.close, 4)                           AS close,
+       round(100 * (b.close - b.open) / b.open, 4) AS move_pct
+FROM bars b
+JOIN market_days m
+  ON m.day = (b.ts AT TIME ZONE 'America/New_York')::date
+ AND b.ts >= m.open_ts AND b.ts < m.close_ts
+WHERE m.day >= %(start)s AND m.day <= %(end)s
+      -- redundant by logic and required for pruning: a row comparison prunes nothing, so without this every partition up to hi is planned
+      AND b.ts >= %(after_ts)s
+      AND (b.ts, b.symbol) > (%(after_ts)s, %(after_symbol)s)
+      AND b.ts <= %(hi)s
+      AND b.open <> 0
+      AND abs(100 * (b.close - b.open) / b.open) >= %(min_move_pct)s::numeric
+ORDER BY b.ts, b.symbol
+LIMIT %(fetch)s"""
 
 
 def resolve_request(
@@ -249,4 +285,95 @@ def list_daily(
             {"symbol": symbol, "start": page_start, "end": end, "fetch": resolved + 1},
         ).fetchall()
     page = paginate(rows, resolved, DAILY_CURSOR)
+    return {"data": page.data, "next_cursor": page.next_cursor}
+
+
+@router.get("/analytics/volatility")
+def analytics_volatility(
+    symbol: str,
+    start: date,
+    end: date,
+    pool: ConnectionPool = Depends(get_pool),
+):
+    page_default, page_max = _VOLATILITY_CAPS
+    # no limit and no cursor parameter: the result is one row per half-hour bucket of a session and
+    # has no page 2, so the resolved limit is discarded and next_cursor is always an explicit null.
+    # The pair is still passed, which is what makes the constant this handler reads observable
+    resolve_request(
+        start=start,
+        end=end,
+        page_default=page_default,
+        page_max=page_max,
+        max_window_days=settings.AGG_MAX_WINDOW_DAYS,
+    )
+    with pool.connection() as conn:
+        require_symbol(conn, symbol)
+        rows = conn.execute(
+            _VOLATILITY_SQL, {"symbol": symbol, "start": start, "end": end}
+        ).fetchall()
+    return {"data": rows, "next_cursor": None}
+
+
+@router.get("/analytics/gaps")
+def analytics_gaps(
+    symbol: str,
+    start: date,
+    end: date,
+    pool: ConnectionPool = Depends(get_pool),
+):
+    page_default, page_max = _GAPS_CAPS
+    resolve_request(
+        start=start,
+        end=end,
+        page_default=page_default,
+        page_max=page_max,
+        max_window_days=settings.AGG_MAX_WINDOW_DAYS,
+    )
+    with pool.connection() as conn:
+        require_symbol(conn, symbol)
+        rows = conn.execute(_GAPS_SQL, {"symbol": symbol, "start": start, "end": end}).fetchall()
+    # 03_gaps.sql has no GROUP BY, so it answers exactly one row on any input: a window holding no
+    # bars is a row of zeros and nulls rather than an empty list
+    return {"data": rows, "next_cursor": None}
+
+
+@router.get("/analytics/largest-moves")
+def analytics_largest_moves(
+    start: date,
+    end: date,
+    min_move_pct: Decimal = Query(0, ge=0),
+    limit: int | None = None,
+    cursor: str | None = None,
+    pool: ConnectionPool = Depends(get_pool),
+):
+    page_default, page_max = _MOVES_CAPS
+    cursor_values, resolved = resolve_request(
+        start=start,
+        end=end,
+        cursor=cursor,
+        raw_limit=limit,
+        shape=UNIVERSE_CURSOR,
+        page_default=page_default,
+        page_max=page_max,
+        max_window_days=settings.AGG_MAX_WINDOW_DAYS,
+    )
+    lo, hi = _instant_bounds(start, end)
+    # page 1 starts at the window's own lower instant rather than at _BEFORE_ANY_BAR, so
+    # _MOVES_SQL's redundant after_ts bound prunes on page 1 exactly as it does on every later one
+    after_ts = lo if cursor_values is None else cursor_values["ts"]
+    after_symbol = _BEFORE_ANY_SYMBOL if cursor_values is None else cursor_values["symbol"]
+    with pool.connection() as conn:
+        rows = conn.execute(
+            _MOVES_SQL,
+            {
+                "start": start,
+                "end": end,
+                "after_ts": after_ts,
+                "after_symbol": after_symbol,
+                "hi": hi,
+                "min_move_pct": min_move_pct,
+                "fetch": resolved + 1,
+            },
+        ).fetchall()
+    page = paginate(rows, resolved, UNIVERSE_CURSOR)
     return {"data": page.data, "next_cursor": page.next_cursor}

@@ -7,10 +7,16 @@ over 2020-08-01 to 2026-06-30, from Alpaca's IEX feed.
 
 ## Status
 
-The ingest pipeline, the database layer and the read endpoints are built and tested. The API
-serves `/health` plus three keyset-paginated data endpoints: `GET /symbols`,
-`GET /symbols/{symbol}/bars` and `GET /symbols/{symbol}/daily`. The analytics endpoints are not
-built yet.
+The ingest pipeline, the database layer, the read endpoints and the analytics endpoints are
+built and tested. The API serves `/health` plus three keyset-paginated data endpoints:
+`GET /symbols`, `GET /symbols/{symbol}/bars` and `GET /symbols/{symbol}/daily`. It also serves
+three analytics endpoints: `GET /analytics/volatility` (realized volatility by half-hour
+bucket, minutes since that day's own open, for one symbol), `GET /analytics/gaps` (the
+overnight gap distribution, prior close to next open, for one symbol as a single aggregate
+row) and `GET /analytics/largest-moves` (every regular-session minute bar in the window whose
+absolute percentage move is at least `min_move_pct`, across the full universe,
+keyset-paginated on `(ts, symbol)`). All three refuse a window longer than 90 days with a 422;
+the first two take no `limit` or `cursor` and answer with `next_cursor` always null.
 
 Loaded: **41,668,537 bars** across the full universe, in **42.4 minutes**. That is measured
 on the loaded data, not projected onto it.

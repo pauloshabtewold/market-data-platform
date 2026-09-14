@@ -263,6 +263,9 @@ def test_the_app_serves_exactly_the_routes_this_feature_claims(tmp_path, monkeyp
     app = create_app(dsn=DEAD_DSN)
     # GET alone: FastAPI's APIRoute does not add the implicit HEAD that Starlette's Route does
     assert set(_served(app.router)) == {
+        ("/analytics/gaps", "GET"),
+        ("/analytics/largest-moves", "GET"),
+        ("/analytics/volatility", "GET"),
         ("/health", "GET"),
         ("/symbols", "GET"),
         ("/symbols/{symbol}/bars", "GET"),
@@ -384,21 +387,25 @@ def test_the_sentinel_used_for_a_first_page_is_below_every_ingestible_bar():
 def test_each_endpoint_carries_its_own_page_caps_and_defaults_to_its_own(monkeypatch):
     bars_pair = (config.settings.BARS_PAGE_DEFAULT, config.settings.BARS_PAGE_MAX)
     agg_pair = (config.settings.AGG_PAGE_DEFAULT, config.settings.AGG_PAGE_MAX)
-    # asserted first, and it is what makes the two below discriminate rather than tautologise:
-    # if the two pairs held the same values, handing one to all three endpoints would pass
+    # asserted first, and it is what makes the equalities below discriminate rather than
+    # tautologise: if the two pairs held the same values, handing one pair to every endpoint would pass
     assert bars_pair != agg_pair
 
-    # spec line 508 classes /symbols and /bars raw-row and /daily aggregating
+    # spec line 508 classes /symbols and /bars raw-row and /daily aggregating, and puts the three
+    # analytics endpoints under the aggregating pair with /daily
     assert api.routes._SYMBOLS_CAPS == bars_pair
     assert api.routes._BARS_CAPS == bars_pair
     assert api.routes._DAILY_CAPS == agg_pair
+    assert api.routes._VOLATILITY_CAPS == agg_pair
+    assert api.routes._GAPS_CAPS == agg_pair
+    assert api.routes._MOVES_CAPS == agg_pair
 
     # an omitted limit resolves to the DEFAULT and not to the cap -- unobservable from any
     # response this feature can produce, since 100 and 1000 are both above every fixture
     _, resolved = api.routes.resolve_request(raw_limit=None, page_default=3, page_max=50)
     assert resolved == 3
 
-    # WHICH pair each endpoint READS, and which HALF of it, neither of which the three equalities
+    # WHICH pair each endpoint READS, and which HALF of it, neither of which the equalities
     # above can see: _SYMBOLS_CAPS and _BARS_CAPS hold identical values, so a transposition
     # between them -- or /bars reading the aggregating pair -- changes no response the suite asks
     # for. Every /bars and /daily limit in the integration files is 10 or 50, and every fixture is
@@ -412,7 +419,18 @@ def test_each_endpoint_carries_its_own_page_caps_and_defaults_to_its_own(monkeyp
     # check, so the refusal names the default in `limit` and the cap in `max`. Pinning `max` alone
     # leaves the default free, and /bars taking the aggregating default while keeping its own cap
     # then serves a 100-row page where 1000 is specified, with the whole suite green.
-    sentinels = {"_SYMBOLS_CAPS": (11, 10), "_BARS_CAPS": (21, 20), "_DAILY_CAPS": (31, 30)}
+    #
+    # All twelve numbers are distinct and the three analytics pairs continue the same series: a
+    # number shared between two pairs leaves a transposition between them caught by one half
+    # instead of both, which re-creates for that pair the gap inverting the pairs exists to close.
+    sentinels = {
+        "_SYMBOLS_CAPS": (11, 10),
+        "_BARS_CAPS": (21, 20),
+        "_DAILY_CAPS": (31, 30),
+        "_VOLATILITY_CAPS": (41, 40),
+        "_GAPS_CAPS": (51, 50),
+        "_MOVES_CAPS": (61, 60),
+    }
     for name, pair in sentinels.items():
         monkeypatch.setattr(api.routes, name, pair)
     window = {"start": date(2026, 3, 9), "end": date(2026, 3, 12)}
@@ -423,6 +441,7 @@ def test_each_endpoint_carries_its_own_page_caps_and_defaults_to_its_own(monkeyp
         (api.routes.list_symbols, {}, sentinels["_SYMBOLS_CAPS"]),
         (api.routes.list_bars, {"symbol": "AAA"} | window, sentinels["_BARS_CAPS"]),
         (api.routes.list_daily, {"symbol": "AAA"} | window, sentinels["_DAILY_CAPS"]),
+        (api.routes.analytics_largest_moves, dict(window), sentinels["_MOVES_CAPS"]),
     ):
         default, cap = pair
         with pytest.raises(ApiError) as excinfo:
@@ -436,3 +455,36 @@ def test_each_endpoint_carries_its_own_page_caps_and_defaults_to_its_own(monkeyp
             "limit": default,
             "max": cap,
         }, endpoint.__name__
+
+    # /analytics/volatility and /analytics/gaps declare no limit parameter at all, so the loop
+    # above cannot drive them: a caps pair a caller cannot address cannot be driven over its cap.
+    # They reach the inverted default through an unsupplied raw_limit instead, which is the whole
+    # reason the pairs are inverted -- one call pins both halves
+    for endpoint, pair in (
+        (api.routes.analytics_volatility, sentinels["_VOLATILITY_CAPS"]),
+        (api.routes.analytics_gaps, sentinels["_GAPS_CAPS"]),
+    ):
+        default, cap = pair
+        with pytest.raises(ApiError) as excinfo:
+            endpoint(pool=None, symbol="AAA", **window)
+        assert excinfo.value.detail == {
+            "reason": "limit_out_of_range",
+            "limit": default,
+            "max": cap,
+        }, endpoint.__name__
+        # and that the signature really carries no limit, which is what keeps a parameter that
+        # does nothing out of the generated OpenAPI document
+        with pytest.raises(TypeError):
+            endpoint(limit=9999, pool=None, symbol="AAA", **window)
+
+
+def test_the_range_tier_tolerates_a_window_with_only_one_bound():
+    # no endpoint passes exactly one bound, so nothing reachable over HTTP discriminates this:
+    # written as `or`, the first call reaches `start > end` against None and raises TypeError,
+    # which a route would answer as a 500
+    assert api.routes.resolve_request(
+        page_default=100, page_max=1000, start=date(2026, 4, 1), end=None
+    ) == (None, 100)
+    assert api.routes.resolve_request(
+        page_default=100, page_max=1000, start=None, end=date(2026, 6, 30)
+    ) == (None, 100)

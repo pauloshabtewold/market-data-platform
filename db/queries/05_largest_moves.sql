@@ -13,9 +13,9 @@
 --
 -- Session definition is 06_daily_rollup.sql's.
 --
--- :min_move_pct is cast to numeric at the boundary rather than compared against a float. The
--- endpoint validates it as a float, and numeric >= float8 has no operator, so an uncast
--- comparison silently casts the exact left side to double precision. At the load-bearing
+-- :min_move_pct is cast to numeric at the boundary rather than compared against a float, and the
+-- endpoint validates it as a Decimal for the same reason: numeric >= float8 has no operator, so a
+-- float bound silently casts the exact left side to double precision. At the load-bearing
 -- min_move_pct = 0 that is harmless; at every other threshold it is a float decision made
 -- invisibly, and this is where it is made visible instead.
 

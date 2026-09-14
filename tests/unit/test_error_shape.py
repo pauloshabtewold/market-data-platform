@@ -1,7 +1,9 @@
+import json
 from datetime import date
 
 import pytest
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 
 from api.errors import (
@@ -9,6 +11,7 @@ from api.errors import (
     INVALID_RANGE_MESSAGE,
     UNKNOWN_SYMBOL_MESSAGE,
     ApiError,
+    _validation_error_handler,
     error_body,
     install_error_handlers,
 )
@@ -209,8 +212,8 @@ def test_the_first_error_keys_survive_alongside_the_errors_list(client):
 
 
 def test_each_kind_of_wrong_request_carries_its_own_pydantic_type_slug(client):
-    # one test iterating five cases, never a parametrize: a parametrize collects as five items and
-    # moves this file's gated count from 10 to 14
+    # one test iterating five cases, never a parametrize: a parametrize collects each case as its
+    # own item, and this file's count is gated
     cases = [
         ("/probe", {"limit": "not-an-int"}, ["int_parsing"]),
         ("/two", {"a": "x", "b": "y"}, ["int_parsing", "int_parsing"]),
@@ -234,3 +237,16 @@ def test_the_two_new_message_constants_are_the_strings_the_endpoints_publish():
     # building the expected from the thing under test moves both sides and the mutation survives
     assert UNKNOWN_SYMBOL_MESSAGE == "no symbol by that name has been ingested"
     assert INVALID_RANGE_MESSAGE == "the requested date range is not one this endpoint serves"
+
+
+def test_the_handler_names_the_last_element_of_a_three_element_loc():
+    # driven directly rather than through a route, because every loc a query or path parameter
+    # produces is exactly two elements -- where loc[-1] and loc[1] are the same value, so no
+    # request this API can serve tells the two index expressions apart
+    exc = RequestValidationError(
+        [{"loc": ("body", "window", "start"), "msg": "Field required", "type": "missing"}]
+    )
+    detail = json.loads(_validation_error_handler(None, exc).body)["error"]["detail"]
+    assert detail["parameter"] == "start"
+    assert detail["location"] == "body"
+    assert detail["errors"] == [{"parameter": "start", "location": "body", "type": "missing"}]
