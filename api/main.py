@@ -35,12 +35,17 @@ async def _lifespan(app: FastAPI):
 def create_app(dsn: str | None = None) -> FastAPI:
     app = FastAPI(
         lifespan=_lifespan,
-        # section 1 assigns the OpenAPI surface to Feature 7; left at its defaults FastAPI mounts
-        # /docs, /redoc, /docs/oauth2-redirect and /openapi.json, which publishes the service
-        # description of a scaffold that is about to go behind an ALB
-        docs_url=None,
+        # the same version /health reports: FastAPI's own default is a literal 0.1.0 that would stop
+        # matching the package at its first release
+        title="Market Data Platform",
+        version=build_version(),
+        # generated from the routes themselves, so the page cannot describe an endpoint that is not
+        # served. docs_url is honoured only while openapi_url is set, which makes openapi_url the
+        # line that publishes or withdraws the whole surface; ReDoc stays off because the surface is
+        # one generated page, not two renderings of the same document
+        docs_url="/docs",
         redoc_url=None,
-        openapi_url=None,
+        openapi_url="/openapi.json",
         # a 307 to the unslashed path carries no body, so it is the one response that escapes the
         # single error shape; off, an unrouted /health/ is the 404 the handler already builds.
         # It governs this app's own router, which every include_router route joins -- a sub-app
@@ -52,7 +57,7 @@ def create_app(dsn: str | None = None) -> FastAPI:
     # an explicit dsn lets tests and the testcontainer avoid ever touching settings.DATABASE_URL
     app.state.pool = build_pool(dsn or settings.DATABASE_URL)
 
-    @app.get("/health")
+    @app.get("/health", summary="Service and database health")
     def health(pool: ConnectionPool = Depends(get_pool)):
         try:
             with pool.connection(timeout=HEALTH_TIMEOUT_SECONDS) as conn:

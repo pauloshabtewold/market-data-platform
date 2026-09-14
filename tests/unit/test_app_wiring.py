@@ -251,9 +251,10 @@ def test_the_app_serves_exactly_the_routes_this_feature_claims(tmp_path, monkeyp
     #
     # The router tree, not app.routes and not the OpenAPI document. app.routes stops being the
     # surface at the first include_router -- from 0.137.0 fastapi appends one opaque wrapper rather
-    # than copying the routes in -- and the document omits anything carrying include_in_schema=False
-    # as well as /docs and /openapi.json themselves, so either alone reads as a clean pass while
-    # routes are served. 0.138.0 added a second route list, which app.frontend() is the only thing
+    # than copying the routes in -- and the document omits anything carrying
+    # include_in_schema=False, which is how FastAPI registers /openapi.json, /docs and
+    # /docs/oauth2-redirect themselves, so either alone reads as a clean pass while routes are
+    # served. 0.138.0 added a second route list, which app.frontend() is the only thing
     # to reach and which appears in neither. pyproject floors fastapi at 0.110 with no ceiling, so
     # every one of those shapes installs.
     #
@@ -261,20 +262,28 @@ def test_the_app_serves_exactly_the_routes_this_feature_claims(tmp_path, monkeyp
     # an include_router is dropped from fastapi's own dispatch and answers 404 while this lists it.
     # A guard that must never read clean over a served route can be wrong in that direction only.
     app = create_app(dsn=DEAD_DSN)
-    # GET alone: FastAPI's APIRoute does not add the implicit HEAD that Starlette's Route does
+    # GET alone on the application routes, because FastAPI's APIRoute does not add the implicit HEAD
+    # that Starlette's Route does -- and GET with HEAD on the three documentation routes, because
+    # FastAPI registers those as Starlette Routes. ReDoc is absent on purpose
     assert set(_served(app.router)) == {
         ("/analytics/gaps", "GET"),
         ("/analytics/largest-moves", "GET"),
         ("/analytics/volatility", "GET"),
+        ("/docs", "GET"),
+        ("/docs", "HEAD"),
+        ("/docs/oauth2-redirect", "GET"),
+        ("/docs/oauth2-redirect", "HEAD"),
         ("/health", "GET"),
+        ("/openapi.json", "GET"),
+        ("/openapi.json", "HEAD"),
         ("/symbols", "GET"),
         ("/symbols/{symbol}/bars", "GET"),
         ("/symbols/{symbol}/daily", "GET"),
     }
 
-    # and the walk against a scratch app that reaches the branches this one does not: the shipped
-    # app is a single APIRoute with no prefix, no include and no container, which is the one shape
-    # where every broken way of writing this agrees with the correct one
+    # and the walk against a scratch app, because the shipped app has no include prefix, no second
+    # route list and no empty methods set, so a walk broken on any of those agrees with the correct
+    # one here
     def _ok(request):
         return PlainTextResponse("ok")
 
@@ -488,3 +497,47 @@ def test_the_range_tier_tolerates_a_window_with_only_one_bound():
     assert api.routes.resolve_request(
         page_default=100, page_max=1000, start=None, end=date(2026, 6, 30)
     ) == (None, 100)
+
+
+def test_the_generated_documentation_answers_and_redoc_does_not(monkeypatch):
+    # a response rather than a second enumeration: the route-surface literal proves registration,
+    # and only a request shows that the document and the page answer
+    #
+    # a sentinel version, because FastAPI's own default is also 0.1.0 -- the version the package
+    # reports today -- so comparing against the real one passes with version= deleted
+    monkeypatch.setattr(api.main, "build_version", lambda: "9.9.9-sentinel")
+    client = TestClient(create_app(dsn=DEAD_DSN))
+    document = client.get("/openapi.json")
+    assert document.status_code == 200
+    body = document.json()
+    assert body["info"] == {"title": "Market Data Platform", "version": "9.9.9-sentinel"}
+    paths = body["paths"]
+    # written out as literals, never tested for presence: FastAPI fills an absent summary from the
+    # function name ("list_daily" publishes as "List Daily"), so a presence check passes with every
+    # summary deleted and the page back to reading as a list of function names
+    assert {path: item["get"]["summary"] for path, item in paths.items()} == {
+        "/analytics/gaps": "Overnight gap distribution for one symbol",
+        "/analytics/largest-moves": "Minute moves at or above a threshold, universe-wide",
+        "/analytics/volatility": "Realized volatility by half-hour bucket",
+        "/health": "Service and database health",
+        "/symbols": "List ingested symbols",
+        "/symbols/{symbol}/bars": "Minute bars for one symbol",
+        "/symbols/{symbol}/daily": "Daily bars for one symbol",
+    }
+    # the constant and not a truthiness check: FastAPI falls back to the endpoint's docstring, so a
+    # docstring added later would keep a presence check green with the description deleted
+    assert paths["/symbols/{symbol}/bars"]["get"]["description"] == api.routes._BARS_DESCRIPTION
+    # a constrained Decimal renders as anyOf(number, string) with the bound on the number branch, so
+    # a top-level schema.get("minimum") reads None with and without ge=0 and could not fail
+    parameters = {p["name"]: p for p in paths["/analytics/largest-moves"]["get"]["parameters"]}
+    branches = parameters["min_move_pct"]["schema"]["anyOf"]
+    assert [b.get("minimum") for b in branches if b.get("type") == "number"] == [0.0]
+
+    page = client.get("/docs")
+    assert page.status_code == 200
+    assert page.headers["content-type"].split(";")[0] == "text/html"
+
+    # ReDoc is off, so its default path is unrouted and answers the 404 every unknown path does
+    redoc = client.get("/redoc")
+    assert redoc.status_code == 404
+    assert redoc.json()["error"]["code"] == "invalid_params"

@@ -58,6 +58,15 @@ _SYMBOLS_SQL = (
     " ORDER BY symbol LIMIT %(fetch)s"
 )
 
+# published in the generated page, because a required window reads as a limitation unless it says
+# why; the partition counts behind the why are the /bars windows in docs/QUERY_PERFORMANCE.md
+_BARS_DESCRIPTION = (
+    "Minute bars for one symbol inside a required window, oldest first, keyset-paginated with "
+    "`limit` and `cursor`. The window is required by design rather than as a limitation: without "
+    "one, even the first page is planned across an index scan on every monthly partition of the "
+    "bar table."
+)
+
 # lo and hi come from _instant_bounds, never from the raw dates: a timestamptz compared with a
 # date resolves to that date's UTC midnight, which drops the final day's whole session
 _BARS_SQL = (
@@ -195,7 +204,7 @@ def require_symbol(conn, symbol: str) -> None:
         )
 
 
-@router.get("/symbols")
+@router.get("/symbols", summary="List ingested symbols")
 def list_symbols(
     active: bool | None = None,
     limit: int | None = None,
@@ -219,7 +228,9 @@ def list_symbols(
     return {"data": page.data, "next_cursor": page.next_cursor}
 
 
-@router.get("/symbols/{symbol}/bars")
+@router.get(
+    "/symbols/{symbol}/bars", summary="Minute bars for one symbol", description=_BARS_DESCRIPTION
+)
 def list_bars(
     symbol: str,
     start: date,
@@ -252,7 +263,7 @@ def list_bars(
     return {"data": page.data, "next_cursor": page.next_cursor}
 
 
-@router.get("/symbols/{symbol}/daily")
+@router.get("/symbols/{symbol}/daily", summary="Daily bars for one symbol")
 def list_daily(
     symbol: str,
     start: date,
@@ -288,7 +299,7 @@ def list_daily(
     return {"data": page.data, "next_cursor": page.next_cursor}
 
 
-@router.get("/analytics/volatility")
+@router.get("/analytics/volatility", summary="Realized volatility by half-hour bucket")
 def analytics_volatility(
     symbol: str,
     start: date,
@@ -314,7 +325,7 @@ def analytics_volatility(
     return {"data": rows, "next_cursor": None}
 
 
-@router.get("/analytics/gaps")
+@router.get("/analytics/gaps", summary="Overnight gap distribution for one symbol")
 def analytics_gaps(
     symbol: str,
     start: date,
@@ -337,7 +348,9 @@ def analytics_gaps(
     return {"data": rows, "next_cursor": None}
 
 
-@router.get("/analytics/largest-moves")
+@router.get(
+    "/analytics/largest-moves", summary="Minute moves at or above a threshold, universe-wide"
+)
 def analytics_largest_moves(
     start: date,
     end: date,
