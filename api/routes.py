@@ -106,8 +106,9 @@ SELECT b.ts, b.symbol,
        round(100 * (b.close - b.open) / b.open, 4) AS move_pct
 FROM bars b
 JOIN market_days m
-  ON m.day = (b.ts AT TIME ZONE 'America/New_York')::date
- AND b.ts >= m.open_ts AND b.ts < m.close_ts
+  -- the half-open pair alone, which implies the rollup's day equality: that equality makes the join
+  -- hashable, and a hashed join reads every remaining row of the window to return one page
+  ON b.ts >= m.open_ts AND b.ts < m.close_ts
 WHERE m.day >= %(start)s AND m.day <= %(end)s
       -- redundant by logic and required for pruning: a row comparison prunes nothing, so without this every partition up to hi is planned
       AND b.ts >= %(after_ts)s

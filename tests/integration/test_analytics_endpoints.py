@@ -13,6 +13,7 @@ from tests.market_fixture import (
     DST_FRIDAY_EST,
     TRADING_DAYS,
     bar_ts,
+    close_ts,
     ensure_partition,
     load,
     load_flat_symbol,
@@ -67,6 +68,13 @@ def gaps_client(migrated_dsn):
 def moves_zero_client(migrated_dsn):
     load(migrated_dsn)
     load_flat_symbol(migrated_dsn, "FLAT")
+    with TestClient(create_app(migrated_dsn)) as c:
+        yield c
+
+
+@pytest.fixture
+def moves_extended_hours_client(migrated_dsn):
+    load(migrated_dsn, extended_hours=True)
     with TestClient(create_app(migrated_dsn)) as c:
         yield c
 
@@ -387,3 +395,50 @@ def test_the_order_by_names_the_tie_key_even_though_no_fixture_can_show_its_abse
     # clause is load-bearing for any plan that is not index-ordered, and no fixture this suite can
     # build makes the planner choose one
     assert "\nORDER BY b.ts, b.symbol\n" in api.routes._MOVES_SQL
+
+
+def test_largest_moves_keeps_only_bars_inside_the_half_open_session(moves_extended_hours_client):
+    # _MOVES_SQL is its own text, so test_largest_moves_query.py's boundary cases never reach it;
+    # both extended-hours bars fall on the session's own New York date, so no day equality could
+    # exclude them, and the pair's operators alone keep them out and keep the bar on the open
+    response = moves_extended_hours_client.get(
+        "/analytics/largest-moves",
+        params={"start": "2026-03-01", "end": "2026-03-31", "min_move_pct": 0, "limit": 1000},
+    )
+    rows = response.json()["data"]
+    assert len(rows) == BARS_PER_SESSION * len(TRADING_DAYS)
+    stamps = {row["ts"] for row in rows}
+    for day in TRADING_DAYS:
+        assert bar_ts(day, -30).isoformat() not in stamps, day
+        assert close_ts(day).isoformat() not in stamps, day
+        assert bar_ts(day, 0).isoformat() in stamps, day
+
+
+def test_the_session_join_cannot_be_hashed(migrated_dsn):
+    # on the loaded database the planner underestimates this join by hundreds of times, and past a
+    # threshold a hashable join trades the ordered index scan for a hash join over every remaining
+    # row plus a sort -- at the page cap from page 1, or at the default page late in a window. The
+    # rollup's day equality is what makes it hashable, and the half-open pair alone implies that
+    # equality. A fixture this size already tips the planner into hashing the equality form on
+    # page 1, so the plan is what is asserted
+    days = load_run_calendar(migrated_dsn)
+    for offset, symbol in enumerate(("RUNA", "RUNB", "RUNC", "RUND")):
+        load_run_symbol(migrated_dsn, symbol, [100 + offset + i for i in range(len(days))], days)
+    lo, hi = api.routes._instant_bounds(days[0], days[-1])
+    params = {
+        "start": days[0],
+        "end": days[-1],
+        "after_ts": lo,
+        "after_symbol": "",
+        "hi": hi,
+        "min_move_pct": 0,
+    }
+    with connect(migrated_dsn) as conn:
+        for fetch in (101, 1001):
+            plan = "\n".join(
+                row[0]
+                for row in conn.execute(
+                    "EXPLAIN " + api.routes._MOVES_SQL, {**params, "fetch": fetch}
+                ).fetchall()
+            )
+            assert "Hash Join" not in plan, (fetch, plan)
