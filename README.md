@@ -67,6 +67,11 @@ planner should pick and did, a candidate index built and shown not to be chosen,
 and — for three of the six — a byte ratio used as a prediction that had to survive being
 tested.
 
+**Deep pages are keyset, not `OFFSET`:** 1,000,000 rows into a 90-day window, a
+`/analytics/largest-moves` page answers over HTTP in 3.74 ms at the median against page 1's
+3.33 ms, and reaching that row with `OFFSET` takes 2,175 ms over SQL, 1,915 times the keyset
+page's 1.136 ms timed the same way.
+
 **There is no incremental ingest.** A run re-walks every requested unit and skips what is
 already recorded. Widening the window and re-running is the supported path.
 

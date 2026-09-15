@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # docs/QUERY_PERFORMANCE.md carries the windows, the counts and the index behind each
     BARS_PAGE_DEFAULT: int = 1000
     BARS_PAGE_MAX: int = 10000
+    # confirmed on /analytics/largest-moves, the one endpoint reading these that fills a page at the
+    # default: at min_move_pct = 0 the worse of two windows reads 121 root blocks for a default page
+    # and 1,024 at the cap. docs/QUERY_PERFORMANCE.md carries both, and what a threshold costs
     AGG_PAGE_DEFAULT: int = 100
     AGG_PAGE_MAX: int = 1000
     DB_POOL_MIN: int = 1
