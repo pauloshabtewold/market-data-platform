@@ -75,6 +75,19 @@ def _render_instant(value: datetime) -> str:
     return value.isoformat()
 
 
+def _is_safe_postgres_text(value: str) -> bool:
+    # a NUL byte and an unpaired surrogate (from a JSON \ud800 escape) are both valid JSON text but
+    # neither binds as a Postgres parameter, so refusing them here keeps the failure a 400 instead
+    # of a psycopg.DataError/UnicodeEncodeError raised at bind time inside the connection block
+    if "\x00" in value:
+        return False
+    try:
+        value.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 BARS_CURSOR = CursorShape(
     name="bars",
     fields=("ts",),
@@ -138,7 +151,9 @@ def decode_cursor(
 
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
+        # json.loads raises a plain ValueError past its own int-to-str digit limit (JSONDecodeError
+        # is itself a ValueError and is still caught here) and RecursionError on deeply nested input
         raise ApiError(400, "invalid_cursor", INVALID_CURSOR_MESSAGE, {"reason": "not_json"})
 
     if not isinstance(payload, dict) or set(payload) != set(shape.fields):
@@ -149,10 +164,16 @@ def decode_cursor(
         # whatever shape adds one next
         if type(payload[field]) is not shape.types[field]:
             raise ApiError(400, "invalid_cursor", INVALID_CURSOR_MESSAGE, {"reason": "wrong_types"})
+        # checked here, before any parser runs, so a value that cannot bind as a Postgres
+        # parameter never reaches a query
+        if shape.types[field] is str and not _is_safe_postgres_text(payload[field]):
+            raise ApiError(400, "invalid_cursor", INVALID_CURSOR_MESSAGE, {"reason": "wrong_types"})
 
     try:
         values = {field: shape.parsers[field](payload[field]) for field in shape.fields}
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
+        # a year-1/9999 instant with a nonzero offset overflows astimezone rather than raising
+        # ValueError like every other unparsable case
         raise ApiError(400, "invalid_cursor", INVALID_CURSOR_MESSAGE, {"reason": "unparsable_ts"})
 
     value = values[shape.window_field]

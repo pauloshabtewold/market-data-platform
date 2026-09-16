@@ -499,6 +499,37 @@ def test_the_range_tier_tolerates_a_window_with_only_one_bound():
     ) == (None, 100)
 
 
+class _NoExecuteConnection:
+    def execute(self, *args, **kwargs):
+        raise AssertionError("execute called for a NUL-byte symbol; require_symbol must refuse it first")
+
+
+class _NoExecutePool:
+    @contextlib.contextmanager
+    def connection(self, timeout=None):
+        yield _NoExecuteConnection()
+
+
+def test_require_symbol_refuses_a_nul_byte_without_a_query():
+    # psycopg.DataError used to reach here from conn.execute -- a NUL byte cannot have been
+    # ingested, so the check has to run before the connection is touched at all
+    with pytest.raises(ApiError) as excinfo:
+        api.routes.require_symbol(_NoExecuteConnection(), "AAA\x00")
+    assert excinfo.value.status == 404
+    assert excinfo.value.code == "unknown_symbol"
+    assert excinfo.value.detail == {"reason": "unknown_symbol", "symbol": "AAA\x00"}
+
+
+def test_a_nul_byte_symbol_reaches_the_404_without_a_database():
+    # driven through the real endpoint rather than require_symbol alone, with a pool that fails the
+    # test if anything reaches conn.execute -- the fake pool a connection-requiring 404 tier needs
+    window = {"start": date(2026, 4, 1), "end": date(2026, 4, 2)}
+    with pytest.raises(ApiError) as excinfo:
+        api.routes.list_bars(symbol="AAA\x00", limit=None, cursor=None, pool=_NoExecutePool(), **window)
+    assert excinfo.value.status == 404
+    assert excinfo.value.code == "unknown_symbol"
+
+
 def test_the_generated_documentation_answers_and_redoc_does_not(monkeypatch):
     # a response rather than a second enumeration: the route-surface literal proves registration,
     # and only a request shows that the document and the page answer
@@ -527,11 +558,12 @@ def test_the_generated_documentation_answers_and_redoc_does_not(monkeypatch):
     # the constant and not a truthiness check: FastAPI falls back to the endpoint's docstring, so a
     # docstring added later would keep a presence check green with the description deleted
     assert paths["/symbols/{symbol}/bars"]["get"]["description"] == api.routes._BARS_DESCRIPTION
-    # a constrained Decimal renders as anyOf(number, string) with the bound on the number branch, so
-    # a top-level schema.get("minimum") reads None with and without ge=0 and could not fail
+    # a constrained Decimal renders as anyOf(number, string) with the ge constraint at the top
+    # level once Query moves inside the Annotated alias, so a per-branch minimum could not fail
     parameters = {p["name"]: p for p in paths["/analytics/largest-moves"]["get"]["parameters"]}
-    branches = parameters["min_move_pct"]["schema"]["anyOf"]
-    assert [b.get("minimum") for b in branches if b.get("type") == "number"] == [0.0]
+    schema = parameters["min_move_pct"]["schema"]
+    assert schema["ge"] == 0
+    assert {branch["type"] for branch in schema["anyOf"]} == {"number", "string"}
 
     page = client.get("/docs")
     assert page.status_code == 200

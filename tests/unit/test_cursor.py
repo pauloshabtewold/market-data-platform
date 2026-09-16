@@ -213,6 +213,70 @@ def test_the_symbols_cursor_refuses_a_date_window_rather_than_comparing_a_string
         assert not isinstance(excinfo.value, (ValueError, TypeError))
 
 
+def _raw_cursor(text: str) -> str:
+    # base64 of literal JSON source text, for payloads no python object round-trips through
+    # json.dumps -- a bare 4301-digit numeral and an unpaired \ud800 escape are both valid JSON
+    # source and neither survives being built from a real python int or str first
+    return base64.urlsafe_b64encode(text.encode()).decode()
+
+
+def test_json_loads_failures_besides_jsondecodeerror_are_also_not_json():
+    # a plain ValueError past CPython's int-to-str digit limit, and a RecursionError from deeply
+    # nested brackets -- neither is a JSONDecodeError, and both used to reach no except clause and
+    # answer 500 before any connection was acquired
+    huge_int = _raw_cursor('{"ts":' + "1" * 4301 + ',"symbol":"AAA"}')
+    deep_universe = _raw_cursor("[" * 9999 + "]" * 9999)
+    deep_symbols = _raw_cursor("[" * 9999 + "]" * 9999)
+    for shape, cursor in (
+        (UNIVERSE_CURSOR, huge_int),
+        (UNIVERSE_CURSOR, deep_universe),
+        (SYMBOLS_CURSOR, deep_symbols),
+    ):
+        with pytest.raises(ApiError) as excinfo:
+            decode_cursor(shape, cursor)
+        assert excinfo.value.status == 400
+        assert excinfo.value.code == "invalid_cursor"
+        assert excinfo.value.detail["reason"] == "not_json"
+
+
+def test_a_timestamp_that_overflows_converting_to_utc_is_unparsable():
+    # 0001-01-01T00:00:00+01:00 parses under fromisoformat, then astimezone(utc) shifts it an hour
+    # earlier and underflows datetime.min -- OverflowError, not the ValueError/TypeError the parse
+    # step used to catch alone
+    def enc(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode()
+
+    cases = [
+        (BARS_CURSOR, enc({"ts": "0001-01-01T00:00:00+01:00"})),
+        (UNIVERSE_CURSOR, enc({"ts": "0001-01-01T00:00:00+01:00", "symbol": "AAA"})),
+    ]
+    for shape, cursor in cases:
+        with pytest.raises(ApiError) as excinfo:
+            decode_cursor(shape, cursor)
+        assert excinfo.value.status == 400
+        assert excinfo.value.code == "invalid_cursor"
+        assert excinfo.value.detail["reason"] == "unparsable_ts"
+
+
+def test_a_string_field_postgres_text_cannot_hold_is_refused_before_any_query():
+    # a NUL byte and an unpaired surrogate (from a JSON \ud800 escape) are both valid JSON text and
+    # both fail to bind as a Postgres parameter -- refused at the types step, before a query runs
+    cases = [
+        (UNIVERSE_CURSOR, _raw_cursor('{"ts":"2026-06-30T20:54:00+00:00","symbol":"AB\\u0000CD"}')),
+        (SYMBOLS_CURSOR, _raw_cursor('{"symbol":"AB\\u0000CD"}')),
+        (BARS_CURSOR, _raw_cursor('{"ts":"2026-06-30T20:54:00+00:00\\u0000"}')),
+        (DAILY_CURSOR, _raw_cursor('{"day":"2026-06-30\\u0000"}')),
+        (UNIVERSE_CURSOR, _raw_cursor('{"ts":"2026-06-30T20:54:00+00:00","symbol":"AB\\ud800CD"}')),
+        (SYMBOLS_CURSOR, _raw_cursor('{"symbol":"AB\\ud800CD"}')),
+    ]
+    for shape, cursor in cases:
+        with pytest.raises(ApiError) as excinfo:
+            decode_cursor(shape, cursor)
+        assert excinfo.value.status == 400
+        assert excinfo.value.code == "invalid_cursor"
+        assert excinfo.value.detail["reason"] == "wrong_types"
+
+
 def test_a_cursor_carrying_a_urlsafe_alphabet_character_decodes_rather_than_being_refused():
     # synthetic, and it has to be: base64 emits "-" or "_" only from group4 = b2 & 63, which needs
     # a payload byte of ">", "?", "~" or 0x7f at an index congruent to 2 mod 3 -- and the 11-byte

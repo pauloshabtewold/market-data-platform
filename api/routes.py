@@ -1,7 +1,10 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import AfterValidator
+from pydantic_core import PydanticCustomError
 from psycopg_pool import ConnectionPool
 
 import db.sql
@@ -119,6 +122,33 @@ WHERE m.day >= %(start)s AND m.day <= %(end)s
 ORDER BY b.ts, b.symbol
 LIMIT %(fetch)s"""
 
+# Postgres numeric refuses more precision than either of these rather than rounding
+# (NumericValueOutOfRange), so a value Decimal accepts can still fail the query; counted from the
+# parsed Decimal's own digits and exponent, without normalising, since normalising would undercount
+# a value like 0.10 that carries a real trailing zero
+_NUMERIC_MAX_DIGITS_BEFORE_POINT = 131_072
+_NUMERIC_MAX_DIGITS_AFTER_POINT = 16_383
+
+
+def _reject_numeric_overflow(value: Decimal) -> Decimal:
+    sign, digits, exponent = value.as_tuple()
+    if isinstance(exponent, str):
+        # 'n' (NaN) or 'F' (Infinity): Query's own finite_number check refuses both before this runs
+        return value
+    digits_before = max(len(digits) + exponent, 0)
+    digits_after = max(-exponent, 0)
+    if digits_before > _NUMERIC_MAX_DIGITS_BEFORE_POINT or digits_after > _NUMERIC_MAX_DIGITS_AFTER_POINT:
+        raise PydanticCustomError(
+            "numeric_out_of_range", "min_move_pct is out of range for a Postgres numeric"
+        )
+    return value
+
+
+# Query lives inside the Annotated alias rather than as the parameter's default value: this
+# project's FastAPI discards any Annotated metadata that is not itself a FieldInfo/Depends
+# whenever the default is a bare Query(...), which would silently drop AfterValidator
+MinMovePct = Annotated[Decimal, AfterValidator(_reject_numeric_overflow), Query(ge=0)]
+
 
 def resolve_request(
     *,
@@ -194,6 +224,15 @@ def resolve_request(
 
 
 def require_symbol(conn, symbol: str) -> None:
+    # a NUL byte cannot have been ingested, and binding one raises psycopg.DataError rather than
+    # matching no row -- refused before the query runs so that crash cannot happen
+    if "\x00" in symbol:
+        raise ApiError(
+            404,
+            "unknown_symbol",
+            UNKNOWN_SYMBOL_MESSAGE,
+            {"reason": "unknown_symbol", "symbol": symbol},
+        )
     # only the row's presence is read: under the pool's dict factory an unaliased SELECT 1 keys
     # the row '?column?', so anything reading a field out of it breaks on a name nobody chose
     if conn.execute(REQUIRE_SYMBOL_SQL, {"symbol": symbol}).fetchone() is None:
@@ -355,7 +394,7 @@ def analytics_gaps(
 def analytics_largest_moves(
     start: date,
     end: date,
-    min_move_pct: Decimal = Query(0, ge=0),
+    min_move_pct: MinMovePct = 0,
     limit: int | None = None,
     cursor: str | None = None,
     pool: ConnectionPool = Depends(get_pool),
