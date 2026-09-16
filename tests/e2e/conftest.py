@@ -1,6 +1,7 @@
 import httpx
 import pytest
 
+import config
 from config import settings
 
 
@@ -23,7 +24,19 @@ def symbols():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _service_is_up(client):
+def _e2e_configuration_is_valid():
+    # runs before any request: a widened INGEST_END with a stale E2E_* window must fail here,
+    # loudly and by name, rather than as an obscure 422 from the first real request below
+    problems = config.e2e_configuration_problems(settings)
+    if problems:
+        pytest.fail(
+            "the e2e suite's own configuration is not runnable:\n- " + "\n- ".join(problems),
+            pytrace=False,
+        )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _service_is_up(client, _e2e_configuration_is_valid):
     # a skip reads as a pass on a suite that only reports green or red, so this fails loudly instead
     start_command = "docker compose up -d --wait db app"
     try:

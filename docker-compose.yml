@@ -26,7 +26,9 @@ services:
   app:
     image: python:3.13-slim
     working_dir: /app
-    # installed on every start so importlib.metadata can report the package version /health returns
+    # runs on every start because the stock image carries none of this project's dependencies on
+    # its own; that same install is what writes the package metadata /health's version reads,
+    # into this bind-mounted tree rather than into the image
     command: ["sh", "-c", "pip install --quiet -e . && exec uvicorn api.main:app --host 0.0.0.0 --port 8000"]
     environment:
       # the whole DSN, not only the host: inside the network the database is db, so .env's own
@@ -47,6 +49,13 @@ services:
       timeout: 5s
       retries: 12
       start_period: 120s
+    # uvicorn logs one line per request against a service the e2e suite calls repeatedly, unlike
+    # db's near-silent steady state, so this is the side that needs a rotation bound
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   pgdata:
