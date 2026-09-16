@@ -164,6 +164,51 @@ def load_symbol(dsn: str, symbol: str, days=TRADING_DAYS, *, extended_hours: boo
         conn.commit()
 
 
+# Eight minutes spread across a session instead of crowded into _BAR_SHAPE's first five, each with
+# its own open/close so move_pct varies in sign and size. 209 keeps every minute inside even the
+# half day's shorter 210-minute session.
+_SPREAD_MINUTES = (0, 15, 45, 90, 150, 190, 205, 209)
+_SPREAD_SHAPE = (
+    (100.00, 101.00, 99.00, 100.50),
+    (100.50, 108.00, 100.00, 107.00),
+    (107.00, 107.50, 96.00, 97.00),
+    (97.00, 99.00, 95.50, 98.50),
+    (98.50, 103.00, 98.00, 102.25),
+    (102.25, 102.50, 90.00, 91.00),
+    (91.00, 96.00, 90.50, 95.75),
+    (95.75, 96.00, 92.00, 93.10),
+)
+
+
+def load_spread_symbol(dsn: str, symbol: str, days=TRADING_DAYS, *, extended_hours: bool = False) -> None:
+    """Bars at _SPREAD_MINUTES rather than _BAR_SHAPE's five, each with its own open/close."""
+    with connect(dsn) as conn:
+        for day in days:
+            ensure_partition(conn, day)
+        conn.execute(
+            "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+            " VALUES (%s, %s, 'X', true, %s)",
+            (symbol, symbol, bar_ts(min(days), _SPREAD_MINUTES[0])),
+        )
+        for day in days:
+            off = _DAY_OFFSET[day]
+            for minute, (o, h, low, c) in zip(_SPREAD_MINUTES, _SPREAD_SHAPE):
+                conn.execute(
+                    "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, 60, 3, %s)",
+                    (symbol, bar_ts(day, minute), o + off, h + off, low + off, c + off,
+                     (h + low) / 2 + off),
+                )
+            if extended_hours:
+                for stamp in (bar_ts(day, -30), close_ts(day)):
+                    conn.execute(
+                        "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                        " VALUES (%s, %s, 1, 1, 1, 1, 7, 1, 1)",
+                        (symbol, stamp),
+                    )
+        conn.commit()
+
+
 def load(dsn: str, symbols=("AAA",), *, extended_hours: bool = False) -> str:
     load_calendar(dsn)
     for symbol in symbols:

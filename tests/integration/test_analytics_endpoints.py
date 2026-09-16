@@ -1,5 +1,7 @@
 import re
 from datetime import date, datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
+from math import isclose, sqrt
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +14,8 @@ from tests.market_fixture import (
     BARS_PER_SESSION,
     DST_FRIDAY_EST,
     TRADING_DAYS,
+    WINDOW_END,
+    WINDOW_START,
     bar_ts,
     close_ts,
     ensure_partition,
@@ -20,6 +24,7 @@ from tests.market_fixture import (
     load_run_calendar,
     load_run_symbol,
     load_sparse_symbol,
+    load_spread_symbol,
     run_days,
 )
 
@@ -46,6 +51,26 @@ def _walk_largest_moves(client, base_params, *, max_iterations=100):
             return collected
         params = dict(base_params, limit=1, cursor=body["next_cursor"])
     raise RuntimeError(f"largest-moves paging did not terminate within {max_iterations} iterations")
+
+
+def _regular_session_bars(dsn, start, end):
+    """(ts, symbol, open, close) for every bar inside a regular session of [start, end], read with
+    plain SELECTs against bars and market_days rather than through _MOVES_SQL's own join."""
+    with connect(dsn) as conn:
+        sessions = conn.execute(
+            "SELECT open_ts, close_ts FROM market_days WHERE day >= %s AND day <= %s", (start, end)
+        ).fetchall()
+        bars = conn.execute("SELECT ts, symbol, open, close FROM bars").fetchall()
+    return sorted(
+        (ts, symbol, open_, close_)
+        for ts, symbol, open_, close_ in bars
+        if any(lo <= ts < hi for lo, hi in sessions)
+    )
+
+
+def _sql_without_comments(sql: str) -> str:
+    # a `--` comment can span exactly the text a plan-shape or text-presence assertion reads
+    return " ".join(re.sub(r"--[^\n]*", "", sql).split())
 
 
 @pytest.fixture
@@ -324,7 +349,10 @@ def test_window_too_long_is_refused_on_all_three_analytics_endpoints(window_cap_
             path, params={**extra, "start": "2026-03-31", "end": "2026-06-30"}
         )
         assert too_long.status_code == 422, path
-        assert too_long.json()["error"]["detail"] == {
+        error = too_long.json()["error"]
+        assert error["code"] == "invalid_range", path
+        assert error["message"] == "the requested date range is not one this endpoint serves", path
+        assert error["detail"] == {
             "reason": "window_too_long",
             "max_days": 90,
             "requested_days": 91,
@@ -419,8 +447,11 @@ def test_the_session_join_cannot_be_hashed(migrated_dsn):
     # threshold a hashable join trades the ordered index scan for a hash join over every remaining
     # row plus a sort -- at the page cap from page 1, or at the default page late in a window. The
     # rollup's day equality is what makes it hashable, and the half-open pair alone implies that
-    # equality. A fixture this size already tips the planner into hashing the equality form on
-    # page 1, so the plan is what is asserted
+    # equality. On this fixture, never analyzed, the ordered loop and the hashed alternative sit
+    # within the planner's 1% cost fuzz of each other, so which one it keeps is a tie-break rather
+    # than a margin this plan check alone can be trusted for --
+    # test_the_session_join_pins_the_half_open_pair_and_nothing_that_could_be_hashed guards the
+    # join's text directly for that reason
     days = load_run_calendar(migrated_dsn)
     for offset, symbol in enumerate(("RUNA", "RUNB", "RUNC", "RUND")):
         load_run_symbol(migrated_dsn, symbol, [100 + offset + i for i in range(len(days))], days)
@@ -442,3 +473,276 @@ def test_the_session_join_cannot_be_hashed(migrated_dsn):
                 ).fetchall()
             )
             assert "Hash Join" not in plan, (fetch, plan)
+
+
+def test_the_session_join_pins_the_half_open_pair_and_nothing_that_could_be_hashed():
+    # a planner-choice assertion on a small, un-analysed fixture lets a hashable respelling of this
+    # join through -- a UTC date cast reproduces the shipped plan on this fixture and still
+    # reproduces D-430 at production shape, because the check above rests on a 1% cost margin. This
+    # pins the join's own text instead, which no plan choice can satisfy by accident.
+    #
+    # a positive pin rather than a denylist of hashable respellings (::date, date_trunc, EXISTS,
+    # BETWEEN, IN), because a denylist passes any spelling it does not name -- `AND m.day =
+    # CAST(b.ts AS date)` in the WHERE clause, for one. Pinning every reference to market_days
+    # leaves a respelling nowhere to hide, named or not
+    normalized = _sql_without_comments(api.routes._MOVES_SQL)
+    assert normalized.count("market_days") == 1
+    assert "JOIN market_days m ON b.ts >= m.open_ts AND b.ts < m.close_ts" in normalized
+    assert normalized.count("m.open_ts") == 1
+    assert normalized.count("m.close_ts") == 1
+    assert normalized.count("m.day") == 2
+    assert "m.day >= %(start)s" in normalized
+    assert "m.day <= %(end)s" in normalized
+    # open_ts once, close_ts once, day twice: four total, so a fifth m. reference anywhere --
+    # a smuggled equality, a second predicate on m.day -- is refused even if it reuses a name above
+    assert len(re.findall(r"\bm\.\w+", normalized)) == 4
+
+
+def _load_moves_identity_fixture(dsn):
+    # bars on the window's first and last session (TRADING_DAYS' ends), extended-hours bars on
+    # both sides of every session, two symbols sharing every timestamp (AAA/BBB, WIDEA/WIDEB), and
+    # bars at many minutes of a session rather than only _BAR_SHAPE's first five
+    load(dsn, symbols=("AAA", "BBB"), extended_hours=True)
+    load_spread_symbol(dsn, "WIDEA", extended_hours=True)
+    load_spread_symbol(dsn, "WIDEB", extended_hours=True)
+
+
+def test_largest_moves_at_zero_threshold_matches_bars_and_sessions_computed_independently(
+    migrated_dsn,
+):
+    # spec line 484: at min_move_pct=0 the full walk equals the regular-session bars of the
+    # window, counted from bars and market_days directly rather than from _MOVES_SQL's own text.
+    #
+    # bounded on the fixture's own first and last loaded session, not on WINDOW_START/END: the
+    # loaded calendar has no session within 19 days of WINDOW_END, so a mutated `m.day <= %(end)s`
+    # (-> `<`) would still agree with this test's independently-computed count, since no session
+    # ever sits exactly on WINDOW_END for the boundary to drop
+    start, end = TRADING_DAYS[0], TRADING_DAYS[-1]
+    _load_moves_identity_fixture(migrated_dsn)
+    expected = _regular_session_bars(migrated_dsn, start, end)
+
+    with TestClient(create_app(migrated_dsn)) as c:
+        walked = _walk_largest_moves(
+            c,
+            {"start": start.isoformat(), "end": end.isoformat(), "min_move_pct": 0},
+            max_iterations=len(expected) + 10,
+        )
+    assert [(row["ts"], row["symbol"]) for row in walked] == [
+        (ts.isoformat(), symbol) for ts, symbol, _, _ in expected
+    ]
+    assert len(walked) == len(expected)
+
+
+def test_largest_moves_at_a_positive_threshold_matches_bars_computed_independently(migrated_dsn):
+    _load_moves_identity_fixture(migrated_dsn)
+    quantum = Decimal("0.0001")
+    # 3, not a round number close to any bar's move: AAA/BBB's DST_MONDAY_EDT bar 5 (open 108.00,
+    # close 111.25) clears it by the open denominator (3.0093%) and misses it by the close
+    # denominator (2.9213%), so this threshold is what a denominator swap changes the row set at
+    threshold = Decimal("3")
+    expected = []
+    for ts, symbol, open_, close_ in _regular_session_bars(migrated_dsn, WINDOW_START, WINDOW_END):
+        move = 100 * (close_ - open_) / open_
+        if abs(move) >= threshold:
+            expected.append((ts, symbol, open_, close_, move))
+
+    with TestClient(create_app(migrated_dsn)) as c:
+        walked = _walk_largest_moves(
+            c,
+            {
+                "start": WINDOW_START.isoformat(),
+                "end": WINDOW_END.isoformat(),
+                "min_move_pct": str(threshold),
+            },
+            max_iterations=150,
+        )
+    assert [(row["ts"], row["symbol"]) for row in walked] == [
+        (ts.isoformat(), symbol) for ts, symbol, _, _, _ in expected
+    ]
+    assert len(walked) == len(expected)
+    assert expected  # the threshold must actually exclude some and keep some of this fixture's bars
+    for row, (_, _, open_, close_, move) in zip(walked, expected):
+        assert Decimal(str(row["open"])) == open_.quantize(quantum, rounding=ROUND_HALF_UP)
+        assert Decimal(str(row["close"])) == close_.quantize(quantum, rounding=ROUND_HALF_UP)
+        assert Decimal(str(row["move_pct"])) == move.quantize(quantum, rounding=ROUND_HALF_UP)
+
+
+def test_largest_moves_without_min_move_pct_matches_min_move_pct_zero(moves_zero_client):
+    # kills a default silently moved off 0: the request omitting the parameter must clear exactly
+    # the same bar (including every FLAT, zero-move one) as the request naming the threshold
+    params = {"start": "2026-03-01", "end": "2026-03-31", "limit": 1000}
+    default = moves_zero_client.get("/analytics/largest-moves", params=params).json()
+    zero = moves_zero_client.get(
+        "/analytics/largest-moves", params={**params, "min_move_pct": 0}
+    ).json()
+    assert default == zero
+    assert default["data"]
+
+
+def test_largest_moves_a_single_page_above_the_cap_is_not_silently_truncated(migrated_dsn):
+    # the cap-500 defect only shows on a request whose OWN fetch exceeds it; walking at limit=1
+    # never does, so this asks for every row of a >500-row, <=1000-row window in one page
+    days = load_run_calendar(migrated_dsn, run_days(10))
+    minutes = range(0, 390, 5)
+    load_sparse_symbol(migrated_dsn, "DENSE", days, minutes)
+    total = len(minutes) * len(days)
+    assert 500 < total <= 1000
+
+    with TestClient(create_app(migrated_dsn)) as c:
+        response = c.get(
+            "/analytics/largest-moves",
+            params={
+                "start": days[0].isoformat(),
+                "end": days[-1].isoformat(),
+                "min_move_pct": 0,
+                "limit": total,
+            },
+        )
+    body = response.json()
+    assert len(body["data"]) == total
+    assert body["next_cursor"] is None
+
+
+def test_gaps_matches_hand_computed_counts_on_a_populated_window_and_a_narrower_one(migrated_dsn):
+    days = load_run_calendar(migrated_dsn, run_days(5))
+    # day1/day0 +10% up, day2/day1 0% flat, day3/day2 -9.0909% down, day4/day3 +5% up
+    load_run_symbol(migrated_dsn, "MOVES", [100, 110, 110, 100, 105], days)
+    with TestClient(create_app(migrated_dsn)) as c:
+        full = c.get(
+            "/analytics/gaps",
+            params={"symbol": "MOVES", "start": days[0].isoformat(), "end": days[-1].isoformat()},
+        ).json()["data"][0]
+        narrower = c.get(
+            "/analytics/gaps",
+            params={"symbol": "MOVES", "start": days[1].isoformat(), "end": days[-1].isoformat()},
+        ).json()["data"][0]
+    assert (full["gaps"], full["gaps_up"], full["gaps_down"], full["gaps_flat"]) == (4, 2, 1, 1)
+    # excluding day0 drops its (up) gap, leaving the flat/down/up trio
+    assert (
+        narrower["gaps"],
+        narrower["gaps_up"],
+        narrower["gaps_down"],
+        narrower["gaps_flat"],
+    ) == (
+        3,
+        1,
+        1,
+        1,
+    )
+
+
+def test_gaps_counts_a_gap_that_spans_a_skipped_session(migrated_dsn):
+    days = load_run_calendar(migrated_dsn, run_days(4))
+    # the symbol trades on days 0, 1 and 3 -- day 2 is a session in the calendar it has no bar for
+    load_run_symbol(migrated_dsn, "SKIPRUN", [100, 105, 110], [days[0], days[1], days[3]])
+    with TestClient(create_app(migrated_dsn)) as c:
+        body = c.get(
+            "/analytics/gaps",
+            params={"symbol": "SKIPRUN", "start": days[0].isoformat(), "end": days[-1].isoformat()},
+        ).json()["data"][0]
+    assert body["gaps"] == 2
+    assert body["gaps_spanning_a_skipped_session"] == 1
+
+
+def test_volatility_narrowing_the_window_changes_the_return_count(volatility_client):
+    # SPARSE bars at minutes 0, 5, 35, 40, 65 give one return per day in buckets 0 and 60 and two
+    # in bucket 30; dropping the first of the four TRADING_DAYS drops exactly one of each
+    full = volatility_client.get(
+        "/analytics/volatility",
+        params={"symbol": "SPARSE", "start": "2026-03-01", "end": "2026-03-31"},
+    ).json()["data"]
+    narrower = volatility_client.get(
+        "/analytics/volatility",
+        params={"symbol": "SPARSE", "start": "2026-03-09", "end": "2026-03-31"},
+    ).json()["data"]
+    assert [row["returns"] for row in full] == [4, 8, 4]
+    assert [row["returns"] for row in narrower] == [3, 6, 3]
+
+
+def test_volatility_annualizes_by_the_square_root_of_minutes_in_a_year(volatility_client):
+    data = volatility_client.get(
+        "/analytics/volatility",
+        params={"symbol": "SPARSE", "start": "2026-03-01", "end": "2026-03-31"},
+    ).json()["data"]
+    bucket = data[1]  # bucket 30, the one bucket the bucketing test pins as stddev > 0
+    assert float(bucket["stddev_pct"]) > 0
+    ratio = float(bucket["annualized_pct"]) / float(bucket["stddev_pct"])
+    assert isclose(ratio, sqrt(98280), rel_tol=1e-3)
+
+
+def test_volatility_on_a_window_with_no_bars_answers_an_empty_list(volatility_client):
+    response = volatility_client.get(
+        "/analytics/volatility",
+        params={"symbol": "AAA", "start": "2026-04-01", "end": "2026-04-30"},
+    )
+    assert response.json() == {"data": [], "next_cursor": None}
+
+
+def test_largest_moves_on_a_window_with_no_bars_answers_an_empty_list(moves_zero_client):
+    response = moves_zero_client.get(
+        "/analytics/largest-moves",
+        params={"start": "2026-04-01", "end": "2026-04-30", "min_move_pct": 0},
+    )
+    assert response.json() == {"data": [], "next_cursor": None}
+
+
+def test_missing_required_parameters_are_a_four_hundred_on_all_three_analytics_endpoints(
+    empty_client,
+):
+    cases = [
+        ("/analytics/volatility", {"start": "2026-03-01", "end": "2026-03-31"}, "symbol"),
+        ("/analytics/gaps", {"start": "2026-03-01", "end": "2026-03-31"}, "symbol"),
+        ("/analytics/largest-moves", {"end": "2026-03-31"}, "start"),
+    ]
+    for path, params, missing in cases:
+        response = empty_client.get(path, params=params)
+        assert response.status_code == 400, path
+        body = response.json()["error"]
+        assert body["code"] == "invalid_params", path
+        assert body["message"] == "one or more parameters are not valid", path
+        assert body["detail"]["parameter"] == missing, path
+        assert body["detail"]["errors"][0]["type"] == "missing", path
+
+
+def test_malformed_parameters_are_a_four_hundred_on_all_three_analytics_endpoints(empty_client):
+    cases = [
+        (
+            "/analytics/volatility",
+            {"symbol": "AAA", "start": "not-a-date", "end": "2026-03-31"},
+            "start",
+        ),
+        ("/analytics/gaps", {"symbol": "AAA", "start": "2026-03-01", "end": "not-a-date"}, "end"),
+        ("/analytics/largest-moves", {"start": "not-a-date", "end": "2026-03-31"}, "start"),
+    ]
+    for path, params, malformed in cases:
+        response = empty_client.get(path, params=params)
+        assert response.status_code == 400, path
+        body = response.json()["error"]
+        assert body["code"] == "invalid_params", path
+        assert body["message"] == "one or more parameters are not valid", path
+        assert body["detail"]["parameter"] == malformed, path
+        assert body["detail"]["errors"][0]["type"] == "date_from_datetime_parsing", path
+
+
+def test_a_limit_over_the_cap_and_a_garbage_cursor_are_four_hundreds_on_largest_moves(
+    empty_client,
+):
+    over_cap = empty_client.get(
+        "/analytics/largest-moves",
+        params={"start": "2026-03-01", "end": "2026-03-31", "limit": 1001},
+    )
+    assert over_cap.status_code == 400
+    body = over_cap.json()["error"]
+    assert body["code"] == "invalid_params"
+    assert body["message"] == "one or more parameters are not valid"
+    assert body["detail"] == {"reason": "limit_out_of_range", "limit": 1001, "max": 1000}
+
+    garbage = empty_client.get(
+        "/analytics/largest-moves",
+        params={"start": "2026-03-01", "end": "2026-03-31", "cursor": "not-a-cursor"},
+    )
+    assert garbage.status_code == 400
+    body = garbage.json()["error"]
+    assert body["code"] == "invalid_cursor"
+    assert body["message"] == "the cursor is not one this endpoint issued"
+    assert body["detail"] == {"reason": "not_base64"}
