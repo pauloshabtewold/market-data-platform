@@ -70,6 +70,14 @@ def clean_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture
+def no_env(monkeypatch):
+    # broader than clean_env -- also strips the required keys, so a construction below can only
+    # be satisfied by the file or kwargs under test, never by whatever the ambient shell exports
+    for key in Settings.model_fields:
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_measured_keys_are_absent_legitimately(clean_env):
     settings = Settings(_env_file=None, **REQUIRED)
     for key in MEASURED:
@@ -175,20 +183,107 @@ def test_every_optional_setting_is_reachable_through_require(monkeypatch):
 
 
 def test_a_hot_window_too_short_for_the_widest_endpoint_window_is_refused():
-    # three consecutive months can be as few as 89 days (Feb+Mar+Apr), which cannot hold a
-    # 90-day request, so the hot-window index would miss rows the endpoint is entitled to ask for
-    with pytest.raises(ValidationError, match="89 days"):
-        Settings(_env_file=None, HOT_WINDOW_MONTHS=3, **REQUIRED)
+    # anchored at REQUIRED's INGEST_END=2026-06-30: 3 months back is 2026-04-01, a 90-day span --
+    # one day short of 91. The old unanchored check read this case as "89 days" (Feb+Mar+Apr), a
+    # month position INGEST_END never actually sits at
+    with pytest.raises(ValidationError, match="90 days"):
+        Settings(_env_file=None, HOT_WINDOW_MONTHS=3, AGG_MAX_WINDOW_DAYS=91, **REQUIRED)
 
 
 def test_the_hot_window_floor_follows_the_window_it_has_to_contain():
-    # 120 is the exact minimum four months can guarantee -- pinned at both edges so a floor that
-    # were the literal 4 rather than this arithmetic could not also produce the 89-day rejection
-    Settings(_env_file=None, HOT_WINDOW_MONTHS=4, AGG_MAX_WINDOW_DAYS=120, **REQUIRED)
-    with pytest.raises(ValidationError, match="89 days"):
+    # anchored at INGEST_END=2026-06-30: 4 months back is 2026-03-01, a 121-day span -- the exact
+    # floor, pinned at both edges so a floor that were the literal 4 could not also produce this
+    Settings(_env_file=None, HOT_WINDOW_MONTHS=4, AGG_MAX_WINDOW_DAYS=121, **REQUIRED)
+    with pytest.raises(ValidationError, match="90 days"):
         Settings(_env_file=None, HOT_WINDOW_MONTHS=3, AGG_MAX_WINDOW_DAYS=120, **REQUIRED)
-    with pytest.raises(ValidationError, match="120 days"):
-        Settings(_env_file=None, HOT_WINDOW_MONTHS=4, AGG_MAX_WINDOW_DAYS=121, **REQUIRED)
+    with pytest.raises(ValidationError, match="121 days"):
+        Settings(_env_file=None, HOT_WINDOW_MONTHS=4, AGG_MAX_WINDOW_DAYS=122, **REQUIRED)
+
+
+def test_a_hot_window_ending_before_the_widest_window_can_start_is_refused():
+    # INGEST_END=2026-05-01 at the defaults (H=4, A=90): 4 months back is 2026-02-01, an 89-day
+    # span. The old check never read INGEST_END at all, so it accepted this deployment regardless
+    with pytest.raises(ValidationError, match="89 days"):
+        Settings(_env_file=None, **{**REQUIRED, "INGEST_END": "2026-05-01"})
+
+
+def test_a_hot_window_anchored_at_a_short_february_is_refused():
+    # INGEST_END=2026-02-28 with AGG_MAX_WINDOW_DAYS widened to 120: 4 months back is
+    # 2025-11-01, a 119-day span -- one day short
+    with pytest.raises(ValidationError, match="119 days"):
+        Settings(
+            _env_file=None,
+            AGG_MAX_WINDOW_DAYS=120,
+            **{**REQUIRED, "INGEST_END": "2026-02-28"},
+        )
+
+
+def test_e2e_configuration_problems_is_empty_for_the_defaults(clean_env):
+    settings = Settings(_env_file=None, **REQUIRED)
+    assert config.e2e_configuration_problems(settings) == []
+
+
+def test_e2e_start_after_end_is_a_configuration_problem(clean_env):
+    settings = Settings(_env_file=None, E2E_START="2026-06-30", E2E_END="2026-04-01", **REQUIRED)
+    problems = config.e2e_configuration_problems(settings)
+    assert any("E2E_START" in p and "after" in p for p in problems), problems
+
+
+def test_e2e_window_over_the_cap_is_a_configuration_problem(clean_env):
+    # 91 days, one over AGG_MAX_WINDOW_DAYS=90
+    settings = Settings(_env_file=None, E2E_START="2026-03-31", E2E_END="2026-06-30", **REQUIRED)
+    problems = config.e2e_configuration_problems(settings)
+    assert any("91 days" in p for p in problems), problems
+
+
+def test_e2e_window_outside_the_ingested_range_is_a_configuration_problem(clean_env):
+    # inside the 90-day cap and inside the hot window's own span, but before INGEST_START=2020-08-01
+    settings = Settings(_env_file=None, E2E_START="2019-01-01", E2E_END="2019-03-01", **REQUIRED)
+    problems = config.e2e_configuration_problems(settings)
+    assert any("ingested" in p for p in problems), problems
+
+
+def test_e2e_start_before_the_hot_window_cutoff_is_a_configuration_problem(clean_env):
+    # inside the ingested range and under the cap, but the deployed hot-window copy starts at
+    # 2026-03-01 (H=4 back from INGEST_END=2026-06-30), so this suite would not run against it
+    settings = Settings(_env_file=None, E2E_START="2025-01-01", E2E_END="2025-03-31", **REQUIRED)
+    problems = config.e2e_configuration_problems(settings)
+    assert any("cutoff" in p for p in problems), problems
+
+
+def test_e2e_symbols_with_no_symbol_at_all_is_a_configuration_problem(clean_env):
+    settings = Settings(_env_file=None, E2E_SYMBOLS=",", **REQUIRED)
+    problems = config.e2e_configuration_problems(settings)
+    assert any("E2E_SYMBOLS" in p for p in problems), problems
+
+
+def test_e2e_symbols_with_one_empty_entry_among_real_ones_is_a_configuration_problem(clean_env):
+    # "any" let this one through: AAPL and MSFT alone make the generator non-empty, so only
+    # checking EVERY entry catches the empty slot between them
+    settings = Settings(_env_file=None, E2E_SYMBOLS="AAPL,,MSFT", **REQUIRED)
+    problems = config.e2e_configuration_problems(settings)
+    assert any("E2E_SYMBOLS" in p for p in problems), problems
+
+
+def test_e2e_base_url_without_a_scheme_is_a_configuration_problem(clean_env):
+    settings = Settings(_env_file=None, E2E_BASE_URL="127.0.0.1:8000", **REQUIRED)
+    problems = config.e2e_configuration_problems(settings)
+    assert any("E2E_BASE_URL" in p for p in problems), problems
+
+
+def test_e2e_defaults_construct_inside_the_ingested_and_hot_ranges(clean_env):
+    settings = Settings(_env_file=None, **REQUIRED)
+    assert settings.E2E_START == date(2026, 4, 1)
+    assert settings.E2E_END == date(2026, 6, 30)
+
+
+def test_settings_constructs_even_when_the_e2e_window_is_one_the_function_refuses(clean_env):
+    # these rules are deliberately not a model validator: advancing INGEST_END without editing the
+    # E2E_* keys must not stop api.main, db.migrate or ingest from starting -- only the e2e suite
+    # that reads the function refuses
+    settings = Settings(_env_file=None, E2E_START="2019-01-01", E2E_END="2019-03-01", **REQUIRED)
+    assert settings.E2E_START == date(2019, 1, 1)
+    assert config.e2e_configuration_problems(settings) != []
 
 
 def test_a_bars_page_default_over_its_max_is_refused(clean_env):
@@ -247,3 +342,25 @@ def test_the_page_and_pool_keys_are_integers(clean_env, monkeypatch):
     for key in numeric_keys:
         assert type(getattr(from_env, key)) is int
     assert type(from_env.LOG_LEVEL) is str
+
+
+def test_an_empty_value_in_the_committed_env_example_still_constructs(no_env):
+    # the four measured keys ship as `KEY=` in .env.example; an unedited copy has to construct
+    settings = Settings(_env_file=".env.example")
+    for key in MEASURED:
+        assert getattr(settings, key) is None
+
+
+def test_an_empty_required_key_still_fails_as_missing(no_env, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "")
+    without_dsn = {k: v for k, v in REQUIRED.items() if k != "DATABASE_URL"}
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, **without_dsn)
+    assert excinfo.value.errors()[0]["type"] == "missing"
+    assert "DATABASE_URL" in str(excinfo.value)
+
+
+def test_an_empty_defaulted_key_takes_its_default(clean_env, monkeypatch):
+    monkeypatch.setenv("LOG_LEVEL", "")
+    settings = Settings(_env_file=None, **REQUIRED)
+    assert settings.LOG_LEVEL == "INFO"

@@ -5,8 +5,20 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _hot_window_cutoff(ingest_end: date, months: int) -> date:
+    # first day of the month (months - 1) calendar months before ingest_end's own month --
+    # shared by the hot-window floor and the E2E window check so the two can never disagree
+    year, month = ingest_end.year, ingest_end.month - (months - 1)
+    while month <= 0:
+        month += 12
+        year -= 1
+    return date(year, month, 1)
+
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # an empty value (the four measured keys in .env.example) means unset, not the empty string --
+    # a required key left empty still fails as missing, since ignore_empty drops it from the source
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", env_ignore_empty=True)
 
     ALPACA_KEY_ID: str
     ALPACA_SECRET_KEY: str
@@ -59,17 +71,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _hot_window_contains_the_widest_endpoint_window(self):
-        # the floor is derived rather than written as 4, so raising AGG_MAX_WINDOW_DAYS at a later
+        # anchored at INGEST_END, where the hot index's own cutoff sits -- the floor is derived
+        # rather than written as 4, so raising AGG_MAX_WINDOW_DAYS or moving INGEST_END at a later
         # feature fails here instead of silently leaving the hot index too short to serve it
-        lengths = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
-        shortest = min(
-            sum(lengths[(start + i) % 12] for i in range(self.HOT_WINDOW_MONTHS))
-            for start in range(12)
-        )
-        if shortest < self.AGG_MAX_WINDOW_DAYS:
+        cutoff = _hot_window_cutoff(self.INGEST_END, self.HOT_WINDOW_MONTHS)
+        span = (self.INGEST_END - cutoff).days
+        if span < self.AGG_MAX_WINDOW_DAYS:
             raise ValueError(
-                f"HOT_WINDOW_MONTHS={self.HOT_WINDOW_MONTHS} spans as few as {shortest} days,"
-                f" which cannot contain AGG_MAX_WINDOW_DAYS={self.AGG_MAX_WINDOW_DAYS};"
+                f"HOT_WINDOW_MONTHS={self.HOT_WINDOW_MONTHS} anchored at"
+                f" INGEST_END={self.INGEST_END} spans {span} days back to {cutoff}, short of"
+                f" AGG_MAX_WINDOW_DAYS={self.AGG_MAX_WINDOW_DAYS};"
                 " the hot-window index would not cover the widest window an endpoint can ask for"
             )
         return self
@@ -101,6 +112,42 @@ class Settings(BaseSettings):
                 f" {sorted(logging.getLevelNamesMapping())}"
             )
         return self
+
+
+def e2e_configuration_problems(settings: Settings) -> list[str]:
+    # apart from Settings construction on purpose: as a model validator, advancing INGEST_END
+    # without editing the E2E_* keys in step would stop api.main, db.migrate and ingest from
+    # starting, not only the e2e suite that reads these keys -- tests/e2e/conftest.py checks them
+    # before its first request instead
+    problems: list[str] = []
+    if settings.E2E_START > settings.E2E_END:
+        problems.append(f"E2E_START={settings.E2E_START} is after E2E_END={settings.E2E_END}")
+    span = (settings.E2E_END - settings.E2E_START).days
+    if span > settings.AGG_MAX_WINDOW_DAYS:
+        problems.append(
+            f"E2E_START={settings.E2E_START}..E2E_END={settings.E2E_END} spans {span} days, over"
+            f" AGG_MAX_WINDOW_DAYS={settings.AGG_MAX_WINDOW_DAYS}"
+        )
+    if settings.E2E_START < settings.INGEST_START or settings.E2E_END > settings.INGEST_END:
+        problems.append(
+            f"E2E_START={settings.E2E_START}..E2E_END={settings.E2E_END} is outside the ingested"
+            f" range INGEST_START={settings.INGEST_START}..INGEST_END={settings.INGEST_END}"
+        )
+    cutoff = _hot_window_cutoff(settings.INGEST_END, settings.HOT_WINDOW_MONTHS)
+    if settings.E2E_START < cutoff:
+        problems.append(
+            f"E2E_START={settings.E2E_START} is before the hot window's own cutoff {cutoff}"
+            f" (HOT_WINDOW_MONTHS={settings.HOT_WINDOW_MONTHS} back from"
+            f" INGEST_END={settings.INGEST_END}); the suite would not run unchanged against the"
+            " deployed hot-window copy"
+        )
+    # every entry, not just one: "AAPL,,MSFT" carries two real symbols and one empty slot, and an
+    # any() check reads that as fine because the two real ones already make it non-empty
+    if not all(symbol.strip() for symbol in settings.E2E_SYMBOLS.split(",")):
+        problems.append(f"E2E_SYMBOLS={settings.E2E_SYMBOLS!r} carries an empty symbol")
+    if not settings.E2E_BASE_URL.startswith(("http://", "https://")):
+        problems.append(f"E2E_BASE_URL={settings.E2E_BASE_URL!r} has no http:// or https:// scheme")
+    return problems
 
 
 settings = Settings()

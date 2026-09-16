@@ -26,6 +26,7 @@ on the loaded data, not projected onto it.
 ## Quickstart
 
 ```bash
+cp -n .env.example .env                   # then fill in ALPACA_KEY_ID and ALPACA_SECRET_KEY
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 docker compose up -d --wait db
 .venv/bin/python -m db.migrate            # separate operator action; ingest never migrates
@@ -35,11 +36,13 @@ docker compose up -d --wait db app
 .venv/bin/python -m pytest tests/e2e      # end-to-end; runs only when named
 ```
 
-Copy `.env.example` to `.env` first. The four measured constants in it are recorded rather
-than defaulted, because a silently-defaulted value is the failure they exist to prevent —
-[Methodology](docs/METHODOLOGY.md) carries each value and the arithmetic behind it.
+The four measured constants in `.env` are recorded rather than defaulted, because a
+silently-defaulted value is the failure they exist to prevent — [Methodology](docs/METHODOLOGY.md)
+carries each value and the arithmetic behind it.
 
-The end-to-end suite needs the `app` service running against the loaded database.
+The end-to-end suite needs the `app` service running against the loaded database. The `app`
+service loads the code once, at startup, so after changing code run `docker compose restart app`
+before running the end-to-end suite again.
 
 ## What's interesting here
 
