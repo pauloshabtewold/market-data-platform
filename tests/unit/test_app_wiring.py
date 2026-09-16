@@ -558,12 +558,61 @@ def test_the_generated_documentation_answers_and_redoc_does_not(monkeypatch):
     # the constant and not a truthiness check: FastAPI falls back to the endpoint's docstring, so a
     # docstring added later would keep a presence check green with the description deleted
     assert paths["/symbols/{symbol}/bars"]["get"]["description"] == api.routes._BARS_DESCRIPTION
-    # a constrained Decimal renders as anyOf(number, string) with the ge constraint at the top
-    # level once Query moves inside the Annotated alias, so a per-branch minimum could not fail
-    parameters = {p["name"]: p for p in paths["/analytics/largest-moves"]["get"]["parameters"]}
-    schema = parameters["min_move_pct"]["schema"]
-    assert schema["ge"] == 0
-    assert {branch["type"] for branch in schema["anyOf"]} == {"number", "string"}
+
+    # WithJsonSchema replaces Decimal's own anyOf(number, string) entirely, whose string branch
+    # admitted "-1" and rejected "1e3" -- full-dict equality, not a per-branch minimum, since there
+    # is now only one branch to read
+    moves_parameters = {p["name"]: p for p in paths["/analytics/largest-moves"]["get"]["parameters"]}
+    assert moves_parameters["min_move_pct"]["schema"] == {
+        "type": "number",
+        "minimum": 0,
+        "default": 0,
+        "title": "Min Move Pct",
+    }
+
+    # every data/analytics route publishes the one error shape for each status it can answer, and
+    # HTTPValidationError -- FastAPI's default 422 model -- is added only when a route has not
+    # already declared 422 itself, so declaring it everywhere keeps it out of the document entirely
+    assert "HTTPValidationError" not in body["components"]["schemas"]
+    error_schema_ref = {"$ref": "#/components/schemas/ErrorResponse"}
+    symbol_routes = {
+        "/symbols/{symbol}/bars",
+        "/symbols/{symbol}/daily",
+        "/analytics/volatility",
+        "/analytics/gaps",
+    }
+    data_routes = symbol_routes | {"/symbols", "/analytics/largest-moves"}
+    for path in data_routes:
+        responses = paths[path]["get"]["responses"]
+        expected = {"200", "400", "422", "500"} | ({"404"} if path in symbol_routes else set())
+        assert set(responses) == expected, path
+        for code in expected - {"200"}:
+            assert responses[code]["content"]["application/json"]["schema"] == error_schema_ref, (
+                path,
+                code,
+            )
+    assert set(paths["/health"]["get"]["responses"]) == {"200", "500"}
+    assert (
+        paths["/health"]["get"]["responses"]["500"]["content"]["application/json"]["schema"]
+        == error_schema_ref
+    )
+
+    # limit's minimum, maximum and default are published purely for documentation -- they mirror
+    # what resolve_request enforces against the RESOLVED limit, without adding pydantic validation
+    # that would change today's 400 detail (limit_out_of_range)
+    bars_pair = (config.settings.BARS_PAGE_DEFAULT, config.settings.BARS_PAGE_MAX)
+    agg_pair = (config.settings.AGG_PAGE_DEFAULT, config.settings.AGG_PAGE_MAX)
+    for path, (default, cap) in (
+        ("/symbols", bars_pair),
+        ("/symbols/{symbol}/bars", bars_pair),
+        ("/symbols/{symbol}/daily", agg_pair),
+        ("/analytics/largest-moves", agg_pair),
+    ):
+        parameters = {p["name"]: p for p in paths[path]["get"]["parameters"]}
+        branches = parameters["limit"]["schema"]["anyOf"]
+        assert [b for b in branches if b.get("type") == "integer"] == [
+            {"type": "integer", "minimum": 1, "maximum": cap, "default": default}
+        ], path
 
     page = client.get("/docs")
     assert page.status_code == 200

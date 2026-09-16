@@ -1,8 +1,10 @@
 import logging
+from typing import Literal
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 log = logging.getLogger(__name__)
@@ -18,6 +20,28 @@ INVALID_PARAMS_MESSAGE = "one or more parameters are not valid"
 INVALID_CURSOR_MESSAGE = "the cursor is not one this endpoint issued"
 UNKNOWN_SYMBOL_MESSAGE = "no symbol by that name has been ingested"
 INVALID_RANGE_MESSAGE = "the requested date range is not one this endpoint serves"
+
+
+class ErrorInfo(BaseModel):
+    # a Literal over ERROR_CODES rather than str, so the generated document names the same closed
+    # vocabulary the frozenset enforces at runtime
+    code: Literal[tuple(sorted(ERROR_CODES))]
+    message: str
+    detail: dict | None = None
+
+
+class ErrorResponse(BaseModel):
+    """The one error shape, published so the generated document matches what the service answers."""
+
+    error: ErrorInfo
+
+
+# shared response entries for the routes' own `responses=`, so every route publishing a given
+# status documents the same schema and description rather than four independently-typed copies
+RESPONSE_400 = {"model": ErrorResponse, "description": "A parameter or cursor was not valid."}
+RESPONSE_404 = {"model": ErrorResponse, "description": "No symbol by that name has been ingested."}
+RESPONSE_422 = {"model": ErrorResponse, "description": "The requested range was not valid."}
+RESPONSE_500 = {"model": ErrorResponse, "description": "The request could not be completed."}
 
 
 class ApiError(RuntimeError):

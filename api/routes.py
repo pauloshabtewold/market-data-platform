@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import AfterValidator
+from pydantic import AfterValidator, WithJsonSchema
 from pydantic_core import PydanticCustomError
 from psycopg_pool import ConnectionPool
 
@@ -12,6 +12,10 @@ from api.deps import get_pool
 from api.errors import (
     INVALID_PARAMS_MESSAGE,
     INVALID_RANGE_MESSAGE,
+    RESPONSE_400,
+    RESPONSE_404,
+    RESPONSE_422,
+    RESPONSE_500,
     UNKNOWN_SYMBOL_MESSAGE,
     ApiError,
 )
@@ -146,8 +150,21 @@ def _reject_numeric_overflow(value: Decimal) -> Decimal:
 
 # Query lives inside the Annotated alias rather than as the parameter's default value: this
 # project's FastAPI discards any Annotated metadata that is not itself a FieldInfo/Depends
-# whenever the default is a bare Query(...), which would silently drop AfterValidator
-MinMovePct = Annotated[Decimal, AfterValidator(_reject_numeric_overflow), Query(ge=0)]
+# whenever the default is a bare Query(...), which would silently drop AfterValidator.
+# WithJsonSchema replaces Decimal's own anyOf(number, string) rendering, whose string branch
+# admits "-1" and rejects "1e3", with the plain number the service actually accepts
+MinMovePct = Annotated[
+    Decimal,
+    AfterValidator(_reject_numeric_overflow),
+    WithJsonSchema({"type": "number", "minimum": 0, "default": 0}),
+    Query(ge=0),
+]
+
+
+def _limit_schema(page_default: int, page_max: int) -> dict:
+    # published for documentation only -- the real floor and cap are enforced in resolve_request,
+    # against the RESOLVED limit, so this schema cannot change today's limit_out_of_range detail
+    return {"type": "integer", "minimum": 1, "maximum": page_max, "default": page_default}
 
 
 def resolve_request(
@@ -244,10 +261,17 @@ def require_symbol(conn, symbol: str) -> None:
         )
 
 
-@router.get("/symbols", summary="List ingested symbols")
+@router.get(
+    "/symbols",
+    summary="List ingested symbols",
+    # this endpoint takes no window, so its 422 is unreachable -- it is declared anyway because
+    # FastAPI adds a 422 of its own, in the framework's shape rather than this one, to any route
+    # that declares a query parameter and does not document one itself
+    responses={400: RESPONSE_400, 422: RESPONSE_422, 500: RESPONSE_500},
+)
 def list_symbols(
     active: bool | None = None,
-    limit: int | None = None,
+    limit: Annotated[int, WithJsonSchema(_limit_schema(*_SYMBOLS_CAPS))] | None = None,
     cursor: str | None = None,
     pool: ConnectionPool = Depends(get_pool),
 ):
@@ -269,13 +293,16 @@ def list_symbols(
 
 
 @router.get(
-    "/symbols/{symbol}/bars", summary="Minute bars for one symbol", description=_BARS_DESCRIPTION
+    "/symbols/{symbol}/bars",
+    summary="Minute bars for one symbol",
+    description=_BARS_DESCRIPTION,
+    responses={400: RESPONSE_400, 404: RESPONSE_404, 422: RESPONSE_422, 500: RESPONSE_500},
 )
 def list_bars(
     symbol: str,
     start: date,
     end: date,
-    limit: int | None = None,
+    limit: Annotated[int, WithJsonSchema(_limit_schema(*_BARS_CAPS))] | None = None,
     cursor: str | None = None,
     pool: ConnectionPool = Depends(get_pool),
 ):
@@ -303,12 +330,16 @@ def list_bars(
     return {"data": page.data, "next_cursor": page.next_cursor}
 
 
-@router.get("/symbols/{symbol}/daily", summary="Daily bars for one symbol")
+@router.get(
+    "/symbols/{symbol}/daily",
+    summary="Daily bars for one symbol",
+    responses={400: RESPONSE_400, 404: RESPONSE_404, 422: RESPONSE_422, 500: RESPONSE_500},
+)
 def list_daily(
     symbol: str,
     start: date,
     end: date,
-    limit: int | None = None,
+    limit: Annotated[int, WithJsonSchema(_limit_schema(*_DAILY_CAPS))] | None = None,
     cursor: str | None = None,
     pool: ConnectionPool = Depends(get_pool),
 ):
@@ -339,7 +370,11 @@ def list_daily(
     return {"data": page.data, "next_cursor": page.next_cursor}
 
 
-@router.get("/analytics/volatility", summary="Realized volatility by half-hour bucket")
+@router.get(
+    "/analytics/volatility",
+    summary="Realized volatility by half-hour bucket",
+    responses={400: RESPONSE_400, 404: RESPONSE_404, 422: RESPONSE_422, 500: RESPONSE_500},
+)
 def analytics_volatility(
     symbol: str,
     start: date,
@@ -365,7 +400,11 @@ def analytics_volatility(
     return {"data": rows, "next_cursor": None}
 
 
-@router.get("/analytics/gaps", summary="Overnight gap distribution for one symbol")
+@router.get(
+    "/analytics/gaps",
+    summary="Overnight gap distribution for one symbol",
+    responses={400: RESPONSE_400, 404: RESPONSE_404, 422: RESPONSE_422, 500: RESPONSE_500},
+)
 def analytics_gaps(
     symbol: str,
     start: date,
@@ -389,13 +428,15 @@ def analytics_gaps(
 
 
 @router.get(
-    "/analytics/largest-moves", summary="Minute moves at or above a threshold, universe-wide"
+    "/analytics/largest-moves",
+    summary="Minute moves at or above a threshold, universe-wide",
+    responses={400: RESPONSE_400, 422: RESPONSE_422, 500: RESPONSE_500},
 )
 def analytics_largest_moves(
     start: date,
     end: date,
     min_move_pct: MinMovePct = 0,
-    limit: int | None = None,
+    limit: Annotated[int, WithJsonSchema(_limit_schema(*_MOVES_CAPS))] | None = None,
     cursor: str | None = None,
     pool: ConnectionPool = Depends(get_pool),
 ):

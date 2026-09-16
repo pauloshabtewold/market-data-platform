@@ -5,7 +5,7 @@ from fastapi import Depends, FastAPI
 from psycopg_pool import ConnectionPool
 
 from api.deps import build_pool, build_version, get_pool
-from api.errors import INTERNAL_MESSAGE, ApiError, install_error_handlers
+from api.errors import INTERNAL_MESSAGE, RESPONSE_500, ApiError, install_error_handlers
 from api.routes import router
 from config import settings
 
@@ -57,7 +57,7 @@ def create_app(dsn: str | None = None) -> FastAPI:
     # an explicit dsn lets tests and the testcontainer avoid ever touching settings.DATABASE_URL
     app.state.pool = build_pool(dsn or settings.DATABASE_URL)
 
-    @app.get("/health", summary="Service and database health")
+    @app.get("/health", summary="Service and database health", responses={500: RESPONSE_500})
     def health(pool: ConnectionPool = Depends(get_pool)):
         try:
             with pool.connection(timeout=HEALTH_TIMEOUT_SECONDS) as conn:
