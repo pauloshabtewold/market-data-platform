@@ -1,15 +1,19 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
-from psycopg_pool import ConnectionPool
+import psycopg
+from fastapi import FastAPI
 
-from api.deps import build_pool, build_version, get_pool
+from api.deps import build_pool, build_version
 from api.errors import INTERNAL_MESSAGE, RESPONSE_500, ApiError, install_error_handlers
 from api.routes import router
 from config import settings
 
-# bounded well under an ALB's 5 s default health-check timeout, with room for the probe itself
+# bounded well under an ALB's 5 s default health-check timeout, with room for the probe itself.
+# genuinely a bound now: /health runs on its own connection (below), off the shared pool and off
+# the 40-thread limiter every other (sync def) route shares, so a burst of slow requests elsewhere
+# cannot make this wait behind them
 HEALTH_TIMEOUT_SECONDS = 2.0
 
 
@@ -30,6 +34,17 @@ async def _lifespan(app: FastAPI):
     pool.open(wait=False)
     yield
     pool.close()
+
+
+async def _check_database(dsn: str) -> None:
+    # /health's own short-lived connection, never the shared pool: a request that is holding every
+    # pooled connection or every thread in the sync limiter must not make this read as a dead
+    # database. connect_timeout is a libpq connection parameter (seconds); it bounds the connect
+    # phase only, and the asyncio.wait_for around this call in the route bounds the query too
+    async with await psycopg.AsyncConnection.connect(
+        dsn, connect_timeout=HEALTH_TIMEOUT_SECONDS
+    ) as conn:
+        await conn.execute("SELECT 1")
 
 
 def create_app(dsn: str | None = None) -> FastAPI:
@@ -54,16 +69,19 @@ def create_app(dsn: str | None = None) -> FastAPI:
     )
     install_error_handlers(app)
     app.include_router(router)
-    # an explicit dsn lets tests and the testcontainer avoid ever touching settings.DATABASE_URL
-    app.state.pool = build_pool(dsn or settings.DATABASE_URL)
+    # an explicit dsn lets tests and the testcontainer avoid ever touching settings.DATABASE_URL.
+    # kept on app.state itself, alongside the pool built from it, so /health can open its own
+    # connection from the same dsn without ever reaching for settings.DATABASE_URL either
+    resolved_dsn = dsn or settings.DATABASE_URL
+    app.state.dsn = resolved_dsn
+    app.state.pool = build_pool(resolved_dsn)
 
     @app.get("/health", summary="Service and database health", responses={500: RESPONSE_500})
-    def health(pool: ConnectionPool = Depends(get_pool)):
+    async def health():
         try:
-            with pool.connection(timeout=HEALTH_TIMEOUT_SECONDS) as conn:
-                conn.execute("SELECT 1")
+            await asyncio.wait_for(_check_database(app.state.dsn), timeout=HEALTH_TIMEOUT_SECONDS)
         except Exception as exc:
-            # psycopg_pool already logs the underlying cause at WARNING when a connection attempt fails
+            # covers both a connection/query failure and asyncio.TimeoutError from wait_for itself
             raise ApiError(500, "internal", INTERNAL_MESSAGE, None) from exc
         return {"status": "ok", "version": build_version()}
 

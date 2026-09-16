@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import logging
 from datetime import date
@@ -158,14 +159,21 @@ def test_an_unreachable_database_answers_internal():
     }
 
 
-def test_health_runs_its_probe_query_on_the_pooled_connection(monkeypatch):
+def test_health_checks_the_database_on_its_own_connection_never_the_shared_pool(monkeypatch):
+    # a fake rather than a real database: this file is unit-level and never opens a testcontainer
+    async def _fake_check(dsn):
+        assert dsn == DEAD_DSN
+
+    monkeypatch.setattr(api.main, "_check_database", _fake_check)
     app = create_app(dsn=DEAD_DSN)
     pool = _RecordingPool()
     app.state.pool = pool
     with TestClient(app) as client:
         response = client.get("/health")
     assert response.status_code == 200
-    assert pool.statements == ["SELECT 1"]
+    # nothing reached the shared pool -- it is opened and closed by the lifespan alone, which is
+    # the D-440 fix: a pool with no free connection must not make /health read as a dead database
+    assert pool.statements == []
     # the installed metadata, not just a present key: a build_version naming the wrong distribution
     # reports "unknown" forever and every "version" in body assertion stays green
     assert response.json() == {"status": "ok", "version": version("market-data-platform")}
@@ -199,17 +207,30 @@ def test_health_runs_its_probe_query_on_the_pooled_connection(monkeypatch):
         assert client.get("/health").json()["version"] == "unknown"
 
 
-def test_the_health_timeout_is_passed_to_the_pool(monkeypatch):
+def test_health_is_bounded_by_its_own_timeout_rather_than_the_pools(monkeypatch):
     # the default is read before it is patched: a test that overrides it every time is blind to a
-    # changed default, and psycopg_pool's own 30 s makes /health slower than the checker consuming it
+    # changed default
     assert api.main.HEALTH_TIMEOUT_SECONDS == 2.0
-    monkeypatch.setattr("api.main.HEALTH_TIMEOUT_SECONDS", 9.5)
+    monkeypatch.setattr(api.main, "HEALTH_TIMEOUT_SECONDS", 0.05)
+
+    # a database check that never returns -- if asyncio.wait_for's timeout were not wired to the
+    # same constant, this would hang the test rather than answering 500
+    async def _hangs(dsn):
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(api.main, "_check_database", _hangs)
     app = create_app(dsn=DEAD_DSN)
-    pool = _RecordingPool()
-    app.state.pool = pool
+    app.state.pool = _RecordingPool()
     with TestClient(app) as client:
-        client.get("/health")
-    assert pool.timeouts == [9.5]
+        response = client.get("/health")
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "code": "internal",
+            "message": "the request could not be completed",
+            "detail": None,
+        }
+    }
 
 
 def test_the_lifespan_applies_the_configured_log_level(monkeypatch, _reset_root_log_level):
