@@ -111,14 +111,26 @@ worker count, spill size and byte ratio in the Class A, B and C tables below is 
 plan** and was identical every time it was measured — including on a full re-capture taken from
 scratch after the first set was lost. Those are the numbers the gate rests on. The two
 endpoint-forms subsections under Class A are the exception: there a statement's first run on a
-connection can read more blocks than its later runs, and both publish those first runs — the `/bars`
-and `/daily` subsection inside its five-run medians, the analytics subsection beside medians that
-exclude them.
+connection can read more blocks than its later runs. Neither publishes every first run the same
+way as its medians, and neither is purely inside or outside one. The `/bars`-and-`/daily`
+subsection shows some first runs inside the five-run series it publishes — W-COLD's cap page reads
+`404, 401, 401, 401, 401` and W-WIDE's default-page planning reads `1242, 852, 852, 852, 852`, both
+medians published as the steady value — and its worst first runs, on a connection that has planned
+nothing at all, are reported separately as standalone figures outside any five-run median: a
+brand-new connection's 6,348 planning blocks, `/daily`'s 5,729, `REQUIRE_SYMBOL_SQL`'s 70. The
+analytics subsection's first runs are reported beside the median each excludes, in milliseconds and
+planning blocks only — the execution blocks a first run also reads are in neither subsection's
+tables.
 
 **Wall-clock is not one of them.** On this 5.3 GB working set the same query against the same
 data varies by more than 2× run to run, and a variant measured after three others has read a
 cache they filled. Where a timing is a median of repeats this document says so; where it is a
-single observation it is marked as one. No gate verdict depends on a timing.
+single observation it is marked as one. **Two verdicts in this document are gated on a timing
+rather than on a block count or a node type: Class A's <100 ms target, and 6.3 #13's requirement
+that the deep page's HTTP p50 sit within 1.5× page 1's.** Both are read as a statistic over at
+least five runs and never off a single observation; every other verdict here rests on a count
+that does not move when the cache does. (Ungated timings elsewhere in this document can use fewer
+runs, stated at each one — the 1% threshold reading further down is a three-run median.)
 
 **Buffer counts come off the root plan node and are never summed.** Postgres buffer counts are
 cumulative: every node already includes its children, so adding them counts the same read once
@@ -150,18 +162,21 @@ no figure moves;
 the `hit=`-requiring form survives in the three harnesses that perform **no** cross-check at all,
 which is where the residual risk actually sits.
 
-**Every measurement here is also a fresh connection — with the same two exceptions.** Each
+**Every measurement here is also a fresh connection — with two exceptions.** Each
 harness spawns a new `docker compose exec` per query, which pays catalog and sort-operator
 lookups a warm backend already has cached — so the published counts are cold and self-consistent with each other. Running the ten
 committed query files five times inside one continuous `psql` session instead gives root-block
 counts a few blocks lower — `06_daily_rollup.sql` settles at 414 against the published 420, six
 blocks and 1.43%; `03_gaps.sql` at 418 against 431, thirteen blocks and 3.02%. Neither moves a
 target or a ratio in this document, and a verifier who re-runs them in one session and finds
-these numbers has not found a defect. **Both endpoint-forms subsections under Class A are measured
-inside one continuous session per harness and are therefore already on the lower side of this
-pair**, which is exactly why a figure from either must not be compared against a published
-fresh-connection count without saying so — one paragraph in the first of them did, and is
-corrected in place.
+these numbers has not found a defect. **The `/bars`-and-`/daily` subsection is measured inside one
+continuous session per harness and is therefore already on the lower side of this pair.** The
+analytics subsection's SQL medians are measured the same way, but its HTTP figures are not — they
+ran through the compose `app` service's own connection pool, not a harness session — and it
+separately publishes fresh-connection first runs on the **upper** side of this pair (108.174,
+402.414 and 50.787 ms). So only a subsection's SQL medians support a lower-side reading; a figure
+from either must not be compared against a published fresh-connection count without saying which
+kind of figure it is — one paragraph in the first of them did, and is corrected in place.
 
 ## The heap the numbers rest on
 
@@ -443,7 +458,7 @@ Neither planner ever chose the index-only scan on its own: free-choice block rat
 both, which is the seq scan. The mechanism is real, it does what it always said it did, and it
 is worth **3.16×** — not 10×.
 
-## Class A — the three queries the API serves
+## Class A — the queries and endpoint forms the API serves
 
 Measured with the parameters section 4's table binds, five runs each, median reported. Unbound
 these run over seven years and miss 100 ms by three orders of magnitude on a database with
@@ -628,12 +643,17 @@ W-WIDE's plan and found a plain `Append`: each child's range already gives the o
 | W-WIDE | 71 | 852 blocks | 19 blocks | **871 blocks** |
 
 **So opening 71 partitions instead of three costs a default page 15.8× more blocks, not
-nothing.** The execution halves are within one block of each other at every fetch, which is a
-real result and the reason a keyset page is an index descent per partition under an ordered
-`Append` with a bound `LIMIT` rather than a scan — the partition count moves the setup and not
-the work. But the setup is what it moves, and the setup is 852 blocks: **23.7× the planning of a
-three-partition window, 14.7× its planning time, and 7.0× W-WIDE's own execution time.** A page
-whose execution is 0.23 ms spends 1.62 ms being planned.
+nothing.** The execution halves are within one block of each other at `fetch = 101` and
+`fetch = 1,001` — not at `fetch = 10,001`, where they read 168, 401 and 167 (above). At those two
+sizes it is a real result — but not because the plan descends into every partition it opens. An ordered
+`Append` under a bound `LIMIT` stops once the page is full: the saved W-WIDE plan for this cell
+executes exactly **one** of its 71 children (`bars_2020_08`, the earliest and so the first in
+`Append` order, 19 blocks) and lists the other 70 as `(never executed)`. One descent per child is
+what a `Merge Append` would cost; a plain `Append` under a `LIMIT` costs only as many descents as
+filling the page needs, whatever the child count. The partition count moves the setup — planning
+— and not the work. And the setup is 852 blocks: **23.7× the planning of a three-partition window,
+14.7× its planning time, and 7.0× W-WIDE's own execution time.** A page whose execution is 0.23 ms
+spends 1.62 ms being planned.
 
 Worse on a connection that has planned nothing at all — and that is a narrower condition than "has
 not planned this statement". The artifact holds **three** states, not two: steady **852**; **1,242**
@@ -642,7 +662,9 @@ connection. A pooled connection that has already run this statement over other w
 middle one when this window's partitions are new to it; one that has run only other statements can
 pay more. `/bars` page 1 over W-WIDE's span, planned for the first time on a connection whose
 earlier statements had already planned all 71 children, read **1,920** planning blocks (see "First
-runs" in the analytics subsection below). W-WIDE at fetch = 10,001 reads **6,348 planning blocks**
+runs" in the analytics subsection below) — 1,068 blocks above the steady 852, though by this
+model's own terms no child was newly planned here; what the extra 1,068 pay for is not measured.
+W-WIDE at fetch = 10,001 reads **6,348 planning blocks**
 against 167 execution blocks. The block count is exact and reproduces: five fresh connections on
 2026-09-09 read 6,348 on every one. The time does not reproduce as narrowly — the same five read
 6.40, 6.70, 7.17, 7.89 and 10.55 ms, median **7.17 ms**, so the 5.893 ms recorded from a single
@@ -673,8 +695,9 @@ requests is arguing for a narrower default window or for `DEEP_PAGE_DEPTH`, not 
 **Answered at Feature 7, in "The analytics endpoint forms" below.** The verdict was read off
 `/analytics/largest-moves`, the access path the index was built for, where the window cap holds a
 page to at most five children: page 1 at the default and `min_move_pct = 0` plans 39 blocks on W-HOT
-and 36 on W-COLD, against W-WIDE's 852, and executes 9 against 121. Execution is where the two
-windows differ, and the index is kept. The deep-page half is measured there too: over W-WIDE's span,
+and 36 on W-COLD — both warm-connection numbers for a different statement, set beside W-WIDE's 852
+only for scale — and executes 9 against 121. Execution is where the two windows differ, and the
+index is kept. The deep-page half is measured there too: over W-WIDE's span,
 the deepest `/bars` page for `AAPL`, with 575,961 rows before its cursor, plans 8 blocks where page
 1 plans 852, because the cursor prunes what the window does not.
 
@@ -796,15 +819,20 @@ run, one recorded warm-up and then five runs each, median reported.
 **Four conditions this subsection does not inherit.** First, each SQL harness ran in **one psycopg
 session with automatic statement preparation turned off**, so every run is planned the way an
 endpoint's first executions on a connection are. The service's own pool leaves psycopg's automatic
-preparation on, so its connections prepare a statement after five executions, and no plan here was
-captured from a prepared statement. Every SQL median is a warm-connection number: each `EXPLAIN`
+preparation on, so its connections prepare a statement after five executions, and no plan in the
+tables below was captured from a prepared statement — the one exception is "The single-symbol deep
+page" further down, whose custom-versus-generic comparison measures exactly that. Every SQL median
+is a warm-connection number: each `EXPLAIN`
 median excludes a recorded first run, and every such first run is in "First runs" at the end, while
 the client-side timings and the HTTP p50s include their first runs. Second, the execution block
 counts of the Class A table, of both W-HOT cells, of the deep page, of both `/bars` pages and of
 both threshold readings were **cross-checked**: the JSON root node's count against the first
-`Buffers:` line of the same statement's text plan, and they agreed on every one. The W-COLD cells,
-the `OFFSET` statement and the 2026-06-25 page were not cross-checked, and no planning count here
-is. Third, every time labelled HTTP is **end-to-end** through the compose `app` service, the form
+`Buffers:` line of the same statement's text plan, and they agreed on every one. The `OFFSET`
+statement and the 2026-06-25 page were not cross-checked, and no planning count here is. The
+W-COLD cells were independently re-measured and cross-checked on 2026-09-15: the same two-way
+agreement held on all ten runs (five per fetch), reproducing the 121-and-1,024 block figures below
+to the block, at medians of 0.721 ms and 5.828 ms — the millisecond figures published at those two
+cells below are from the original 2026-09-14 measurement, 0.666 ms and 5.624 ms. Third, every time labelled HTTP is **end-to-end** through the compose `app` service, the form
 6.3 #13 gates the deep page on; every other time here is SQL. Fourth, **every
 `/analytics/largest-moves` figure is for the statement as it is now**, joined to `market_days` on
 the session bounds alone, **at `min_move_pct = 0`** unless it says otherwise. The exceptions say so
@@ -825,10 +853,13 @@ cursor.
 | `/analytics/largest-moves` | 0.921 0.921 0.922 0.935 1.945 | **0.922 ms** | 9 | 39 blocks, 0.18 ms | <100 ms | pass |
 
 **All three medians pass; `/analytics/volatility`'s first run did not.** It was the first statement
-on a fresh connection and read **108.17 ms of execution** — above the 100 ms target — plus **4,875
-planning blocks in 153.19 ms**, where its planning then settled at 571 blocks. The gate is the
-five-run median, as it is for every Class A row. Like `/daily`'s, **these are warm-connection
-numbers**, and volatility's first run on a fresh connection was not inside the target.
+on a fresh connection and read **108.17 ms of execution** — above the 100 ms target, at **423
+execution blocks** against the 414 its median settles at — plus **4,875 planning blocks in
+153.19 ms**, where its planning then settled at 571 blocks. `/analytics/gaps`'s first run, on a
+connection that had already run other statements, reads **428 execution blocks** against its own
+418-block median, in 31.84 ms. The gate is the five-run median, as it is for every Class A row.
+Like `/daily`'s, **these are warm-connection numbers**, and volatility's first run on a fresh
+connection was not inside the target.
 
 #### `/analytics/largest-moves` — the page caps
 
@@ -849,26 +880,60 @@ On W-HOT, whose text plans were saved, the loop's inner side is the window's 62 
 from `market_days_pkey` and materialised.
 
 **Verdict: `AGG_PAGE_DEFAULT = 100` and `AGG_PAGE_MAX = 1000` are confirmed, not moved.** At
-`min_move_pct = 0` the worst page at the cap is **W-COLD at 1,024 execution blocks** — 8.00 MiB — in
-5.62 ms, and **1,060 whole-page**. At the default the worst is W-COLD at 121 execution blocks and
-157 whole-page. On W-HOT those read 14 and 53 at the cap, and 9 and 48 at the default. Neither is
-near a limit worth lowering a cap for, and raising the cap has no measurement asking for it. One
-pair, four endpoints, confirmed at these numbers.
+`min_move_pct = 0`, page 1's worst reading at the cap is **W-COLD at 1,024 execution blocks** —
+8.00 MiB — in 5.62 ms, and **1,060 whole-page**. At the default, page 1's worst is W-COLD at 121
+execution blocks and 157 whole-page. On W-HOT those read 14 and 53 at the cap, and 9 and 48 at the
+default. **On W-COLD, a cursor at a session's last minute reads more than page 1 does; on W-HOT the
+same kind of cursor does not.** Measured 2026-09-15, text-cross-checked on every run, at the last
+minute of two sessions early in each window — the window's own first session, and the session
+before the longest gap to the next one (2025-04-01 and 2025-04-17 on W-COLD; 2026-04-01 and
+2026-04-02 on W-HOT) — neither cursor deep into either window. On W-COLD such a cursor reads 1,048
+or 1,053 execution blocks at the cap and 145 or 150 at the default; on W-HOT the same two picks
+read 9 and 14, identical to page 1. The extra blocks on W-COLD are the out-of-session run the scan
+crosses before it reaches a qualifying row, not a function of how deep the cursor sits. That does
+not move the verdict — the four page-1 readings above stay the numbers a
+cap is sized from, and the caps bound rows returned rather than rows read (below), so a deeper
+cursor reading more blocks at the same page size is not a reason to move either cap. Neither the
+page-1 nor the deeper readings are near a limit worth lowering a cap for, and raising the cap has
+no measurement asking for it. One pair, four endpoints, confirmed at these numbers.
 
 **The caps bound the rows a page returns, not the rows it reads, and a positive threshold separates
 the two.** At `min_move_pct = 0` every bar passes the threshold, so the loop stops once `limit + 1`
 bars inside a session have joined. A rarer threshold makes the same loop read on until it has found
 that many. On W-HOT page 1 at the default limit, one first run and three runs each: at `min_move_pct
 = 1` the page read **3,208 blocks in 128.3 ms** to return its 101 rows, and at `min_move_pct = 100`,
-which no bar in the window meets, it read every bar in the window — **12,039 blocks in 518.1 ms** —
-and returned none. Timed from the client they read 130.3 and 493.8 ms. The 1% page is above the
-Class A target, whose pinned threshold is 0. A smaller limit shortens that read only by stopping at
-fewer qualifying rows, and not at all for a threshold nothing meets.
+which no bar in the window meets, it read every bar in the window through the hot-window index —
+**12,039 blocks in 518.1 ms** (three `Index Only Scan`s on `hot_idx`, 3,976 + 3,890 + 4,173 blocks,
+0 heap fetches; the same three children's heaps hold **24,889 blocks** in total — 8,629 + 8,219 +
+8,041, read off the "as first shipped" reading's parallel sequential scans over these same children
+below, not measured on this index-only statement) — and returned none. Timed from
+the client they read 130.3 and 493.8 ms. The 1% page is above the Class A target, whose pinned
+threshold is 0. A smaller limit shortens that read only by stopping at fewer qualifying rows, and
+not at all for a threshold nothing meets.
 
-#### Why every page is an index descent, which it was not as first shipped
+**That is W-HOT's cost, and 67 of the 71 partitions carry no hot-window index — on those the same
+threshold reads far more.** On W-COLD, page 1 at the default limit, measured 2026-09-15, read-only:
+at `min_move_pct = 100` the plan is a plain `Index Scan` on each child's `_ts_symbol_idx` — the
+index every partition has — visiting the heap on every row because neither `open` nor `close` is
+in it, and it reads **1,737,160 execution blocks**, in 1,508.8 ms on the first run and 943.6 ms on
+the second, to return 0 rows; at `min_move_pct = 1` it reads **126,182 blocks**, in 80.9 ms on the
+first run and 47.1 ms on the second. The caps still bound only what a page returns, and
+`min_move_pct` is unbounded; in place of a bound on the parameter, every API statement on a pooled
+connection now runs under a 5 s `statement_timeout`, and a pooled checkout now waits at most 5 s
+before giving up — both answering `500 internal`. (`/health` is bound by neither: it runs on its
+own connection outside the shared pool, with its own 2 s wait.) The checkout bound has been
+measured over HTTP, forcing a real pool timeout; the statement bound is exercised at the connection
+level — the session carries the configured value, and a statement past a shortened one is
+cancelled — but the status a cancelled statement produces over HTTP is not separately measured.
+The slowest threshold reading among the medians in this subsection —
+1.5 s — completes inside either bound rather than against it; a first run on W-HOT at
+`min_move_pct = 100` ("First runs" below) reads higher still, at 1,590.699 ms, and also completes
+inside them.
+
+#### Why a page is usually an index descent, and where it still is not
 
 **The verdict above rests on a change to the statement, made in this feature and measured both
-ways.** As first shipped, the endpoint joined `bars` to `market_days` the way `06_daily_rollup.sql`
+ways, at `min_move_pct = 0`.** As first shipped, the endpoint joined `bars` to `market_days` the way `06_daily_rollup.sql`
 does: `m.day = (b.ts AT TIME ZONE 'America/New_York')::date AND b.ts >= m.open_ts AND b.ts <
 m.close_ts`. The planner estimated that join badly. At page 1 with `fetch = 1,001` it put the join
 at **1,280 rows per process**, where the three processes returned **669,829** each on average. The
@@ -892,7 +957,7 @@ checked read-only on 2026-09-14. So the bounds alone imply the equality and matc
 session per bar. The statement now joins on them alone, and with no equality clause neither a hash
 join nor a merge join is available to the planner. The same planning probes on the changed statement
 found no hash join and no sort at any of the eleven probed values of `fetch`, on page 1 and at the
-deep cursor, or at any probed cursor position. The integration suite holds that: a test asserts the
+deep cursor, or at any cursor position probed on W-HOT (see the exception below). The integration suite holds that: a test asserts the
 plan carries no hash join on a fixture where the first-shipped form already hashes, and it fails
 when the equality is put back.
 
@@ -912,9 +977,36 @@ The change trades index probes for an in-memory filter. The equality let the loo
 Without it the loop filters each bar against the 62 materialised sessions: 10,564 rows removed by
 the join filter on page 1. So blocks fall in every row of the table, while the `EXPLAIN ANALYZE`
 times in the first and third rows rise. Timed from the client, without `EXPLAIN`, the rise is
-smaller: page 1 runs 1.20 ms where it ran 1.12, and the deep page 1.14 ms where it ran 0.95. Over
-HTTP the p50s were 4.80 ms before and 3.33 ms after for page 1, and 4.18 and 3.74 ms for the deep
-page. Every one of those times is far inside the Class A target.
+smaller: page 1's median runs 1.20 ms where it ran 1.12, and the deep page's median 1.14 ms where
+it ran 0.95. Over HTTP the p50s were 4.80 ms before and 3.33 ms after for page 1, and 4.18 and
+3.74 ms for the deep page. Every one of those times is far inside the Class A target.
+
+**The fix is not universal, even now — the exception is a window's own last session, when that
+session also ends a partition without the hot index.** Such a cursor still leaves the ordered plan
+for a `Bitmap Heap Scan` with a top-N `Sort`, at `min_move_pct = 0`, and only over the closing
+slice of that session. On W-COLD (2025-04-01..06-30, last session 2025-06-30), swept every 5
+minutes: at `fetch = 101` the flip covers 11 of 79 five-minute positions checked (2025-06-30
+19:00Z-19:50Z), at `fetch = 251` 22 of 79 (18:05Z-19:50Z), at `fetch = 1,001` 51 of 79
+(15:40Z-19:50Z); the session's last two positions, 19:55Z and 20:00Z, do not flip at any fetch.
+`EXPLAIN ANALYZE` at 2025-06-30 19:00Z, `fetch = 101`, reads 28.4, 30.4 and 28.3 ms against
+0.62–0.76 ms on the index path (bitmap scans disabled), and client-timed medians read 13.6 ms
+against page 1's 1.22 ms; at 15:40Z, `fetch = 1,001`, 194.1, 104.7 and 101.4 ms against 5.8–6.2 ms,
+client-timed medians 48.7 ms against 5.4 ms. The 2020-08-01..10-30 window's plan flips the same
+way — planned and found to hash, not executed and timed. Swept and found not to flip: W-HOT itself,
+whose own last session sits in a hot partition; 2025-10-15..2026-01-12, whose last session
+(2026-01-12) is not its partition's last day; 2026-02-01..04-30, whose last session sits in the hot
+`bars_2026_04`; and every month-end session that is not a window's own last session — 0 of 1,551
+cells swept over seven such sessions in three cold windows. The cause is a second estimate the
+join-bounds change did not touch: the planner multiplies the redundant `b.ts >= after_ts` bound's
+selectivity by the row comparison's, so at 2025-06-30 19:00Z it estimates 43 rows where 4,731
+remain, and a bitmap scan plus a sort of "43 rows" looks cheaper than the ordered scan. The sort
+this produces stays bounded — it sees only the rows left in the window's own final session. W-HOT
+never shows it: the same estimate collapses there too, but its own index-only descent already wins
+on cost before a bitmap plan enters the comparison — an inference from the estimate collapsing the
+same way, since no bitmap plan was ever forced or costed on W-HOT itself. Section 4's join
+predicate is kept as written; this tail is documented rather than designed around, and it is why
+6.3 #13's condition (d) — no Sort at the deep cursor — is checked at its one pinned window, W-HOT,
+rather than asserted for every window a client could request.
 
 #### The deep page — keyset at `DEEP_PAGE_DEPTH`
 
@@ -936,22 +1028,40 @@ endpoint's own encoder.
 
 (b) Every deep response held 100 rows and a non-null `next_cursor`, asserted on all eleven.
 
-(c) The deep page's HTTP p50 is **1.125×** page 1's, against a target of under 1.5×.
+(c) **Read as p50 against p50, both over at least five runs — the reading the owner fixed on
+2026-09-15.** The deep page's HTTP p50 is **1.125×** page 1's, against a target of under 1.5×;
+re-measured 2026-09-15, page 1's p50 is **3.343 ms** and the deep page's is **3.511 ms**, a ratio
+of **1.050×**. Read per request instead, the first deep run of each eleven-round series is its
+slowest — 8.015 ms recorded, 10.382 ms re-measured — and exceeds 1.5× the page-1 p50 on its own (a
+bound of 4.990 ms recorded, 5.014 ms re-measured); that reading sits inside the p50 statistic
+rather than being checked against the bound by itself, which is why the gate is read as p50
+against p50 and not as every individual run against it.
 
 (d) At the deep cursor the plan has **no Sort**. A plain `Append` over **2 children** —
-`bars_2026_05` and `bars_2026_06` — reads each through an `Index Only Scan` on its own `hot_idx`
-with 0 heap fetches, as the outer side of the nested loop. The page fills from the first child, so
-the second is listed as never executed, and it is counted. Execution is 8 blocks and 0.581 ms;
-planning is 19 blocks and 0.141 ms. With the redundant `b.ts >= after_ts` bound deleted, the same
-statement at the same cursor plans **all 71 children**, and page 1 goes from 3 to 71 the same way.
-Neither form prints a `Subplans Removed` line: psycopg sends the bound's value and the planner
-prunes on it, so the pruned children are absent from the plan rather than counted at executor start.
-Counting the children that survived is the measurement. Planning is a second witness: 39 blocks on
-page 1 and 19 at the deep cursor, against 852 for the 71-child `/bars` window above.
+`bars_2026_05` and `bars_2026_06` — is planned to read each through an `Index Only Scan` on its
+own `hot_idx` with 0 heap fetches, as the outer side of the nested loop, but only the first
+actually runs: the page fills from `bars_2026_05` alone, so `bars_2026_06` is listed in the plan as
+never executed, and it is still counted as one of the two children. Execution is 8 blocks and
+0.581 ms; planning is 19 blocks and 0.141 ms. With the redundant `b.ts >= after_ts` bound deleted,
+the same statement at the same cursor plans **all 71 children**, and page 1 goes from 3 to 71 the
+same way. Neither form prints a `Subplans Removed` line, and the cause is the bound's **type**,
+not psycopg bindings in general: `_instant_bounds` binds a `timestamptz`, which the planner can
+fold into a range and prune by at plan time, so a pruned child never enters the plan for the line
+to count. `01_volatility.sql` and `03_gaps.sql` bind date-typed bounds through the same psycopg
+call on the same connection and print `Subplans Removed: 68` — pruning that happens at executor
+init instead, because a `date` bound is not foldable the same way. On a connection shaped like the
+pool's, `_MOVES_SQL` itself stays on a custom plan — a probe found it generic on 0 of 41 executions after
+psycopg's default five-execution threshold — so the plan measured here is the plan this endpoint
+actually serves, unlike `/bars` above. Counting the children that survived is the measurement.
+Planning is a second witness on a warm connection: 39 blocks on page 1 and 19 at the deep cursor.
+That is not directly comparable to the 852 above, both because 852 is a different statement's
+figure and because 19 is not the deep cursor's own number on a fresh connection: opened cold, the
+same 2-child plan reads **595** planning blocks, measured 2026-09-15. A connection that has
+already planned `_MOVES_SQL` is what the 19 describes.
 
-Page 1's first request read 59.3 ms and one later page-1 request 21.7 ms. Each p50 is over all
-eleven runs, with nothing discarded. The 2026-06-25 row is not part of the gate: it is the page
-that, as first shipped, cost 28.97× page 1.
+Page 1's first **HTTP** request read 59.3 ms and one later page-1 HTTP request 21.7 ms. Each p50
+is over all eleven runs, with nothing discarded. The 2026-06-25 row is not part of the gate: it is
+the page that, as first shipped, cost 28.97× page 1.
 
 #### The offset number
 
@@ -967,7 +1077,14 @@ All three timed from the client over SQL, on one connection:
 750 times its blocks.** The `OFFSET` statement returns one row where the keyset page returns 101, so
 the comparison favours it. Its blocks come from one `EXPLAIN (ANALYZE, BUFFERS)` run, whose own
 execution read 5,716 ms. The times are five runs of the statement without `EXPLAIN`, and their
-median includes the first of them, 5,224 ms.
+median includes the first of them, 5,224 ms — but the two keyset rows above are not on the same
+footing: by the time their five runs were taken, the statement had already run seven more times at
+the same cursor, so their medians carry no cold first execution the way the `OFFSET` row's does.
+Dropping every series' first run instead, the ratio is **1,866×** rather than 1,915×. Numerically,
+though, it is the keyset row's own first entry that stands out more relative to its series' median —
+**2.725×** that median (3.095 ms against 1.136 ms) — against the `OFFSET` row's **2.402×** (5,224 ms
+against 2,175 ms); the ratio still barely moves because the `OFFSET` series' first-run excess is the
+larger one in absolute milliseconds.
 
 As first shipped, the same `OFFSET` statement named the same row. It ran on three processes as a
 hash join over sequential scans of the three children, with an external merge sort that spilled to
@@ -989,11 +1106,23 @@ exactly the final 1,000 rows and has no successor, which the harness asserts.
 | deepest | 20 blocks, 0.361 ms | 8 blocks | 1 | 21.30 ms |
 
 Flat: the deepest page's HTTP p50 is **0.963×** page 1's. Page 1 is an ordered `Index Scan` on each
-child's primary key under a plain `Append`. The deepest page is a bitmap scan of the one surviving
-child's primary key and a small sort. Planning is the axis that moves, and in the deep page's
-favour: page 1 plans all 71 children in 852 blocks and the deepest page plans 1 in 8. Most of each
-HTTP figure is spent outside the statement: page 1's execution and planning come to 2.11 ms of its
-22.12.
+child's primary key under a plain `Append`. The deepest page's **custom** plan — what a fresh or
+lightly used connection serves — is a bitmap scan of the one surviving child's primary key and a
+small sort. Planning is the axis that moves, and in the deep page's favour: page 1 plans all 71
+children in 852 blocks and the deepest page plans 1 in 8. Most of each HTTP figure is spent outside
+the statement: page 1's execution and planning come to 2.11 ms of its 22.12. Re-measured
+2026-09-15: page 1's HTTP p50 is **19.913 ms**, the deepest page's is **18.427 ms**, a ratio of
+**0.925×** — consistent with the figures above.
+
+**On a connection shaped like the pool's, the deepest page's plan changes — because `api/deps.py`
+sets no `prepare_threshold` and psycopg's default is 5.** The custom plan above is what the statement runs
+for its first ten executions on a connection; from the eleventh it goes generic — `Index Scan` on
+the surviving child's primary key, `Subplans Removed: 70`, no sort, 20 execution blocks and 0
+planning blocks, measured 2026-09-15 on a connection shaped like the pool's. Page 1's client time
+falls with it: the five custom-plan executions measured 15.531, 6.025, 9.967, 5.142 and 5.363 ms
+(median 6.025 ms), and the three generic-plan executions measured after them read 4.492, 2.772 and
+2.759 ms. A connection that has served ten or more `/bars` requests serves the generic plan, not
+the one above.
 
 #### First runs
 
@@ -1102,15 +1231,24 @@ the endpoint existed.
 chose each child's `bars_2026_0N_hot_idx` as an `Index Only Scan` with 0 heap fetches, on page 1 at
 both page sizes and at the 1,000,000-deep cursor, all at `min_move_pct = 0`: **9 execution blocks at
 the default page and 14 at the cap**, and 8 at the deep cursor. A positive threshold reads further
-through the same index — 3,208 blocks for a default page at 1%, and all 12,039 of the window's for a
-threshold no bar meets. The same statement a year earlier, on children that carry no hot-window
-index, reads each child's `_ts_symbol_idx` with an `Index Scan` and visits the heap: **121 blocks at
-the default and 1,024 at the cap** (see "The analytics endpoint forms" above). The saving is in
-blocks, not time: warm, the hot-window page ran 0.922 ms against 0.666 ms at the default and 5.811
-ms against 5.624 ms at the cap. W-COLD is a different quarter's data as well as a different index
-set, so the table above stays the index's like-for-like measurement, and the endpoint agrees with it
-in direction. No `/bars` page measured has used the index — the planner chose each child's primary
-key every time — so this endpoint is its whole case.
+through the same index — 3,208 blocks for a default page at 1%, and all **12,039** of the window's
+for a threshold no bar meets (three `Index Only Scan`s on the hot index, 3,976 + 3,890 + 4,173
+blocks, 0 heap fetches; the same three children's heaps hold **24,889 blocks** in total — 8,629 +
+8,219 + 8,041, read off the as-first-shipped statement's parallel sequential scans over these same
+children (see "Why a page is usually an index descent" above), not measured on this index-only
+statement). That is W-HOT's cost.
+**On a window without the hot index the same threshold reads far more — 126,182 blocks at 1% and
+1,737,160 at a threshold no bar meets, on W-COLD** — because there the planner has only the plain
+`(ts, symbol)` index and must visit the heap for `open` and `close` (see the threshold paragraph in
+"The analytics endpoint forms" above). The same statement a year earlier, at `min_move_pct = 0` on
+children that carry no hot-window index, reads each child's `_ts_symbol_idx` with an `Index Scan`
+and visits the heap: **121 blocks at the default and 1,024 at the cap** (see "The analytics
+endpoint forms" above). The saving is in blocks, not time: warm, the hot-window page's median ran
+0.922 ms against 0.666 ms at the default and 5.811 ms against 5.624 ms at the cap. W-COLD is a
+different quarter's data as well as a different index set, so the table above stays the index's
+like-for-like measurement, and the endpoint agrees with it in direction. No `/bars` page measured
+has used the index — the planner chose each child's primary key every time — so this endpoint is
+its whole case.
 
 **It holds only while the session join stays on the bounds alone.** With the day equality back in
 the join, the page at the cap leaves this index for sequential scans, and a page late in a window

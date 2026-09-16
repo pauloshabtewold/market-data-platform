@@ -67,6 +67,14 @@ universe may be cut, and a stale `N` overstates reachable page depth.
 | `HEAP_INDEX_BYTE_RATIO` | 3.1656441717791411 | 4,227,072 heap bytes ÷ 1,335,296 primary-key index bytes |
 | `HEAP_INDEX_COVERING_RATIO` | 1.8924 | 4,211,064,832 heap bytes ÷ 2,225,233,920 covering-index bytes |
 
+The Value column above uses thousands separators for readability; both `.env` and `.env.example`
+take plain digits, so wherever the key is given a real value it reads `DEEP_PAGE_DEPTH=1000000` —
+`DEEP_PAGE_DEPTH=1,000,000` fails config's integer parser. `.env` is never committed and carries
+that real value once measured. `.env.example`, which is committed and every reader of this
+repository can check, carries the key empty on purpose, along with the other three measured
+constants: they are recorded in this document rather than defaulted or checked in with a real
+number.
+
 `TD` is the **minimum** trading-day count over every 90-calendar-day window in the loaded calendar,
 read from `market_days` rather than assumed. It is a minimum and not a sample because the count
 swings **58–64** across this history, so an arbitrary start date makes the derived value a coin

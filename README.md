@@ -26,7 +26,8 @@ on the loaded data, not projected onto it.
 ## Quickstart
 
 ```bash
-cp -n .env.example .env                   # then fill in ALPACA_KEY_ID and ALPACA_SECRET_KEY
+cp -n .env.example .env                   # then fill in ALPACA_KEY_ID, ALPACA_SECRET_KEY and the
+                                          # four measured constants (Methodology)
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 docker compose up -d --wait db
 .venv/bin/python -m db.migrate            # separate operator action; ingest never migrates
@@ -70,10 +71,14 @@ planner should pick and did, a candidate index built and shown not to be chosen,
 and — for three of the six — a byte ratio used as a prediction that had to survive being
 tested.
 
-**Deep pages are keyset, not `OFFSET`:** 1,000,000 rows into a 90-day window, a
-`/analytics/largest-moves` page answers over HTTP in 3.74 ms at the median against page 1's
-3.33 ms, and reaching that row with `OFFSET` takes 2,175 ms over SQL, 1,915 times the keyset
-page's 1.136 ms timed the same way.
+**Deep pages are keyset, not `OFFSET`:** at `min_move_pct = 0`, 1,000,000 rows into a 90-day
+window, a `/analytics/largest-moves` page answers over HTTP in 3.74 ms at the median against page
+1's 3.33 ms. Reaching that row with `OFFSET` costs 2,175 ms at the median over SQL against the
+keyset page's 1.136 ms at the same cursor, a published ratio of 1,915 times. The two series are
+not symmetric: the `OFFSET` median includes that statement's own cold first execution, 5,224 ms
+against a 2,175 ms median; the keyset series carries a smaller first-run outlier of its own, 3.095
+ms against a 1.136 ms median — proportionally the larger of the two, though far smaller in absolute
+terms. Dropping each series' first run leaves 1,866 times.
 
 **There is no incremental ingest.** A run re-walks every requested unit and skips what is
 already recorded. Widening the window and re-running is the supported path.
