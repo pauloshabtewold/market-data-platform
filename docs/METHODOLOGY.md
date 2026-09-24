@@ -73,7 +73,9 @@ take plain digits, so wherever the key is given a real value it reads `DEEP_PAGE
 that real value once measured. `.env.example`, which is committed and every reader of this
 repository can check, carries the key empty on purpose, along with the other three measured
 constants: they are recorded in this document rather than defaulted or checked in with a real
-number.
+number. An empty value reads as unset for these four keys and for no others, so a copy of
+`.env.example` constructs as it stands while every other key refuses or reports an empty value
+under its own name rather than falling through to a default.
 
 `TD` is the **minimum** trading-day count over every 90-calendar-day window in the loaded calendar,
 read from `market_days` rather than assumed. It is a minimum and not a sample because the count

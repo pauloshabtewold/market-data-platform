@@ -20,6 +20,20 @@ the first two take no `limit` or `cursor` and answer with `next_cursor` always n
 OpenAPI document is generated from the routes and served at `/openapi.json`, with an
 interactive page at `/docs`.
 
+**Every refusal has one shape**, whatever the status: an `error` object carrying `code`, `message`
+and `detail`. All three keys are present on every error body, `detail` being nullable rather than
+optional, so a generated client can read it without a presence check. `code` is a closed vocabulary
+of five — `invalid_params`, `invalid_cursor`, `invalid_range`, `unknown_symbol` and `internal` — and
+the published document names those five rather than a bare string. Each route documents the statuses
+its own handler answers — across the six data and analytics routes, 400 and 500 everywhere, 404 on
+the four that take a symbol, 422 on the five that take a window: `/symbols` takes no window and so
+cannot answer a 422, and documents a catch-all entry in place of one. `/health` takes no parameter
+and documents 500 alone. A wrong method answers 405 with code `invalid_params` in the same shape,
+except for `HEAD`, which carries the status and no body because HTTP forbids one; no route documents
+the 405, and `/symbols`'s catch-all entry is the only place the document covers it. A
+500 is the service refusing to complete the request, not the client's fault, and the bounds in
+[Query performance](docs/QUERY_PERFORMANCE.md) say when one is a timeout.
+
 Loaded: **41,668,537 bars** across the full universe, in **42.4 minutes**. That is measured
 on the loaded data, not projected onto it.
 
@@ -75,10 +89,11 @@ tested.
 window, a `/analytics/largest-moves` page answers over HTTP in 3.74 ms at the median against page
 1's 3.33 ms. Reaching that row with `OFFSET` costs 2,175 ms at the median over SQL against the
 keyset page's 1.136 ms at the same cursor, a published ratio of 1,915 times. The two series are
-not symmetric: the `OFFSET` median includes that statement's own cold first execution, 5,224 ms
-against a 2,175 ms median; the keyset series carries a smaller first-run outlier of its own, 3.095
-ms against a 1.136 ms median — proportionally the larger of the two, though far smaller in absolute
-terms. Dropping each series' first run leaves 1,866 times.
+not symmetric, and the asymmetry has a cause: the `OFFSET` statement was timed from its first
+execution, so its median carries a cold one, 5,224 ms against a 2,175 ms median, while the keyset
+runs followed seven executions at the same cursor and so carry none. The keyset series has a
+first-run outlier of its own, 3.095 ms against a 1.136 ms median — proportionally the larger of the
+two, though far smaller in absolute terms. Dropping each series' first run leaves 1,866 times.
 
 **There is no incremental ingest.** A run re-walks every requested unit and skips what is
 already recorded. Widening the window and re-running is the supported path.
