@@ -1,3 +1,7 @@
+import importlib.util
+import sys
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -5,8 +9,32 @@ import config
 from config import settings
 
 
+def _e2e_selection():
+    # loaded by path rather than as `tests.e2e_selection`: pytest puts its own rootdir on sys.path,
+    # so a run whose rootdir sits outside this repository has no importable `tests` package
+    module = sys.modules.get("_e2e_selection")
+    if module is None:
+        path = Path(__file__).resolve().parent.parent / "e2e_selection.py"
+        spec = importlib.util.spec_from_file_location("_e2e_selection", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["_e2e_selection"] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+deselect_untyped_e2e_items = _e2e_selection().deselect_untyped_e2e_items
+
+
+def pytest_collection_modifyitems(config, items):
+    # this file loads even when a conftest-scope option such as --confcutdir skips tests/conftest.py,
+    # so the refusal of any test here that no typed argument names has to live here too
+    deselect_untyped_e2e_items(config, items)
+
+
 @pytest.fixture(scope="session")
-def client():
+def client(_e2e_configuration_is_valid):
+    # after the check, whatever order autouse fixtures happen to run in: an empty E2E_BASE_URL must
+    # never become a client
     with httpx.Client(base_url=settings.E2E_BASE_URL, timeout=30) as c:
         yield c
 
