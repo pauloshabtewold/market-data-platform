@@ -1,8 +1,10 @@
 import re
+import string
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from math import isclose, sqrt
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -68,9 +70,113 @@ def _regular_session_bars(dsn, start, end):
     )
 
 
-def _sql_without_comments(sql: str) -> str:
-    # a `--` comment can span exactly the text a plan-shape or text-presence assertion reads
-    return " ".join(re.sub(r"--[^\n]*", "", sql).split())
+# one lexeme at a time, in the order Postgres's scanner tries them at a position: a comment can
+# hold text that reads like a column reference, and a string text that reads like a comment
+_SQL_LEXEME = re.compile(
+    r"""
+      (?P<space>\s+)
+    | (?P<line_comment>--[^\n]*)
+    | (?P<block_comment>/\*)
+    | (?P<unicode_identifier>[Uu]&")
+    | (?P<escape_string>[Ee]'(?:[^'\\]|\\.|'')*')
+    | (?P<string>(?:[BbNnXx]|[Uu]&)?'(?:[^']|'')*')
+    | (?P<parameter>\$\d+|%\([A-Za-z_]\w*\)s)
+    | (?P<dollar_quote>\$(?:[A-Za-z_\x80-\U0010ffff][A-Za-z0-9_\x80-\U0010ffff]*)?\$)
+    | (?P<quoted_identifier>"(?:[^"]|"")*")
+    | (?P<identifier>[A-Za-z_\x80-\U0010ffff][A-Za-z0-9_$\x80-\U0010ffff]*)
+    | (?P<number>(?:\d+\.?\d*|\.\d+)(?:[Ee][+-]?\d+)?)
+    | (?P<operator>(?:[+*<>=~!@#%^&|`?]|-(?!-)|/(?!\*))+)
+    | (?P<punctuation>::|[.,;:()\[\]])
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+_QUOTED_IDENTIFIER_REST = re.compile(r'(?:[^"]|"")*"')
+# Postgres folds ASCII letters only, so a non-ASCII capital is never folded onto an ASCII name
+_ASCII_FOLD = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+# what an unquoted identifier folds to, and so the quoted spellings that name the same identifier
+_FOLDED_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_$]*")
+
+
+def _postgres_tokens(sql: str) -> tuple[list[str], list[str]]:
+    """The statement's tokens as Postgres resolves names in them, and what stops the reading."""
+    tokens, problems, position = [], [], 0
+    while position < len(sql):
+        match = _SQL_LEXEME.match(sql, position)
+        if match is None:
+            problems.append(f"unreadable text at {position}: {sql[position:position + 20]!r}")
+            break
+        kind, text, position = match.lastgroup, match.group(), match.end()
+        if kind in ("space", "line_comment"):
+            continue
+        if kind == "block_comment":
+            # nested, unlike C's: a `*/` closes only the innermost `/*`
+            depth = 1
+            while depth and position < len(sql):
+                if sql.startswith("/*", position):
+                    depth, position = depth + 1, position + 2
+                elif sql.startswith("*/", position):
+                    depth, position = depth - 1, position + 2
+                else:
+                    position += 1
+            if depth:
+                problems.append("an unterminated block comment")
+            continue
+        if kind == "dollar_quote":
+            close = sql.find(text, position)
+            if close == -1:
+                problems.append(f"an unterminated {text} string")
+                break
+            tokens.append(sql[match.start() : close + len(text)])
+            position = close + len(text)
+            continue
+        if kind == "unicode_identifier":
+            # its escapes can spell any name in characters no count below matches, so it is refused
+            problems.append("a U&-escaped identifier")
+            rest = _QUOTED_IDENTIFIER_REST.match(sql, position)
+            if rest is None:
+                problems.append("an unterminated U& identifier")
+                break
+            position = rest.end()
+            continue
+        if kind == "identifier":
+            text = text.translate(_ASCII_FOLD)
+        elif kind == "quoted_identifier":
+            name = text[1:-1].replace('""', '"')
+            if _FOLDED_IDENTIFIER.fullmatch(name):
+                text = name
+        tokens.append(text)
+    return tokens, problems
+
+
+def _postgres_text(tokens: list[str]) -> str:
+    # no space either side of a dot, which is how `m . day` and `m.day` come to read alike
+    text = ""
+    for index, token in enumerate(tokens):
+        joined = index == 0 or token == "." or tokens[index - 1] == "."
+        text += ("" if joined else " ") + token
+    return text
+
+
+# the join as the pin allows it: the half-open pair alone in ON, then the window's two day bounds
+_MOVES_JOIN_TEXT = (
+    "from bars b join market_days m on b.ts >= m.open_ts and b.ts < m.close_ts"
+    " where m.day >= %(start)s and m.day <= %(end)s and"
+)
+# every column of market_days: an unqualified column name is a reference with no alias to count
+_MARKET_DAYS_COLUMNS = frozenset({"day", "open_ts", "close_ts", "session_minutes"})
+
+
+def _moves_join_pin_problems(sql: str) -> list[str]:
+    """Every way sql reads market_days other than the half-open pair and the two day bounds."""
+    tokens, problems = _postgres_tokens(sql)
+    if _MOVES_JOIN_TEXT not in _postgres_text(tokens):
+        problems.append("the join is not the half-open pair alone followed by the two day bounds")
+    # a name read as often over the whole statement as inside the pinned join has no other reference
+    pinned, _ = _postgres_tokens(_MOVES_JOIN_TEXT)
+    for name in sorted(_MARKET_DAYS_COLUMNS | {"market_days", "m"}):
+        if tokens.count(name) != pinned.count(name):
+            problems.append(f"{name} read {tokens.count(name)} times, {pinned.count(name)} pinned")
+    return problems
 
 
 @pytest.fixture
@@ -396,6 +502,71 @@ def test_a_negative_min_move_pct_is_a_four_hundred(empty_client):
     ]
 
 
+def test_min_move_pct_is_refused_exactly_where_postgres_numeric_refuses_it(migrated_dsn):
+    # the validator's limits are Postgres's own, so each edge is decided by binding it: the route's
+    # statement bound directly, and the route itself, must agree on every one of them
+    load(migrated_dsn)
+    start, end = date(2026, 3, 1), date(2026, 3, 31)
+    lo, hi = api.routes._instant_bounds(start, end)
+    bound = {"start": start, "end": end, "after_ts": lo, "after_symbol": "", "hi": hi, "fetch": 2}
+    edges = (
+        "0E+131072",
+        "0E+1073741823",
+        "0E+1073741824",
+        "-0E+1073741823",
+        "-0E+1073741824",
+        "0.0E+1073741824",
+        "0.00E+1073741826",
+        "0E-16383",
+        "0E-16384",
+        "1E+131071",
+        "1E+131072",
+        "9.999E+131071",
+        "10E+131071",
+        "1E-16383",
+        "1E-16384",
+        "1.50E-16382",
+    )
+    decided = {}
+    with TestClient(create_app(migrated_dsn)) as client:
+        for value in edges:
+            try:
+                with connect(migrated_dsn) as conn:
+                    conn.execute(api.routes._MOVES_SQL, {**bound, "min_move_pct": Decimal(value)})
+                postgres = "reads"
+            except psycopg.errors.NumericValueOutOfRange:
+                postgres = "refuses"
+            response = client.get(
+                "/analytics/largest-moves",
+                params={"start": start.isoformat(), "end": end.isoformat(), "min_move_pct": value},
+            )
+            body = response.json()
+            refusal = body["error"]["detail"]["errors"] if response.status_code == 400 else None
+            decided[value] = (postgres, response.status_code, refusal)
+    out_of_range = [
+        {"parameter": "min_move_pct", "location": "query", "type": "numeric_out_of_range"}
+    ]
+    reads, refuses = ("reads", 200, None), ("refuses", 400, out_of_range)
+    assert decided == {
+        "0E+131072": reads,
+        "0E+1073741823": reads,
+        "0E+1073741824": refuses,
+        "-0E+1073741823": reads,
+        "-0E+1073741824": refuses,
+        "0.0E+1073741824": reads,
+        "0.00E+1073741826": refuses,
+        "0E-16383": reads,
+        "0E-16384": refuses,
+        "1E+131071": reads,
+        "1E+131072": refuses,
+        "9.999E+131071": reads,
+        "10E+131071": refuses,
+        "1E-16383": reads,
+        "1E-16384": refuses,
+        "1.50E-16382": refuses,
+    }
+
+
 def test_a_cursor_from_a_different_shape_is_a_four_hundred_invalid_cursor(empty_client):
     # a bars cursor carries one field where the universe shape carries two, so decode_cursor's
     # field-set check refuses it regardless of the value inside
@@ -447,11 +618,11 @@ def test_the_session_join_cannot_be_hashed(migrated_dsn):
     # threshold a hashable join trades the ordered index scan for a hash join over every remaining
     # row plus a sort -- at the page cap from page 1, or at the default page late in a window. The
     # rollup's day equality is what makes it hashable, and the half-open pair alone implies that
-    # equality. On this fixture, never analyzed, the ordered loop and the hashed alternative sit
-    # within the planner's 1% cost fuzz of each other, so which one it keeps is a tie-break rather
-    # than a margin this plan check alone can be trusted for --
-    # test_the_session_join_pins_the_half_open_pair_and_nothing_that_could_be_hashed guards the
-    # join's text directly for that reason
+    # equality. On this fixture, never analyzed, this check prints a Hash Join for the rollup's own
+    # New York date equality and for none of the UTC date casts of the day column, whose ordered
+    # loop wins the planner's 1% cost fuzz here and loses it at production shape -- so
+    # test_the_session_join_pins_the_half_open_pair_and_nothing_that_could_be_hashed is what
+    # refuses those
     days = load_run_calendar(migrated_dsn)
     for offset, symbol in enumerate(("RUNA", "RUNB", "RUNC", "RUND")):
         load_run_symbol(migrated_dsn, symbol, [100 + offset + i for i in range(len(days))], days)
@@ -475,27 +646,127 @@ def test_the_session_join_cannot_be_hashed(migrated_dsn):
             assert "Hash Join" not in plan, (fetch, plan)
 
 
-def test_the_session_join_pins_the_half_open_pair_and_nothing_that_could_be_hashed():
+def test_the_session_join_pins_the_half_open_pair_and_nothing_that_could_be_hashed(migrated_dsn):
     # a planner-choice assertion on a small, un-analysed fixture lets a hashable respelling of this
-    # join through -- a UTC date cast reproduces the shipped plan on this fixture and still
-    # reproduces D-430 at production shape, because the check above rests on a 1% cost margin. This
-    # pins the join's own text instead, which no plan choice can satisfy by accident.
+    # join through -- a UTC date cast plans like the shipped statement on this fixture and plans a
+    # hash join plus a sort at production shape, because the check above rests on a 1% cost margin.
+    # This pins the join's own text instead, which no plan choice can satisfy by accident.
     #
-    # a positive pin rather than a denylist of hashable respellings (::date, date_trunc, EXISTS,
-    # BETWEEN, IN), because a denylist passes any spelling it does not name -- `AND m.day =
-    # CAST(b.ts AS date)` in the WHERE clause, for one. Pinning every reference to market_days
-    # leaves a respelling nowhere to hide, named or not
-    normalized = _sql_without_comments(api.routes._MOVES_SQL)
-    assert normalized.count("market_days") == 1
-    assert "JOIN market_days m ON b.ts >= m.open_ts AND b.ts < m.close_ts" in normalized
-    assert normalized.count("m.open_ts") == 1
-    assert normalized.count("m.close_ts") == 1
-    assert normalized.count("m.day") == 2
-    assert "m.day >= %(start)s" in normalized
-    assert "m.day <= %(end)s" in normalized
-    # open_ts once, close_ts once, day twice: four total, so a fifth m. reference anywhere --
-    # a smuggled equality, a second predicate on m.day -- is refused even if it reuses a name above
-    assert len(re.findall(r"\bm\.\w+", normalized)) == 4
+    # a positive pin rather than a denylist of hashable respellings, because a denylist passes any
+    # spelling it does not name. The text is read the way Postgres resolves names in it -- comments
+    # dropped, unquoted names folded, needless quotes removed -- so a respelling of a reference is
+    # counted as that reference, and the test below holds that reading to spellings Postgres accepts
+    with connect(migrated_dsn) as conn:
+        columns = conn.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'market_days'"
+        ).fetchall()
+    # against the migrated table, so a column added to market_days cannot be read unnoticed
+    assert {name for (name,) in columns} == _MARKET_DAYS_COLUMNS
+    assert _moves_join_pin_problems(api.routes._MOVES_SQL) == []
+
+
+# the session-date equality respelled: in the ON clause or after the WHERE clause's last bound, each
+# executes on the plan test's fixture, returns the shipped rows and makes a hash join plannable
+# where the shipped join cannot
+_UNICODE_ESCAPED_DAY = 'U&"\\0064ay" = b.ts::date'
+_HASHABLE_RESPELLINGS = (
+    "m.day = b.ts::date",
+    "M.day = b.ts::date",
+    'm."day" = b.ts::date',
+    "m . day = b.ts::date",
+    "m./**/day = b.ts::date",
+    "(m).day = b.ts::date",
+    "(m.*).day = b.ts::date",
+    '"m".day = b.ts::date',
+    '"m"."day" = b.ts::date',
+    "M.DAY = b.ts::date",
+    "m.Day = b.ts::date",
+    "day(m) = b.ts::date",
+    "(to_jsonb(m) ->> 'day')::date = b.ts::date",
+    "day = b.ts::date",
+    _UNICODE_ESCAPED_DAY,
+    'm.U&"\\0064ay" = b.ts::date',
+    "m.day = CAST(b.ts AS date)",
+    "b.ts::date = m.day",
+    "m.open_ts::date = b.ts::date",
+    # a comment opener inside a string, which a reader blind to strings takes for a comment
+    "'--' <> '' AND M.day = b.ts::date",
+    "E'\\'--' <> '' AND M.day = b.ts::date",
+    "$$--$$ <> '' AND M.day = b.ts::date",
+)
+# market_days reached some other way, each added after the WHERE clause's last bound
+_OTHER_MARKET_DAYS_ROUTES = (
+    "b.ts::date IN (SELECT day FROM market_days)",
+    "EXISTS (SELECT 1 FROM MARKET_DAYS d WHERE d.day = b.ts::date)",
+    'EXISTS (SELECT 1 FROM "market_days" d WHERE d.day = b.ts::date)',
+    "b.ts < m.open_ts + make_interval(mins => session_minutes)",
+    "session_minutes > 0",
+)
+# the join itself changed without naming anything new: the pair loosened, or the join made outer
+_JOIN_TEXT_CHANGES = (
+    ("b.ts < m.close_ts", "b.ts <= m.close_ts"),
+    ("JOIN market_days m", "LEFT JOIN market_days m"),
+)
+# text Postgres never reads as a name, each added after the same bound
+_NOT_A_REFERENCE = (
+    "/* /* nested */ M.day = b.ts::date /* */ */ TRUE",
+    "-- (m).day = b.ts::date\n TRUE",
+    "'M.day' <> 'day(m)'",
+    "U&'\\0064ay' <> ''",
+    "$tag$ m.day $tag$ <> ''",
+)
+_ON_CLAUSE = "ON b.ts >= m.open_ts AND b.ts < m.close_ts"
+_LAST_BOUND = "AND b.ts <= %(hi)s"
+_SECOND_JOIN = "JOIN public.market_days d ON d.day = b.ts::date\n"
+# the counted refusal: a name read more or fewer times than the pinned join reads it
+_MISCOUNTED = re.compile(r"\w+ read \d+ times, \d+ pinned")
+
+
+def _moves_sql_with(*, on: str | None = None, where: str | None = None) -> str:
+    shipped = api.routes._MOVES_SQL
+    assert shipped.count(_ON_CLAUSE) == 1
+    assert shipped.count(_LAST_BOUND) == 1
+    if on is not None:
+        return shipped.replace(_ON_CLAUSE, f"{_ON_CLAUSE} AND {on}")
+    return shipped.replace(_LAST_BOUND, f"{_LAST_BOUND}\n      AND {where}")
+
+
+def _moves_sql_with_a_second_join() -> str:
+    shipped = api.routes._MOVES_SQL
+    assert shipped.count("FROM bars b\n") == 1
+    return shipped.replace("FROM bars b\n", f"FROM bars b\n{_SECOND_JOIN}")
+
+
+def test_the_join_pin_reads_each_respelling_as_the_reference_it_is():
+    # in the ON clause the join's own text changes, so any respelling there is refused whatever it
+    # names -- which is why every one is also tried after the last bound, where only reading each
+    # name the way Postgres does can find it
+    in_on = [_moves_join_pin_problems(_moves_sql_with(on=p)) for p in _HASHABLE_RESPELLINGS]
+    assert all(in_on)
+    assert _moves_join_pin_problems(_moves_sql_with_a_second_join())
+    for shipped_text, changed_text in _JOIN_TEXT_CHANGES:
+        assert api.routes._MOVES_SQL.count(shipped_text) == 1
+        changed = api.routes._MOVES_SQL.replace(shipped_text, changed_text)
+        assert _moves_join_pin_problems(changed) == [
+            "the join is not the half-open pair alone followed by the two day bounds"
+        ], changed_text
+
+    unread = {}
+    for p in _HASHABLE_RESPELLINGS + _OTHER_MARKET_DAYS_ROUTES:
+        problems = _moves_join_pin_problems(_moves_sql_with(where=p))
+        named = [q for q in problems if _MISCOUNTED.fullmatch(q) or q == "a U&-escaped identifier"]
+        if not problems or named != problems:
+            unread[p] = problems
+    assert unread == {}
+    # with no alias the escaped name reads as nothing countable, so only the refusal names it
+    assert _moves_join_pin_problems(_moves_sql_with(where=_UNICODE_ESCAPED_DAY)) == [
+        "a U&-escaped identifier"
+    ]
+
+    # and text that names nothing is not counted, so the pin refuses references rather than edits
+    assert {p: _moves_join_pin_problems(_moves_sql_with(where=p)) for p in _NOT_A_REFERENCE} == {
+        p: [] for p in _NOT_A_REFERENCE
+    }
 
 
 def _load_moves_identity_fixture(dsn):
@@ -580,8 +851,8 @@ def test_largest_moves_without_min_move_pct_matches_min_move_pct_zero(moves_zero
 
 
 def test_largest_moves_a_single_page_above_the_cap_is_not_silently_truncated(migrated_dsn):
-    # the cap-500 defect only shows on a request whose OWN fetch exceeds it; walking at limit=1
-    # never does, so this asks for every row of a >500-row, <=1000-row window in one page
+    # a silent cap below the published maximum truncates only a page whose OWN fetch exceeds it;
+    # walking at limit=1 never does, so this asks for every row of a >500-row, <=1000-row window
     days = load_run_calendar(migrated_dsn, run_days(10))
     minutes = range(0, 390, 5)
     load_sparse_symbol(migrated_dsn, "DENSE", days, minutes)
