@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import inspect
 import logging
 from datetime import date
 from importlib.metadata import PackageNotFoundError, version
@@ -10,8 +11,10 @@ from fastapi import APIRouter, FastAPI
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
+from psycopg.rows import dict_row
 from starlette.routing import BaseRoute
 
+import api.deps
 import api.main
 import api.routes
 import config
@@ -139,7 +142,64 @@ def test_the_pool_is_built_with_the_configured_sizes(monkeypatch):
 
 def test_the_pool_is_built_with_a_liveness_check():
     pool = build_pool(DEAD_DSN)
-    assert pool._check is psycopg_pool.ConnectionPool.check_connection
+    # bounded rather than psycopg_pool's own, which waits on a silent connection with no deadline
+    assert pool._check is api.deps._check_within_deadline
+
+
+def test_the_pool_bounds_are_the_published_values(monkeypatch):
+    # read before anything patches them: every other test that reaches these overrides them to
+    # something fast, so a changed default leaves all of those green
+    assert api.deps.POOL_CHECKOUT_TIMEOUT_SECONDS == 5.0
+    assert api.deps.STATEMENT_TIMEOUT_SECONDS == 5.0
+    assert api.deps.POOL_CHECK_TIMEOUT_SECONDS == 1.0
+    pool = build_pool(DEAD_DSN)
+    assert pool.timeout == 5.0
+    assert pool.kwargs == {
+        "row_factory": dict_row,
+        "connect_timeout": 5,
+        "keepalives": 1,
+        "keepalives_idle": 10,
+        "keepalives_interval": 5,
+        "keepalives_count": 3,
+        "tcp_user_timeout": 25000,
+    }
+    assert api.deps._statement_timeout_ms() == 5000
+    # Postgres reads 0 as no timeout and refuses a negative one, so neither may reach a SET
+    for unusable in (0.0, 0.0005, -1.0):
+        monkeypatch.setattr(api.deps, "STATEMENT_TIMEOUT_SECONDS", unusable)
+        with pytest.raises(ValueError, match="under one millisecond"):
+            api.deps._statement_timeout_ms()
+    # rounded rather than truncated: 0.6 ms truncates to the 0 that disables the timeout
+    monkeypatch.setattr(api.deps, "STATEMENT_TIMEOUT_SECONDS", 0.0006)
+    assert api.deps._statement_timeout_ms() == 1
+
+
+def test_each_pooled_connection_sets_the_statement_timeout_in_whole_milliseconds(monkeypatch):
+    class _Configured:
+        def __init__(self):
+            self.statements = []
+            self.committed = False
+
+        def execute(self, sql):
+            self.statements.append(sql)
+
+        def commit(self):
+            self.committed = True
+
+    configured = _Configured()
+    api.deps._pin_utc(configured, "postgresql://u:pw@127.0.0.1:1/none")
+    assert configured.statements == ["SET TIME ZONE 'UTC'", "SET statement_timeout = 5000"]
+    assert configured.committed
+    # through the conversion that refuses a value Postgres reads as no timeout, not around it
+    monkeypatch.setattr(api.deps, "STATEMENT_TIMEOUT_SECONDS", 0.0004)
+    with pytest.raises(ValueError, match="under one millisecond"):
+        api.deps._pin_utc(_Configured(), "postgresql://u:pw@127.0.0.1:1/none")
+
+
+def test_the_pool_dependency_resolves_on_the_event_loop():
+    # a plain def dependency is run on anyio's worker threads before a route's query parameters are
+    # validated, so a refused parameter would wait behind every slow request holding those threads
+    assert inspect.iscoroutinefunction(api.deps.get_pool)
 
 
 def test_an_unreachable_database_answers_internal():
@@ -171,8 +231,8 @@ def test_health_checks_the_database_on_its_own_connection_never_the_shared_pool(
     with TestClient(app) as client:
         response = client.get("/health")
     assert response.status_code == 200
-    # nothing reached the shared pool -- it is opened and closed by the lifespan alone, which is
-    # the D-440 fix: a pool with no free connection must not make /health read as a dead database
+    # nothing reached the shared pool -- it is opened and closed by the lifespan alone, because a
+    # pool with no free connection must not make /health read as a dead database
     assert pool.statements == []
     # the installed metadata, not just a present key: a build_version naming the wrong distribution
     # reports "unknown" forever and every "version" in body assertion stays green
@@ -532,8 +592,8 @@ class _NoExecutePool:
 
 
 def test_require_symbol_refuses_a_nul_byte_without_a_query():
-    # psycopg.DataError used to reach here from conn.execute -- a NUL byte cannot have been
-    # ingested, so the check has to run before the connection is touched at all
+    # binding a NUL byte raises psycopg.DataError from conn.execute, and a NUL byte cannot have
+    # been ingested, so the check has to run before the connection is touched at all
     with pytest.raises(ApiError) as excinfo:
         api.routes.require_symbol(_NoExecuteConnection(), "AAA\x00")
     assert excinfo.value.status == 404
@@ -581,8 +641,8 @@ def test_the_generated_documentation_answers_and_redoc_does_not(monkeypatch):
     assert paths["/symbols/{symbol}/bars"]["get"]["description"] == api.routes._BARS_DESCRIPTION
 
     # WithJsonSchema replaces Decimal's own anyOf(number, string) entirely, whose string branch
-    # admitted "-1" and rejected "1e3" -- full-dict equality, not a per-branch minimum, since there
-    # is now only one branch to read
+    # admits "-1" and refuses "1e3" -- full-dict equality, not a per-branch minimum, since there
+    # is one branch to read
     moves_parameters = {p["name"]: p for p in paths["/analytics/largest-moves"]["get"]["parameters"]}
     assert moves_parameters["min_move_pct"]["schema"] == {
         "type": "number",
@@ -592,10 +652,21 @@ def test_the_generated_documentation_answers_and_redoc_does_not(monkeypatch):
     }
 
     # every data/analytics route publishes the one error shape for each status it can answer, and
-    # HTTPValidationError -- FastAPI's default 422 model -- is added only when a route has not
-    # already declared 422 itself, so declaring it everywhere keeps it out of the document entirely
+    # FastAPI adds a 422 of its own, modelled by HTTPValidationError, to any route with a parameter
+    # that documents none of 422, 4XX or default: each window route documents the 422 it answers,
+    # and /symbols, which answers none, documents default
     assert "HTTPValidationError" not in body["components"]["schemas"]
+    assert "ValidationError" not in body["components"]["schemas"]
     error_schema_ref = {"$ref": "#/components/schemas/ErrorResponse"}
+    # literals, never the RESPONSE_* constants: the description is the whole of what the page says
+    # about a status, and reading it back from the constant would move both sides of the check
+    descriptions = {
+        "400": "A parameter or cursor was not valid.",
+        "404": "No symbol by that name has been ingested.",
+        "422": "The requested range was not valid.",
+        "500": "The request could not be completed.",
+        "default": "Any other error, in the same shape.",
+    }
     symbol_routes = {
         "/symbols/{symbol}/bars",
         "/symbols/{symbol}/daily",
@@ -605,18 +676,39 @@ def test_the_generated_documentation_answers_and_redoc_does_not(monkeypatch):
     data_routes = symbol_routes | {"/symbols", "/analytics/largest-moves"}
     for path in data_routes:
         responses = paths[path]["get"]["responses"]
-        expected = {"200", "400", "422", "500"} | ({"404"} if path in symbol_routes else set())
+        if path == "/symbols":
+            expected = {"200", "400", "500", "default"}
+        else:
+            expected = {"200", "400", "422", "500"} | ({"404"} if path in symbol_routes else set())
         assert set(responses) == expected, path
         for code in expected - {"200"}:
             assert responses[code]["content"]["application/json"]["schema"] == error_schema_ref, (
                 path,
                 code,
             )
+            assert responses[code]["description"] == descriptions[code], (path, code)
     assert set(paths["/health"]["get"]["responses"]) == {"200", "500"}
-    assert (
-        paths["/health"]["get"]["responses"]["500"]["content"]["application/json"]["schema"]
-        == error_schema_ref
-    )
+    health_500 = paths["/health"]["get"]["responses"]["500"]
+    assert health_500["content"]["application/json"]["schema"] == error_schema_ref
+    assert health_500["description"] == descriptions["500"]
+
+    # the model behind every one of those references, which a client generated from this document
+    # validates each error body against: every 500 answers detail null, so a detail published as
+    # optional or as a bare object misdescribes the service to exactly that client
+    from api.errors import ERROR_CODES
+
+    schemas = body["components"]["schemas"]
+    assert schemas["ErrorResponse"]["required"] == ["error"]
+    assert schemas["ErrorResponse"]["properties"]["error"] == {
+        "$ref": "#/components/schemas/ErrorInfo"
+    }
+    error_info = schemas["ErrorInfo"]
+    assert sorted(error_info["required"]) == ["code", "detail", "message"]
+    assert error_info["properties"]["code"]["type"] == "string"
+    assert error_info["properties"]["code"]["enum"] == sorted(ERROR_CODES)
+    assert error_info["properties"]["message"]["type"] == "string"
+    detail_branches = error_info["properties"]["detail"]["anyOf"]
+    assert sorted(branch.get("type") for branch in detail_branches) == ["null", "object"]
 
     # limit's minimum, maximum and default are published purely for documentation -- they mirror
     # what resolve_request enforces against the RESOLVED limit, without adding pydantic validation

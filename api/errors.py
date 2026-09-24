@@ -27,7 +27,8 @@ class ErrorInfo(BaseModel):
     # vocabulary the frozenset enforces at runtime
     code: Literal[tuple(sorted(ERROR_CODES))]
     message: str
-    detail: dict | None = None
+    # no default, so the document marks it required as well as nullable: every body carries the key
+    detail: dict | None
 
 
 class ErrorResponse(BaseModel):
@@ -42,6 +43,7 @@ RESPONSE_400 = {"model": ErrorResponse, "description": "A parameter or cursor wa
 RESPONSE_404 = {"model": ErrorResponse, "description": "No symbol by that name has been ingested."}
 RESPONSE_422 = {"model": ErrorResponse, "description": "The requested range was not valid."}
 RESPONSE_500 = {"model": ErrorResponse, "description": "The request could not be completed."}
+RESPONSE_DEFAULT = {"model": ErrorResponse, "description": "Any other error, in the same shape."}
 
 
 class ApiError(RuntimeError):
@@ -71,13 +73,14 @@ def _internal_response(exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=500, content=error_body("internal", INTERNAL_MESSAGE, None))
 
 
-def _api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
+# all four async: Starlette runs a def handler on the sync routes' thread pool, behind their slow requests
+async def _api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status, content=error_body(exc.code, exc.message, exc.detail)
     )
 
 
-def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     loc = exc.errors()[0]["loc"]
     detail = {"reason": "invalid_parameter", "parameter": loc[-1], "location": loc[0]}
     # additive, so the three keys above stay the contract they were: the per-entry type is
@@ -92,7 +95,7 @@ def _validation_error_handler(request: Request, exc: RequestValidationError) -> 
     )
 
 
-def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     # this is what puts the unrouted 404 and the wrong-method 405 into the one error shape
     if type(exc) is StarletteHTTPException:
         # exact type only -- a subclass reaching here is an endpoint's own HTTPException, not a routing failure
@@ -105,7 +108,7 @@ def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JS
     return _internal_response(exc)
 
 
-def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     return _internal_response(exc)
 
 

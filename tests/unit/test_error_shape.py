@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import date
 
@@ -246,7 +247,7 @@ def test_the_handler_names_the_last_element_of_a_three_element_loc():
     exc = RequestValidationError(
         [{"loc": ("body", "window", "start"), "msg": "Field required", "type": "missing"}]
     )
-    detail = json.loads(_validation_error_handler(None, exc).body)["error"]["detail"]
+    detail = json.loads(asyncio.run(_validation_error_handler(None, exc)).body)["error"]["detail"]
     assert detail["parameter"] == "start"
     assert detail["location"] == "body"
     assert detail["errors"] == [{"parameter": "start", "location": "body", "type": "missing"}]

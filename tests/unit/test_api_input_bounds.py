@@ -21,9 +21,20 @@ def _client():
 
 def test_min_move_pct_within_postgres_numeric_bounds_reaches_the_route():
     # 200-class here means the value passed validation and the handler tried to acquire a
-    # connection from the never-opened pool, which is what turns into the 500 below -- not a 4xx
+    # connection from the never-opened pool, which is what turns into the 500 below -- not a 4xx.
+    # The zeros are the edge a digit count gets wrong: Postgres stores a zero with no digits before
+    # the point, so it reads 0E+131072 as 0 and refuses a zero's exponent only past its own limit
     client = _client()
-    for value in ("1E+131071", "1e-16383"):
+    zeros = (
+        "0E+131072",
+        "-0E+131072",
+        "0.0E+131073",
+        "0E+1073741823",
+        "-0E+1073741823",
+        "0E-16383",
+        "-0.0E-16382",
+    )
+    for value in ("1E+131071", "1e-16383", "9.999E+131071", *zeros):
         response = client.get(
             "/analytics/largest-moves", params={**_WINDOW, "min_move_pct": value}
         )
@@ -34,7 +45,8 @@ def test_min_move_pct_within_postgres_numeric_bounds_reaches_the_route():
 def test_min_move_pct_past_postgres_numeric_bounds_is_a_four_hundred():
     client = _client()
     too_many_decimals = "0." + "1" + "0" * 16383
-    for value in ("1E+131072", "1e-16384", too_many_decimals):
+    zeros = ("0E+1073741824", "-0E+1073741824", "0.00E+1073741826", "0E-16384", "-0.0E-16383")
+    for value in ("1E+131072", "10E+131071", "1e-16384", too_many_decimals, *zeros):
         response = client.get(
             "/analytics/largest-moves", params={**_WINDOW, "min_move_pct": value}
         )
@@ -55,18 +67,29 @@ def test_a_131073_digit_min_move_pct_is_out_of_range():
     assert excinfo.value.type == "numeric_out_of_range"
 
 
-def test_min_move_pct_still_refuses_negative_and_non_finite_values():
-    # unaffected by the overflow guard: ge=0 and the finite-number check both run before
-    # AfterValidator, per the module's own comment on Query living inside the Annotated alias
+def test_min_move_pct_refuses_negative_and_non_finite_values_before_counting_digits():
+    # a negative is refused for its sign whatever its size, so one past Postgres's range reads the
+    # published minimum rather than numeric_out_of_range: Query(ge=0) sits ahead of AfterValidator
     client = _client()
-    response = client.get("/analytics/largest-moves", params={**_WINDOW, "min_move_pct": "-1"})
-    assert response.status_code == 400
-    assert response.json()["error"]["detail"]["errors"] == [
-        {"parameter": "min_move_pct", "location": "query", "type": "greater_than_equal"}
-    ]
+    for value in ("-1", "-1E+131072", "-1e-16384", "-1E+1073741824"):
+        response = client.get(
+            "/analytics/largest-moves", params={**_WINDOW, "min_move_pct": value}
+        )
+        assert response.status_code == 400, value
+        assert response.json()["error"]["detail"]["errors"] == [
+            {"parameter": "min_move_pct", "location": "query", "type": "greater_than_equal"}
+        ], value
 
-    response = client.get("/analytics/largest-moves", params={**_WINDOW, "min_move_pct": "NaN"})
-    assert response.status_code == 400
-    assert response.json()["error"]["detail"]["errors"] == [
-        {"parameter": "min_move_pct", "location": "query", "type": "finite_number"}
-    ]
+    # the finite-number check is pydantic's own for Decimal, and it refuses before either of the two
+    for value in ("NaN", "Infinity", "-Infinity"):
+        response = client.get(
+            "/analytics/largest-moves", params={**_WINDOW, "min_move_pct": value}
+        )
+        assert response.status_code == 400, value
+        assert response.json()["error"]["detail"]["errors"] == [
+            {"parameter": "min_move_pct", "location": "query", "type": "finite_number"}
+        ], value
+    # and reaching the validator directly they are no range to judge, since Postgres numeric reads
+    # all three -- returned rather than failing on arithmetic with a non-numeric exponent
+    for value in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
+        assert _reject_numeric_overflow(value) is value

@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from datetime import date
 
 import pytest
@@ -120,11 +123,10 @@ def test_require_returns_the_value_once_measured(monkeypatch):
 
 
 def test_missing_credential_fails_at_construction(monkeypatch):
-    # the positive control first, because Settings declares no rule over a required value beyond its
-    # type -- both model validators read defaulted keys -- so REQUIRED reaches every construction in
-    # this file unchecked, and each ValidationError below would still be raised against a
-    # configuration no operator could use: empty credentials, a plaintext host, an unusable DSN or an
-    # ingest window that runs backwards
+    # the positive control first, because Settings checks a required value for its type and, for a
+    # string, that it is not blank, and nothing more -- the model validator reads defaulted keys -- so
+    # each ValidationError below would be raised against a configuration no operator could
+    # use: a plaintext host, an unusable DSN or an ingest window that runs backwards
     supplied = Settings(_env_file=None, **REQUIRED)
     assert supplied.ALPACA_KEY_ID and supplied.ALPACA_SECRET_KEY
     assert supplied.ALPACA_TRADING_HOST.startswith("https://")
@@ -182,40 +184,172 @@ def test_every_optional_setting_is_reachable_through_require(monkeypatch):
             config.require(name)
 
 
-def test_a_hot_window_too_short_for_the_widest_endpoint_window_is_refused():
-    # anchored at REQUIRED's INGEST_END=2026-06-30: 3 months back is 2026-04-01, a 90-day span --
-    # one day short of 91. The old unanchored check read this case as "89 days" (Feb+Mar+Apr), a
-    # month position INGEST_END never actually sits at
-    with pytest.raises(ValidationError, match="90 days"):
-        Settings(_env_file=None, HOT_WINDOW_MONTHS=3, AGG_MAX_WINDOW_DAYS=91, **REQUIRED)
+def _short_hot_window(months, end, span, cutoff, agg):
+    return (
+        f"HOT_WINDOW_MONTHS={months} anchored at INGEST_END={end} spans {span} days back to"
+        f" {cutoff}, short of AGG_MAX_WINDOW_DAYS={agg}; the hot-window index would not cover the"
+        " widest window an endpoint can ask for"
+    )
 
 
-def test_the_hot_window_floor_follows_the_window_it_has_to_contain():
-    # anchored at INGEST_END=2026-06-30: 4 months back is 2026-03-01, a 121-day span -- the exact
-    # floor, pinned at both edges so a floor that were the literal 4 could not also produce this
-    Settings(_env_file=None, HOT_WINDOW_MONTHS=4, AGG_MAX_WINDOW_DAYS=121, **REQUIRED)
-    with pytest.raises(ValidationError, match="90 days"):
-        Settings(_env_file=None, HOT_WINDOW_MONTHS=3, AGG_MAX_WINDOW_DAYS=120, **REQUIRED)
-    with pytest.raises(ValidationError, match="121 days"):
-        Settings(_env_file=None, HOT_WINDOW_MONTHS=4, AGG_MAX_WINDOW_DAYS=122, **REQUIRED)
+def test_the_hot_window_cutoff_is_the_first_of_the_month_postgres_date_trunc_gives():
+    # each row checked against Postgres 16's date_trunc('month', end - (months - 1) months); the
+    # first three put INGEST_END's month minus (months - 1) on 0, -1 and -2, borrowing a year, and
+    # the fourth is a December end that borrows none
+    cases = [
+        (date(2026, 3, 31), 4, date(2025, 12, 1)),
+        (date(2026, 2, 28), 4, date(2025, 11, 1)),
+        (date(2026, 1, 31), 4, date(2025, 10, 1)),
+        (date(2025, 12, 31), 4, date(2025, 9, 1)),
+        (date(2026, 6, 30), 4, date(2026, 3, 1)),
+        (date(2026, 6, 30), 1, date(2026, 6, 1)),
+        (date(2026, 1, 1), 1, date(2026, 1, 1)),
+        (date(2026, 12, 15), 12, date(2026, 1, 1)),
+        (date(2026, 12, 15), 13, date(2025, 12, 1)),
+        (date(2024, 2, 29), 25, date(2022, 2, 1)),
+        (date(2026, 6, 30), 24306, date(1, 1, 1)),
+        (date(2026, 6, 30), 24295, date(1, 12, 1)),
+    ]
+    for end, months, expected in cases:
+        assert config._hot_window_cutoff(end, months) == expected, (end, months)
+    assert config._hot_window_cutoff(date(2026, 6, 30), 24307) is None
 
 
-def test_a_hot_window_ending_before_the_widest_window_can_start_is_refused():
-    # INGEST_END=2026-05-01 at the defaults (H=4, A=90): 4 months back is 2026-02-01, an 89-day
-    # span. The old check never read INGEST_END at all, so it accepted this deployment regardless
-    with pytest.raises(ValidationError, match="89 days"):
-        Settings(_env_file=None, **{**REQUIRED, "INGEST_END": "2026-05-01"})
-
-
-def test_a_hot_window_anchored_at_a_short_february_is_refused():
-    # INGEST_END=2026-02-28 with AGG_MAX_WINDOW_DAYS widened to 120: 4 months back is
-    # 2025-11-01, a 119-day span -- one day short
-    with pytest.raises(ValidationError, match="119 days"):
-        Settings(
-            _env_file=None,
-            AGG_MAX_WINDOW_DAYS=120,
-            **{**REQUIRED, "INGEST_END": "2026-02-28"},
+def test_a_hot_window_is_accepted_at_its_exact_span_and_refused_one_day_short(clean_env):
+    # at INGEST_END=2026-06-30: 4 months back is 2026-03-01, a 121-day span, and 3 months back is
+    # 2026-04-01, a 90-day span -- each pinned at both edges
+    def problems(months, agg):
+        return config.hot_window_configuration_problems(
+            Settings(_env_file=None, HOT_WINDOW_MONTHS=months, AGG_MAX_WINDOW_DAYS=agg, **REQUIRED)
         )
+
+    assert problems(4, 121) == []
+    assert problems(4, 122) == [_short_hot_window(4, "2026-06-30", 121, "2026-03-01", 122)]
+    assert problems(3, 90) == []
+    assert problems(3, 91) == [_short_hot_window(3, "2026-06-30", 90, "2026-04-01", 91)]
+
+
+def test_a_hot_window_counted_back_across_the_year_boundary_lands_on_the_right_month(clean_env):
+    # INGEST_END in March at 4 months puts the month arithmetic on 0 exactly -- the December
+    # before -- with February and January ends borrowing a year the same way, and a December end
+    # that borrows none
+    for end, span, cutoff in (
+        ("2026-03-31", 120, "2025-12-01"),
+        ("2026-02-28", 119, "2025-11-01"),
+        ("2026-01-31", 122, "2025-10-01"),
+        ("2025-12-31", 121, "2025-09-01"),
+    ):
+        fields = {**REQUIRED, "INGEST_END": end}
+        at_span = Settings(_env_file=None, AGG_MAX_WINDOW_DAYS=span, **fields)
+        assert config.hot_window_configuration_problems(at_span) == [], end
+        over = Settings(_env_file=None, AGG_MAX_WINDOW_DAYS=span + 1, **fields)
+        assert config.hot_window_configuration_problems(over) == [
+            _short_hot_window(4, end, span, cutoff, span + 1)
+        ], end
+
+
+def test_a_hot_window_refusal_does_not_stop_settings_from_constructing(clean_env):
+    # INGEST_END=2026-05-01 at the defaults (H=4, A=90): 4 months back is 2026-02-01, an 89-day
+    # span. Refused by the API, which serves from the index, never by db.migrate or the ingest
+    settings = Settings(_env_file=None, **{**REQUIRED, "INGEST_END": "2026-05-01"})
+    assert settings.INGEST_END == date(2026, 5, 1)
+    assert config.hot_window_configuration_problems(settings) == [
+        _short_hot_window(4, "2026-05-01", 89, "2026-02-01", 90)
+    ]
+
+
+def test_a_hot_window_under_one_month_is_refused_by_name(clean_env):
+    def problems(months, agg=90):
+        return config.hot_window_configuration_problems(
+            Settings(_env_file=None, HOT_WINDOW_MONTHS=months, AGG_MAX_WINDOW_DAYS=agg, **REQUIRED)
+        )
+
+    for months in (0, -1, -12):
+        assert problems(months) == [
+            f"HOT_WINDOW_MONTHS={months} is below 1; the hot window has to hold at least"
+            " INGEST_END=2026-06-30's own month"
+        ]
+    # one month at INGEST_END=2026-06-30 reaches back to 2026-06-01, 29 days
+    assert problems(1, 29) == []
+    assert problems(1, 30) == [_short_hot_window(1, "2026-06-30", 29, "2026-06-01", 30)]
+
+
+def test_a_hot_window_reaching_back_before_year_one_is_refused_by_name(clean_env):
+    def problems(months):
+        return config.hot_window_configuration_problems(
+            Settings(_env_file=None, HOT_WINDOW_MONTHS=months, **REQUIRED)
+        )
+
+    assert problems(24306) == []
+    for months in (24307, 10**6):
+        assert problems(months) == [
+            f"HOT_WINDOW_MONTHS={months} reaches back before year 1 from INGEST_END=2026-06-30"
+        ]
+
+
+def test_a_huge_hot_window_is_answered_without_walking_every_month(repo_root, tmp_path):
+    # a subprocess, so an implementation that steps one month at a time fails on the timeout instead
+    # of hanging the suite; cwd is empty so no .env can reach the child
+    env = {k: v for k, v in os.environ.items() if k not in Settings.model_fields}
+    env.update(REQUIRED)
+    env.update(
+        {"PYTHONPATH": str(repo_root), "PYTHONDONTWRITEBYTECODE": "1", "HOT_WINDOW_MONTHS": str(10**15)}
+    )
+    script = (
+        "import config\n"
+        "print(config.__file__)\n"
+        "print(config.hot_window_configuration_problems(config.settings))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    config_file, problems = result.stdout.splitlines()
+    assert config_file == str(repo_root / "config.py")
+    assert problems == repr(
+        [f"HOT_WINDOW_MONTHS={10**15} reaches back before year 1 from INGEST_END=2026-06-30"]
+    )
+
+
+def _e2e_problems(**overrides):
+    fields = {**REQUIRED, **overrides}
+    return config.e2e_configuration_problems(Settings(_env_file=None, **fields))
+
+
+def _no_room(end, oversized_start, bound):
+    return (
+        f"E2E_END={end} minus AGG_MAX_WINDOW_DAYS=90 + 1 days is {oversized_start}, before"
+        f" INGEST_START={bound}; the over-the-cap window the suite requests would be refused as out"
+        " of range, not as too long"
+    )
+
+
+def _no_room_in_hot_window(end, oversized_start, cutoff):
+    return (
+        f"E2E_END={end} minus AGG_MAX_WINDOW_DAYS=90 + 1 days is {oversized_start}, before the hot"
+        f" window's own cutoff {cutoff}; on the deployed hot-window copy the over-the-cap window would"
+        " be refused as out of range"
+    )
+
+
+def _before_cutoff(start, cutoff="2026-03-01", months=4):
+    return (
+        f"E2E_START={start} is before the hot window's own cutoff {cutoff}"
+        f" (HOT_WINDOW_MONTHS={months} back from INGEST_END=2026-06-30); the suite would not run"
+        " unchanged against the deployed hot-window copy"
+    )
+
+
+def _outside(start, end, ingest_start="2020-08-01"):
+    return (
+        f"E2E_START={start}..E2E_END={end} is outside the ingested range"
+        f" INGEST_START={ingest_start}..INGEST_END=2026-06-30"
+    )
 
 
 def test_e2e_configuration_problems_is_empty_for_the_defaults(clean_env):
@@ -223,52 +357,117 @@ def test_e2e_configuration_problems_is_empty_for_the_defaults(clean_env):
     assert config.e2e_configuration_problems(settings) == []
 
 
-def test_e2e_start_after_end_is_a_configuration_problem(clean_env):
-    settings = Settings(_env_file=None, E2E_START="2026-06-30", E2E_END="2026-04-01", **REQUIRED)
-    problems = config.e2e_configuration_problems(settings)
-    assert any("E2E_START" in p and "after" in p for p in problems), problems
+def test_an_e2e_window_must_start_before_it_ends(clean_env):
+    # one day apart is the shortest window accepted; the same day and a reversed pair are refused
+    assert _e2e_problems(E2E_START="2026-06-29", E2E_END="2026-06-30") == []
+    assert _e2e_problems(E2E_START="2026-06-30", E2E_END="2026-06-30") == [
+        "E2E_START=2026-06-30 is not before E2E_END=2026-06-30"
+    ]
+    assert _e2e_problems(E2E_START="2026-06-30", E2E_END="2026-06-29") == [
+        "E2E_START=2026-06-30 is not before E2E_END=2026-06-29"
+    ]
 
 
-def test_e2e_window_over_the_cap_is_a_configuration_problem(clean_env):
-    # 91 days, one over AGG_MAX_WINDOW_DAYS=90
-    settings = Settings(_env_file=None, E2E_START="2026-03-31", E2E_END="2026-06-30", **REQUIRED)
-    problems = config.e2e_configuration_problems(settings)
-    assert any("91 days" in p for p in problems), problems
+def test_an_e2e_window_over_the_cap_is_a_configuration_problem(clean_env):
+    # 90 days is the cap itself and accepted (the defaults); 91 is one over
+    assert _e2e_problems(E2E_START="2026-03-31", E2E_END="2026-06-30") == [
+        "E2E_START=2026-03-31..E2E_END=2026-06-30 spans 91 days, over AGG_MAX_WINDOW_DAYS=90"
+    ]
 
 
-def test_e2e_window_outside_the_ingested_range_is_a_configuration_problem(clean_env):
-    # inside the 90-day cap and inside the hot window's own span, but before INGEST_START=2020-08-01
-    settings = Settings(_env_file=None, E2E_START="2019-01-01", E2E_END="2019-03-01", **REQUIRED)
-    problems = config.e2e_configuration_problems(settings)
-    assert any("ingested" in p for p in problems), problems
+def test_an_e2e_window_ending_past_ingest_end_is_a_configuration_problem(clean_env):
+    # ending ON INGEST_END is the defaults and accepted; one day past it, with the start moved in step
+    # so the span stays at the cap, is refused -- every request would answer outside_ingested_range
+    assert _e2e_problems(E2E_START="2026-04-02", E2E_END="2026-07-01") == [
+        _outside("2026-04-02", "2026-07-01")
+    ]
 
 
-def test_e2e_start_before_the_hot_window_cutoff_is_a_configuration_problem(clean_env):
-    # inside the ingested range and under the cap, but the deployed hot-window copy starts at
-    # 2026-03-01 (H=4 back from INGEST_END=2026-06-30), so this suite would not run against it
-    settings = Settings(_env_file=None, E2E_START="2025-01-01", E2E_END="2025-03-31", **REQUIRED)
-    problems = config.e2e_configuration_problems(settings)
-    assert any("cutoff" in p for p in problems), problems
+def test_an_e2e_window_starting_before_ingest_start_is_a_configuration_problem(clean_env):
+    # E2E_START on INGEST_START is accepted by this rule; one day before it is refused. Both also
+    # leave no room for the over-the-cap window, which starts 91 days before E2E_END
+    on_start = {"INGEST_START": "2026-04-01", "E2E_START": "2026-04-01", "E2E_END": "2026-06-30"}
+    assert _e2e_problems(**on_start) == [_no_room("2026-06-30", "2026-03-31", "2026-04-01")]
+    day_after = {**on_start, "INGEST_START": "2026-04-02"}
+    assert _e2e_problems(**day_after) == [
+        _outside("2026-04-01", "2026-06-30", ingest_start="2026-04-02"),
+        _no_room("2026-06-30", "2026-03-31", "2026-04-02"),
+    ]
+
+
+def test_the_over_the_cap_window_needs_its_first_day_inside_the_ingested_range(clean_env):
+    # E2E_END minus 91 days landing ON INGEST_START is accepted; one day short is refused
+    assert _e2e_problems(INGEST_START="2026-03-31") == []
+    assert _e2e_problems(INGEST_START="2026-04-01", E2E_START="2026-04-02") == [
+        _no_room("2026-06-30", "2026-03-31", "2026-04-01")
+    ]
+
+
+def test_an_e2e_window_starting_before_the_hot_window_cutoff_is_a_configuration_problem(clean_env):
+    # the deployed hot-window copy starts at 2026-03-01 (H=4 back from INGEST_END=2026-06-30).
+    # Starting on it is accepted by this rule, a day before is refused; a window that starts before
+    # the cutoff and ends after it is refused by its start
+    assert _e2e_problems(E2E_START="2026-03-01", E2E_END="2026-05-30") == [
+        _no_room_in_hot_window("2026-05-30", "2026-02-28", "2026-03-01")
+    ]
+    assert _e2e_problems(E2E_START="2026-02-28", E2E_END="2026-05-29") == [
+        _before_cutoff("2026-02-28"),
+        _no_room_in_hot_window("2026-05-29", "2026-02-27", "2026-03-01"),
+    ]
+
+
+def test_the_over_the_cap_window_needs_its_first_day_inside_the_hot_window(clean_env):
+    # E2E_END minus 91 days landing ON the cutoff is accepted, a day before it refused; and
+    # HOT_WINDOW_MONTHS=3, which the API accepts at INGEST_END=2026-06-30, leaves no such room
+    assert _e2e_problems(E2E_START="2026-03-02", E2E_END="2026-05-31") == []
+    assert _e2e_problems(E2E_START="2026-03-01", E2E_END="2026-05-30") == [
+        _no_room_in_hot_window("2026-05-30", "2026-02-28", "2026-03-01")
+    ]
+    assert _e2e_problems(HOT_WINDOW_MONTHS=3) == [
+        _no_room_in_hot_window("2026-06-30", "2026-03-31", "2026-04-01")
+    ]
+
+
+def test_a_hot_window_the_api_refuses_is_an_e2e_problem_and_skips_the_cutoff_rules(clean_env):
+    # the service would not start, and a cutoff that cannot be computed must not raise here
+    assert _e2e_problems(HOT_WINDOW_MONTHS=0) == [
+        "HOT_WINDOW_MONTHS=0 is below 1; the hot window has to hold at least"
+        " INGEST_END=2026-06-30's own month"
+    ]
+    assert _e2e_problems(HOT_WINDOW_MONTHS=24307) == [
+        "HOT_WINDOW_MONTHS=24307 reaches back before year 1 from INGEST_END=2026-06-30"
+    ]
+    assert _e2e_problems(HOT_WINDOW_MONTHS=3, AGG_MAX_WINDOW_DAYS=91) == [
+        _short_hot_window(3, "2026-06-30", 90, "2026-04-01", 91)
+    ]
 
 
 def test_e2e_symbols_with_no_symbol_at_all_is_a_configuration_problem(clean_env):
-    settings = Settings(_env_file=None, E2E_SYMBOLS=",", **REQUIRED)
-    problems = config.e2e_configuration_problems(settings)
-    assert any("E2E_SYMBOLS" in p for p in problems), problems
+    for symbols in (",", ""):
+        assert _e2e_problems(E2E_SYMBOLS=symbols) == [
+            f"E2E_SYMBOLS={symbols!r} carries an empty symbol"
+        ]
 
 
 def test_e2e_symbols_with_one_empty_entry_among_real_ones_is_a_configuration_problem(clean_env):
-    # "any" let this one through: AAPL and MSFT alone make the generator non-empty, so only
-    # checking EVERY entry catches the empty slot between them
-    settings = Settings(_env_file=None, E2E_SYMBOLS="AAPL,,MSFT", **REQUIRED)
-    problems = config.e2e_configuration_problems(settings)
-    assert any("E2E_SYMBOLS" in p for p in problems), problems
+    # AAPL and MSFT alone make any() true, so every entry has to be checked for the empty slot
+    # between them, and an entry of spaces is as empty as one of nothing
+    for symbols in ("AAPL,,MSFT", "AAPL, ,MSFT", "AAPL,MSFT,"):
+        assert _e2e_problems(E2E_SYMBOLS=symbols) == [
+            f"E2E_SYMBOLS={symbols!r} carries an empty symbol"
+        ]
+    # spaces around a real symbol are the fixture's to strip, not a problem
+    assert _e2e_problems(E2E_SYMBOLS="AAPL, MSFT") == []
 
 
 def test_e2e_base_url_without_a_scheme_is_a_configuration_problem(clean_env):
-    settings = Settings(_env_file=None, E2E_BASE_URL="127.0.0.1:8000", **REQUIRED)
-    problems = config.e2e_configuration_problems(settings)
-    assert any("E2E_BASE_URL" in p for p in problems), problems
+    for url in ("127.0.0.1:8000", "", "ftp://127.0.0.1:8000"):
+        assert _e2e_problems(E2E_BASE_URL=url) == [
+            f"E2E_BASE_URL={url!r} has no http:// or https:// scheme"
+        ]
+    # a deployed target is https
+    assert _e2e_problems(E2E_BASE_URL="https://market-data.example") == []
+    assert _e2e_problems(E2E_BASE_URL="http://127.0.0.1:8000") == []
 
 
 def test_e2e_defaults_construct_inside_the_ingested_and_hot_ranges(clean_env):
@@ -344,23 +543,117 @@ def test_the_page_and_pool_keys_are_integers(clean_env, monkeypatch):
     assert type(from_env.LOG_LEVEL) is str
 
 
-def test_an_empty_value_in_the_committed_env_example_still_constructs(no_env):
-    # the four measured keys ship as `KEY=` in .env.example; an unedited copy has to construct
-    settings = Settings(_env_file=".env.example")
+def test_the_committed_env_example_constructs_with_the_measured_keys_unset(no_env, repo_root):
+    # anchored at the repository root, not the cwd, and the four `KEY=` lines asserted present, so
+    # the construction below is about empty values and not about a file that lost them
+    example = repo_root / ".env.example"
+    lines = example.read_text().splitlines()
+    for key in MEASURED:
+        assert lines.count(f"{key}=") == 1, key
+    settings = Settings(_env_file=example)
+    assert settings.ALPACA_KEY_ID == "your-alpaca-key-id"
     for key in MEASURED:
         assert getattr(settings, key) is None
 
 
-def test_an_empty_required_key_still_fails_as_missing(no_env, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "")
-    without_dsn = {k: v for k, v in REQUIRED.items() if k != "DATABASE_URL"}
-    with pytest.raises(ValidationError) as excinfo:
-        Settings(_env_file=None, **without_dsn)
-    assert excinfo.value.errors()[0]["type"] == "missing"
-    assert "DATABASE_URL" in str(excinfo.value)
+def _env_file(tmp_path, **values):
+    path = tmp_path / "settings.env"
+    path.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
+    return path
 
 
-def test_an_empty_defaulted_key_takes_its_default(clean_env, monkeypatch):
-    monkeypatch.setenv("LOG_LEVEL", "")
-    settings = Settings(_env_file=None, **REQUIRED)
-    assert settings.LOG_LEVEL == "INFO"
+def test_an_empty_database_url_in_the_environment_beats_the_dsn_in_the_env_file(
+    no_env, monkeypatch, tmp_path
+):
+    # `DATABASE_URL="$SCRATCH_DSN"` with the variable unset must fail, never read .env's DSN
+    env_file = _env_file(tmp_path, **REQUIRED)
+    assert Settings(_env_file=env_file).DATABASE_URL == REQUIRED["DATABASE_URL"]
+    for empty in ("", "   "):
+        monkeypatch.setenv("DATABASE_URL", empty)
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(_env_file=env_file)
+        assert [error["loc"] for error in excinfo.value.errors()] == [("DATABASE_URL",)]
+
+
+def test_an_empty_value_is_refused_under_its_own_name_wherever_it_comes_from(
+    no_env, monkeypatch, tmp_path
+):
+    # every key but the four measured ones and the two the e2e rules read: in the environment over a
+    # file carrying a real value, and as `KEY=` in the file itself
+    reported_by_the_e2e_rules = ("E2E_BASE_URL", "E2E_SYMBOLS")
+    refusing = [
+        key for key in Settings.model_fields
+        if key not in MEASURED and key not in reported_by_the_e2e_rules
+    ]
+    assert len(refusing) == 22
+    defaults = Settings(_env_file=None, **REQUIRED)
+    real = {key: str(getattr(defaults, key)) for key in refusing}
+    for key in refusing:
+        for empty in ("", "   "):
+            monkeypatch.setenv(key, empty)
+            with pytest.raises(ValidationError) as excinfo:
+                Settings(_env_file=_env_file(tmp_path, **real))
+            assert key in str(excinfo.value), (key, empty)
+            monkeypatch.delenv(key)
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(_env_file=_env_file(tmp_path, **{**real, key: ""}))
+        assert key in str(excinfo.value), key
+
+
+def test_an_empty_e2e_target_never_resolves_to_the_default(no_env, monkeypatch, tmp_path):
+    # the default is the local service in front of production, so an empty override has to stay
+    # empty and be reported, from the environment over a file and from the file alone
+    env_file = _env_file(tmp_path, **REQUIRED, E2E_BASE_URL="http://127.0.0.1:1")
+    monkeypatch.setenv("E2E_BASE_URL", "")
+    from_env = Settings(_env_file=env_file)
+    monkeypatch.delenv("E2E_BASE_URL")
+    from_file = Settings(_env_file=_env_file(tmp_path, **REQUIRED, E2E_BASE_URL=""))
+    for settings in (from_env, from_file):
+        assert settings.E2E_BASE_URL == ""
+        assert config.e2e_configuration_problems(settings) == [
+            "E2E_BASE_URL='' has no http:// or https:// scheme"
+        ]
+
+
+def test_an_empty_measured_key_is_unset_wherever_it_comes_from(no_env, monkeypatch, tmp_path):
+    # unset, so require() names it; a measured value of 0 is a value, not an empty one, whether it
+    # arrives as text or as a number
+    measured = {
+        "BARS_PER_TICKER_DAY": "387.36",
+        "DEEP_PAGE_DEPTH": "1000000",
+        "HEAP_INDEX_BYTE_RATIO": "3.1",
+        "HEAP_INDEX_COVERING_RATIO": "1.9",
+    }
+    env_file = _env_file(tmp_path, **REQUIRED, **measured)
+    assert Settings(_env_file=env_file).DEEP_PAGE_DEPTH == 1000000
+    for key in MEASURED:
+        monkeypatch.setenv(key, "")
+    settings = Settings(_env_file=env_file)
+    for key in MEASURED:
+        assert getattr(settings, key) is None, key
+    for key in MEASURED:
+        monkeypatch.setenv(key, "0")
+    zero = Settings(_env_file=env_file)
+    for key in MEASURED:
+        assert getattr(zero, key) == 0, key
+        monkeypatch.delenv(key)
+    numeric_zero = Settings(_env_file=None, **REQUIRED, **{key: 0 for key in MEASURED})
+    for key in MEASURED:
+        assert getattr(numeric_zero, key) == 0, key
+
+
+def test_a_value_padded_with_whitespace_is_read_without_it():
+    # libpq refuses a connection string with a leading space and quotes the whole string, password
+    # included, back in the message it raises
+    padded = dict(
+        REQUIRED,
+        DATABASE_URL="  postgresql://appuser:s3cr3t@127.0.0.1:5432/marketdata  ",
+        ALPACA_KEY_ID=" key ",
+        ALPACA_TRADING_HOST="\thttps://paper-api.alpaca.markets\n",
+        ALPACA_FEED=" iex ",
+    )
+    settings = Settings(_env_file=None, **padded)
+    assert settings.DATABASE_URL == "postgresql://appuser:s3cr3t@127.0.0.1:5432/marketdata"
+    assert settings.ALPACA_KEY_ID == "key"
+    assert settings.ALPACA_TRADING_HOST == "https://paper-api.alpaca.markets"
+    assert settings.ALPACA_FEED == "iex"

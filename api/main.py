@@ -4,17 +4,21 @@ from contextlib import asynccontextmanager
 
 import psycopg
 from fastapi import FastAPI
+from psycopg import pq
 
-from api.deps import build_pool, build_version
+from api.deps import build_pool, build_version, mask_secrets
 from api.errors import INTERNAL_MESSAGE, RESPONSE_500, ApiError, install_error_handlers
 from api.routes import router
-from config import settings
+from config import hot_window_configuration_problems, settings
 
 # bounded well under an ALB's 5 s default health-check timeout, with room for the probe itself.
-# genuinely a bound now: /health runs on its own connection (below), off the shared pool and off
-# the 40-thread limiter every other (sync def) route shares, so a burst of slow requests elsewhere
-# cannot make this wait behind them
+# /health's own check runs on the event loop and on its own connection, off the shared pool and off
+# the 40-thread limiter every sync def route shares, so a burst of slow requests elsewhere cannot
+# delay the check. The 500 it answers with is built by the installed ApiError handler, which holds
+# this bound under such a burst only while that handler is itself async
 HEALTH_TIMEOUT_SECONDS = 2.0
+
+log = logging.getLogger(__name__)
 
 
 def configure_logging(level: str) -> None:
@@ -32,22 +36,127 @@ async def _lifespan(app: FastAPI):
     pool = app.state.pool
     # unbounded wait would refuse to start the process while the database is briefly down, defeating the point of a health check
     pool.open(wait=False)
-    yield
-    pool.close()
+    try:
+        yield
+    finally:
+        try:
+            # a check still in flight would otherwise hold shutdown for the rest of its own deadline
+            await app.state.checks.close()
+        finally:
+            # in a finally of its own: the pool holds server connections, and anything escaping the
+            # line above would otherwise leave them open for the process's lifetime
+            pool.close()
+
+
+async def _socket_ready(add_watcher, remove_watcher, fd: int) -> None:
+    ready = asyncio.get_running_loop().create_future()
+    add_watcher(fd, lambda: ready.done() or ready.set_result(None))
+    try:
+        await ready
+    finally:
+        # removed before the socket can close: asyncio keeps a watcher on a closed descriptor, and
+        # the next socket to reuse that number then never has its own watcher registered
+        remove_watcher(fd)
+
+
+async def _select_one(pgconn: pq.abc.PGconn) -> None:
+    loop = asyncio.get_running_loop()
+    # sent and read at the libpq level: on cancellation psycopg's own execute sends a cancel
+    # request and then waits for the query again with no deadline, which holds the response for
+    # as long as a server that connected and then froze stays frozen
+    pgconn.send_query(b"SELECT 1")
+    fd = pgconn.socket
+    while pgconn.flush():
+        await _socket_ready(loop.add_writer, loop.remove_writer, fd)
+    pgconn.consume_input()
+    while pgconn.is_busy():
+        await _socket_ready(loop.add_reader, loop.remove_reader, fd)
+        pgconn.consume_input()
+    answers = []
+    while (result := pgconn.get_result()) is not None:
+        if result.status == pq.ExecStatus.TUPLES_OK and result.ntuples == 1:
+            answers.append(result.get_value(0, 0))
+        else:
+            answers.append(result.get_error_message() or pq.ExecStatus(result.status).name)
+    # a connection that is refused its query answers with an error result rather than raising
+    if answers != [b"1"]:
+        raise psycopg.OperationalError(f"SELECT 1 answered {answers!r}")
 
 
 async def _check_database(dsn: str) -> None:
     # /health's own short-lived connection, never the shared pool: a request that is holding every
-    # pooled connection or every thread in the sync limiter must not make this read as a dead
-    # database. connect_timeout is a libpq connection parameter (seconds); it bounds the connect
-    # phase only, and the asyncio.wait_for around this call in the route bounds the query too
-    async with await psycopg.AsyncConnection.connect(
-        dsn, connect_timeout=HEALTH_TIMEOUT_SECONDS
-    ) as conn:
-        await conn.execute("SELECT 1")
+    # pooled connection must not make this read as a dead database. connect_timeout is a libpq
+    # connection parameter (seconds) and bounds the connect phase
+    conn = await psycopg.AsyncConnection.connect(dsn, connect_timeout=HEALTH_TIMEOUT_SECONDS)
+    try:
+        await _select_one(conn.pgconn)
+    finally:
+        # closes the socket at once, whether the check answered or its deadline cancelled it
+        await conn.close()
+
+
+async def _bounded_check(dsn: str) -> None:
+    try:
+        # cancelling _check_database removes its socket watcher and closes its socket, so this
+        # returns at the deadline rather than when the server does
+        await asyncio.wait_for(_check_database(dsn), timeout=HEALTH_TIMEOUT_SECONDS)
+        return
+    except asyncio.TimeoutError:
+        pass
+    # raised outside the except block: the timeout's own exception chain holds the frames of a
+    # connect cancelled mid-startup, and those hold its socket open for as long as it is kept
+    raise TimeoutError(f"the database did not answer within {HEALTH_TIMEOUT_SECONDS} s")
+
+
+def _failed_check_logger(dsn: str):
+    def log_failure(task: asyncio.Task) -> None:
+        if task.cancelled() or task.exception() is None:
+            return
+        exc = task.exception()
+        # once per check, however many probes shared it: the class and libpq's message tell an
+        # authentication failure, a full server, a DNS failure and a timeout apart. libpq quotes a
+        # connection string it cannot parse back in that message, password included, so what is
+        # logged is masked against the string this app was built with
+        log.warning(
+            "database check failed: %s: %s",
+            type(exc).__name__,
+            mask_secrets(str(exc), dsn),
+        )
+
+    return log_failure
+
+
+class _SharedCheck:
+    """At most one database check in flight per app; probes that arrive while it runs wait on it
+    rather than each opening a connection of their own."""
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task | None = None
+
+    def start(self, dsn: str) -> asyncio.Task:
+        task = self._task
+        if task is None or task.done():
+            task = self._task = asyncio.get_running_loop().create_task(_bounded_check(dsn))
+            task.add_done_callback(_failed_check_logger(dsn))
+        return task
+
+    async def close(self) -> None:
+        task = self._task
+        if task is None or task.done():
+            return
+        task.cancel()
+        # awaited so the cancellation lands and the check's own socket is closed before the loop
+        # this runs on is torn down. gathered rather than awaited directly, so the task's own
+        # CancelledError is absorbed while one aimed at the caller still ends the caller
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def create_app(dsn: str | None = None) -> FastAPI:
+    # checked here and not in Settings, so db.migrate and the ingest start on a configuration only the
+    # API cannot serve
+    problems = hot_window_configuration_problems(settings)
+    if problems:
+        raise RuntimeError("refusing to build the app:\n- " + "\n- ".join(problems))
     app = FastAPI(
         lifespan=_lifespan,
         # the same version /health reports: FastAPI's own default is a literal 0.1.0 that would stop
@@ -76,10 +185,17 @@ def create_app(dsn: str | None = None) -> FastAPI:
     app.state.dsn = resolved_dsn
     app.state.pool = build_pool(resolved_dsn)
 
+    checks = _SharedCheck()
+    # on app.state so the lifespan can end a check still in flight at shutdown
+    app.state.checks = checks
+
     @app.get("/health", summary="Service and database health", responses={500: RESPONSE_500})
     async def health():
         try:
-            await asyncio.wait_for(_check_database(app.state.dsn), timeout=HEALTH_TIMEOUT_SECONDS)
+            # shielded, so a probe that gives up does not cancel the check other probes share
+            await asyncio.wait_for(
+                asyncio.shield(checks.start(app.state.dsn)), timeout=HEALTH_TIMEOUT_SECONDS
+            )
         except Exception as exc:
             # covers both a connection/query failure and asyncio.TimeoutError from wait_for itself
             raise ApiError(500, "internal", INTERNAL_MESSAGE, None) from exc

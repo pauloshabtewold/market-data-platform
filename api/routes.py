@@ -16,6 +16,7 @@ from api.errors import (
     RESPONSE_404,
     RESPONSE_422,
     RESPONSE_500,
+    RESPONSE_DEFAULT,
     UNKNOWN_SYMBOL_MESSAGE,
     ApiError,
 )
@@ -132,16 +133,22 @@ LIMIT %(fetch)s"""
 # a value like 0.10 that carries a real trailing zero
 _NUMERIC_MAX_DIGITS_BEFORE_POINT = 131_072
 _NUMERIC_MAX_DIGITS_AFTER_POINT = 16_383
+# the largest exponent Postgres numeric reads (INT32_MAX / 2, measured): the one bound on a zero's
+# positive exponent, since a zero is stored with no digits before the point however far it moves
+_NUMERIC_MAX_EXPONENT = 1_073_741_823
 
 
 def _reject_numeric_overflow(value: Decimal) -> Decimal:
     sign, digits, exponent = value.as_tuple()
     if isinstance(exponent, str):
-        # 'n' (NaN) or 'F' (Infinity): Query's own finite_number check refuses both before this runs
+        # never reached, since pydantic's Decimal refuses every non-finite value first; returned
+        # rather than counted, because a NaN or an Infinity has no numeric exponent to count
         return value
-    digits_before = max(len(digits) + exponent, 0)
-    digits_after = max(-exponent, 0)
-    if digits_before > _NUMERIC_MAX_DIGITS_BEFORE_POINT or digits_after > _NUMERIC_MAX_DIGITS_AFTER_POINT:
+    if any(digits):
+        too_wide = len(digits) + exponent > _NUMERIC_MAX_DIGITS_BEFORE_POINT
+    else:
+        too_wide = exponent > _NUMERIC_MAX_EXPONENT
+    if too_wide or -exponent > _NUMERIC_MAX_DIGITS_AFTER_POINT:
         raise PydanticCustomError(
             "numeric_out_of_range", "min_move_pct is out of range for a Postgres numeric"
         )
@@ -151,13 +158,15 @@ def _reject_numeric_overflow(value: Decimal) -> Decimal:
 # Query lives inside the Annotated alias rather than as the parameter's default value: this
 # project's FastAPI discards any Annotated metadata that is not itself a FieldInfo/Depends
 # whenever the default is a bare Query(...), which would silently drop AfterValidator.
-# WithJsonSchema replaces Decimal's own anyOf(number, string) rendering, whose string branch
-# admits "-1" and rejects "1e3", with the plain number the service actually accepts
+# Query comes first, so ge=0 refuses a negative before AfterValidator counts its digits: a negative
+# is refused for its sign whatever its size. WithJsonSchema replaces Decimal's own anyOf(number,
+# string) rendering, whose string branch admits "-1" and rejects "1e3", with the plain number the
+# service actually accepts
 MinMovePct = Annotated[
     Decimal,
+    Query(ge=0),
     AfterValidator(_reject_numeric_overflow),
     WithJsonSchema({"type": "number", "minimum": 0, "default": 0}),
-    Query(ge=0),
 ]
 
 
@@ -264,10 +273,9 @@ def require_symbol(conn, symbol: str) -> None:
 @router.get(
     "/symbols",
     summary="List ingested symbols",
-    # this endpoint takes no window, so its 422 is unreachable -- it is declared anyway because
-    # FastAPI adds a 422 of its own, in the framework's shape rather than this one, to any route
-    # that declares a query parameter and does not document one itself
-    responses={400: RESPONSE_400, 422: RESPONSE_422, 500: RESPONSE_500},
+    # no window, so no 422; default is declared instead because FastAPI adds a 422 in its own
+    # shape to any route with a parameter that documents none of 422, 4XX or default
+    responses={400: RESPONSE_400, 500: RESPONSE_500, "default": RESPONSE_DEFAULT},
 )
 def list_symbols(
     active: bool | None = None,
