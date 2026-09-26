@@ -1,9 +1,10 @@
+import re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import AfterValidator, BaseModel, WithJsonSchema
+from pydantic import AfterValidator, BaseModel, BeforeValidator, WithJsonSchema
 from pydantic_core import PydanticCustomError
 from psycopg_pool import ConnectionPool
 
@@ -274,6 +275,34 @@ def _reject_numeric_overflow(value: Decimal) -> Decimal:
     return value
 
 
+# a date followed by a time separator, which is the shape pydantic reads as a datetime
+_A_DATE_WITH_A_TIME = re.compile(r"\d{4}-\d{2}-\d{2}[T ]")
+
+
+def _reject_a_window_bound_carrying_a_time(value):
+    # pydantic accepts a full ISO datetime for a date field when its wall-clock time is exactly
+    # midnight, and then keeps the LITERAL calendar date and discards the offset: the instant
+    # 2026-03-10T00:00:00+12:00 is 2026-03-09 in UTC and would be served as 2026-03-10. The bounds
+    # are compared against a timestamptz column in UTC, so no reading of such a request honours what
+    # it names -- and a client in a positive-offset zone formatting its window as offset-aware ISO
+    # timestamps is the obvious thing to do against an API whose rows carry +00:00. Refused under the
+    # parameter's own name rather than silently shifted by a day.
+    # Only this shape: a value that is malformed in any other way keeps pydantic's own slug
+    if isinstance(value, str) and _A_DATE_WITH_A_TIME.match(value.strip()):
+        raise PydanticCustomError(
+            "date_carries_a_time",
+            "a window bound is a calendar date (YYYY-MM-DD); a time or an offset on one cannot be"
+            " honoured, so it is refused rather than dropped",
+        )
+    return value
+
+
+# the date bound itself is deliberate and load-bearing -- it is what makes the partition comparison
+# IMMUTABLE and the pruning stable -- so the remedy for the coercion above is a validator and never
+# a type change
+WindowBound = Annotated[date, BeforeValidator(_reject_a_window_bound_carrying_a_time)]
+
+
 # Query lives inside the Annotated alias rather than as the parameter's default value: this
 # project's FastAPI discards any Annotated metadata that is not itself a FieldInfo/Depends
 # whenever the default is a bare Query(...), which would silently drop AfterValidator.
@@ -438,8 +467,8 @@ def list_symbols(
 )
 def list_bars(
     symbol: str,
-    start: date,
-    end: date,
+    start: WindowBound,
+    end: WindowBound,
     limit: Annotated[int, WithJsonSchema(_limit_schema(*_BARS_CAPS))] | None = None,
     cursor: str | None = None,
     pool: ConnectionPool = Depends(get_pool),
@@ -481,8 +510,8 @@ def list_bars(
 )
 def list_daily(
     symbol: str,
-    start: date,
-    end: date,
+    start: WindowBound,
+    end: WindowBound,
     limit: Annotated[int, WithJsonSchema(_limit_schema(*_DAILY_CAPS))] | None = None,
     cursor: str | None = None,
     pool: ConnectionPool = Depends(get_pool),
@@ -527,8 +556,8 @@ def list_daily(
 )
 def analytics_volatility(
     symbol: str,
-    start: date,
-    end: date,
+    start: WindowBound,
+    end: WindowBound,
     pool: ConnectionPool = Depends(get_pool),
 ):
     page_default, page_max = _VOLATILITY_CAPS
@@ -563,8 +592,8 @@ def analytics_volatility(
 )
 def analytics_gaps(
     symbol: str,
-    start: date,
-    end: date,
+    start: WindowBound,
+    end: WindowBound,
     pool: ConnectionPool = Depends(get_pool),
 ):
     page_default, page_max = _GAPS_CAPS
@@ -594,8 +623,8 @@ def analytics_gaps(
     },
 )
 def analytics_largest_moves(
-    start: date,
-    end: date,
+    start: WindowBound,
+    end: WindowBound,
     min_move_pct: MinMovePct = 0,
     limit: Annotated[int, WithJsonSchema(_limit_schema(*_MOVES_CAPS))] | None = None,
     cursor: str | None = None,

@@ -65,6 +65,10 @@ def test_a_131073_digit_min_move_pct_is_out_of_range():
     with pytest.raises(PydanticCustomError) as excinfo:
         _reject_numeric_overflow(Decimal("1" * 131_073))
     assert excinfo.value.type == "numeric_out_of_range"
+    # and the message, which is asserted here because here is the only place it is readable: the
+    # validation handler answers with INVALID_PARAMS_MESSAGE and publishes the slug above in
+    # detail.errors, so this sentence never reaches a client and nothing else could pin it
+    assert str(excinfo.value) == "min_move_pct is out of range for a Postgres numeric"
 
 
 def test_min_move_pct_refuses_negative_and_non_finite_values_before_counting_digits():
@@ -93,3 +97,58 @@ def test_min_move_pct_refuses_negative_and_non_finite_values_before_counting_dig
     # all three -- returned rather than failing on arithmetic with a non-numeric exponent
     for value in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
         assert _reject_numeric_overflow(value) is value
+
+
+# every endpoint that takes a window, with the rest of its parameters legal
+_WINDOWED = (
+    "/symbols/AAA/bars",
+    "/symbols/AAA/daily",
+    "/analytics/volatility?symbol=AAA",
+    "/analytics/gaps?symbol=AAA",
+    "/analytics/largest-moves",
+)
+# each of these is accepted for a date field by pydantic when its wall-clock time is midnight, and
+# the offset is then discarded in favour of the literal calendar date: 2026-03-10T00:00:00+12:00 is
+# the instant 2026-03-09T12:00:00Z, so the window served would be a day away from the one named
+_BOUNDS_CARRYING_A_TIME = (
+    "2026-04-01T00:00:00",
+    "2026-04-01 00:00:00",
+    "2026-04-01T00:00:00+12:00",
+    "2026-04-01T00:00:00-05:00",
+    "2026-04-01T00:00:00Z",
+)
+
+
+def test_a_window_bound_carrying_a_time_or_an_offset_is_refused_on_every_endpoint():
+    client = _client()
+    for url in _WINDOWED:
+        joiner = "&" if "?" in url else "?"
+        for bound in _BOUNDS_CARRYING_A_TIME:
+            for name, query in (
+                ("start", f"start={bound}&end=2026-04-02"),
+                ("end", f"start=2026-04-01&end={bound}"),
+            ):
+                response = client.get(f"{url}{joiner}{query}")
+                assert response.status_code == 400, (url, name, bound, response.text)
+                detail = response.json()["error"]["detail"]
+                assert detail["reason"] == "invalid_parameter", (url, name, bound)
+                assert detail["errors"] == [
+                    {"parameter": name, "location": "query", "type": "date_carries_a_time"}
+                ], (url, name, bound)
+
+
+def test_a_plain_calendar_bound_still_reaches_the_handler_and_other_bad_dates_keep_their_own_slug():
+    # the refusal above is scoped to the one shape pydantic would otherwise accept and misread: a
+    # plain date passes validation and reaches the never-opened pool, which is the 500 below, and a
+    # date that is malformed in any other way keeps pydantic's own slug rather than this one
+    client = _client()
+    for url in _WINDOWED:
+        joiner = "&" if "?" in url else "?"
+        legal = client.get(f"{url}{joiner}start=2026-04-01&end=2026-04-02")
+        assert legal.status_code == 500, (url, legal.text)
+        assert legal.json()["error"]["code"] == "internal", url
+    for value in ("2026/04/01", "nope", ""):
+        response = client.get(f"/symbols/AAA/bars?start={value}&end=2026-04-02")
+        assert response.status_code == 400, value
+        slug = response.json()["error"]["detail"]["errors"][0]["type"]
+        assert slug != "date_carries_a_time", (value, slug)
