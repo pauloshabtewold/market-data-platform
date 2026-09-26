@@ -181,10 +181,12 @@ def test_the_code_vocabulary_is_closed():
         "invalid_range",
         "unknown_symbol",
     ]
-    with pytest.raises(ValueError):
+    # the message as well as the type: it names the code it refused, which is what tells a typo
+    # apart from a sixth code somebody meant to add
+    with pytest.raises(ValueError, match="'not_found' is not a member of ERROR_CODES"):
         ApiError(404, "not_found", "m", None)
     # the wire shape's own constructor, which a later feature's handler can reach without ApiError
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="'not_found' is not a member of ERROR_CODES"):
         error_body("not_found", "m", None)
 
 

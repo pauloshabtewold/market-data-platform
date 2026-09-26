@@ -320,6 +320,18 @@ def test_a_pooled_connection_that_refuses_its_check_is_replaced(migrated_dsn, mo
             assert response is not None
             assert response.status_code == 200
             assert relay.links[0].client_closed.wait(1)
+            # and the refusal's own words, on a connection checked outside the pool: inside it the
+            # pool catches this and replaces the connection, so nothing ever reads the message that
+            # tells an operator WHAT the connection answered
+            outside_the_pool = psycopg.connect(relay.dsn, autocommit=True)
+            try:
+                relay.set_open_links("refuse_after_ready")
+                with pytest.raises(
+                    psycopg.OperationalError, match="the connection answered its check with"
+                ):
+                    deps._check_within_deadline(outside_the_pool)
+            finally:
+                outside_the_pool.close()
 
 
 def test_a_pooled_connection_the_server_closed_is_replaced(migrated_dsn, monkeypatch):
@@ -387,12 +399,20 @@ def test_health_sends_its_query_to_the_database_and_closes_the_connection(migrat
         assert _SELECT_ONE in link.sent
 
 
-def test_health_answers_internal_when_the_database_refuses_the_query(migrated_dsn):
+def test_health_answers_internal_when_the_database_refuses_the_query(migrated_dsn, caplog):
+    caplog.set_level(logging.DEBUG, logger="api.main")
     with _Relay(migrated_dsn, new_links="refuse_after_ready") as relay:
         app = create_app(migrated_dsn)
         app.state.dsn = relay.dsn
         with TestClient(app) as client:
             assert client.get("/health").status_code == 500
+    # the probe's own diagnostic, which is the only record of what the server answered: the 500 the
+    # client gets carries the one internal message and nothing about the cause
+    [record] = [record for record in caplog.records if record.name == "api.main"]
+    assert record.getMessage().startswith(
+        "database check failed: OperationalError: SELECT 1 answered "
+    )
+    assert "the relay refuses this query" in record.getMessage()
 
 
 def test_health_answers_at_its_deadline_when_the_database_freezes_after_connecting(
@@ -461,3 +481,34 @@ def test_a_failed_health_check_logs_its_cause_without_the_password(migrated_dsn,
     assert "password authentication failed" in message
     assert "not-the-password-4f1c" not in message
     assert wrong not in message
+
+    # the failure above is the one easiest to drive against a real server and the one failure whose
+    # message carries no password: libpq answers a wrong password with `FATAL: password
+    # authentication failed for user "..."`, so every assertion above holds whether or not the
+    # masking ran. The two below are real, unmocked libpq failures that DO quote the secret back --
+    # a connection string libpq cannot parse is echoed whole, password included -- so they are what
+    # makes this test fail when the masking is deleted, against a real libpq rather than a patched
+    # connect with hand-written exception text
+    for dsn, secret, quoted in (
+        (
+            " postgresql://appuser:LEAD-SPACE-PW-9a2b@127.0.0.1:1/marketdata",
+            "LEAD-SPACE-PW-9a2b",
+            'missing "=" after',
+        ),
+        (
+            "postgresql://appuser:PCT-PW-7c1d%zz@127.0.0.1:1/marketdata",
+            "PCT-PW-7c1d%zz",
+            "invalid percent-encoded token",
+        ),
+    ):
+        caplog.clear()
+        unparseable = create_app(migrated_dsn)
+        unparseable.state.dsn = dsn
+        with TestClient(unparseable) as client:
+            assert client.get("/health").status_code == 500, dsn
+        [record] = [record for record in caplog.records if record.name == "api.main"]
+        message = record.getMessage()
+        # the cause still reaches the operator, so the masking is not blanking the diagnostic
+        assert quoted in message, message
+        assert "***" in message, message
+        assert secret not in message, message

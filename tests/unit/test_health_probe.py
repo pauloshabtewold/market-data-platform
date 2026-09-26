@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import selectors
 import threading
 import time
 
@@ -357,8 +358,21 @@ def test_a_short_password_does_not_blank_out_the_words_of_the_message_around_it(
 
 
 def test_a_password_that_contains_another_configured_secret_is_masked_whole():
-    dsn = "host=h dbname=d password=secretpw sslpassword=secretpw-and-more"
-    masked = api.deps.mask_secrets('rejected "secretpw-and-more" and "secretpw"', dsn)
+    # the contained secret is NOT a prefix of the containing one, and that is the whole point: for a
+    # prefix pair, descending alphabetical order and longest-first order are the same order, so a pair
+    # like ("secretpw", "secretpw-and-more") is satisfied by either and pins neither. Here the short
+    # secret sorts alphabetically AFTER the long one, so masking it first rewrites the text and the
+    # long one no longer matches -- the operator would read aa-***-bb, which is the long password's
+    # length and both of its outer fragments, where the rule exists to produce ***
+    dsn = "host=h dbname=d password=zzzz sslpassword=aa-zzzz-bb"
+    assert api.deps._secrets_in(dsn) == ["aa-zzzz-bb", "zzzz"]
+    assert sorted(api.deps._secrets_in(dsn), reverse=True) == ["zzzz", "aa-zzzz-bb"]
+    assert api.deps.mask_secrets('rejected "aa-zzzz-bb"', dsn) == 'rejected "***"'
+    assert api.deps.mask_secrets('rejected "zzzz"', dsn) == 'rejected "***"'
+    # and the prefix pair the same rule was written from, kept because it is the shape a DSN
+    # carrying one password twice actually produces
+    prefix_pair = "host=h dbname=d password=secretpw sslpassword=secretpw-and-more"
+    masked = api.deps.mask_secrets('rejected "secretpw-and-more" and "secretpw"', prefix_pair)
     assert masked == 'rejected "***" and "***"'
 
 
@@ -425,6 +439,19 @@ def test_a_statement_timeout_under_a_millisecond_is_reported_by_the_line_that_re
         "pooled connection could not be configured: ValueError: "
         "STATEMENT_TIMEOUT_SECONDS=0.0004 is under one millisecond"
     ]
+
+
+def test_the_checks_own_refusals_name_the_bound_and_the_answer_they_refused():
+    # the two diagnostics a pooled connection's check raises, which nothing reads off the wire: the
+    # pool catches them, discards the connection and replaces it, so the only place they are ever
+    # read is an operator's log line -- and each was replaceable by None with the suite green
+    with pytest.raises(
+        psycopg.OperationalError,
+        match=f"the connection did not answer its check within {api.deps.POOL_CHECK_TIMEOUT_SECONDS} s",
+    ):
+        # a selector with nothing registered and a deadline already past: the shape of a peer that
+        # accepted the query and then stopped answering
+        api.deps._wait_for_socket(selectors.DefaultSelector(), time.monotonic() - 1)
 
 
 def test_shutdown_returns_only_once_the_check_it_cancelled_has_finished(monkeypatch):
