@@ -1,7 +1,9 @@
+import statistics
 from decimal import Decimal
 
 from db.session import connect
 from tests.market_fixture import (
+    DISCONTIGUOUS_RETURNS_PCT,
     DST_FRIDAY_EST,
     DST_MONDAY_EDT,
     PLAIN_TUESDAY,
@@ -9,6 +11,7 @@ from tests.market_fixture import (
     WINDOW_END,
     WINDOW_START,
     load,
+    load_discontiguous_symbol,
     load_flat_symbol,
     load_sparse_symbol,
     load_calendar,
@@ -198,6 +201,35 @@ def test_the_window_orders_by_ts_rather_than_trusting_physical_order(migrated_ds
     assert [r[0] for r in rows] == [0]
     assert rows[0][1] == 4 * (5 - 1)
     assert rows[0][3] == _expected_stddev()
+
+
+def test_a_return_is_close_to_close_and_not_the_bars_own_intra_minute_move(migrated_dsn, query_sql):
+    # every other fixture in this file is contiguous -- a bar's open is the previous bar's close --
+    # so the two definitions agree on every row and this file passed with either. On bars whose open
+    # is unrelated to both closes they disagree, and the assertions below are the close-to-close
+    # answer with the intra-bar one computed beside it to show the fixture can tell them apart
+    load_calendar(migrated_dsn)
+    load_discontiguous_symbol(migrated_dsn, "DISC")
+
+    rows = _read(migrated_dsn, query_sql, symbol="DISC")
+
+    close_to_close = [pct for _ in TRADING_DAYS for pct in DISCONTIGUOUS_RETURNS_PCT]
+    intra_bar = [
+        100 * (close - open_) / open_
+        for _ in TRADING_DAYS
+        for open_, close in ((210, 110), (310, 132))
+    ]
+    # the fixture is only a test of the definition while the two answers differ on it
+    assert not any(
+        abs(a - b) < 1e-9 for a, b in zip(sorted(close_to_close), sorted(intra_bar))
+    )
+    assert [row[0] for row in rows] == [0]
+    assert rows[0][1] == len(close_to_close)
+    # the sample estimator, computed by a different implementation from the statement's: with eight
+    # returns, sample and population differ in the fourth significant figure, so this pins
+    # stddev_samp as well as the return definition
+    assert rows[0][3] == Decimal(str(round(statistics.stdev(close_to_close), 6)))
+    assert rows[0][3] != Decimal(str(round(statistics.pstdev(close_to_close), 6)))
 
 
 def test_the_scrambled_and_ordered_fixtures_agree(migrated_dsn, fresh_dsn, query_sql):

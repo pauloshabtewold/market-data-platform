@@ -1,8 +1,10 @@
+import os.path
 import re
 import string
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from math import isclose, sqrt
+from statistics import pstdev, stdev
 
 import psycopg
 import pytest
@@ -15,6 +17,7 @@ from db.session import connect
 from tests.market_fixture import (
     BARS_PER_SESSION,
     DST_FRIDAY_EST,
+    PLAIN_TUESDAY,
     TRADING_DAYS,
     WINDOW_END,
     WINDOW_START,
@@ -22,6 +25,7 @@ from tests.market_fixture import (
     close_ts,
     ensure_partition,
     load,
+    load_discontiguous_symbol,
     load_flat_symbol,
     load_run_calendar,
     load_run_symbol,
@@ -166,6 +170,36 @@ _MOVES_JOIN_TEXT = (
 _MARKET_DAYS_COLUMNS = frozenset({"day", "open_ts", "close_ts", "session_minutes"})
 
 
+# the WHOLE statement, folded the same way -- generated from the shipped text and pasted, never
+# derived from it at run time, which would move both sides of the comparison together. The counts in
+# the join pin below are scoped to market_days' own six names, so a predicate touching none of them
+# leaves every one of them at its pinned number: an EXISTS over bars on an unindexed column passes
+# that pin unqualified and turns the bounded ordered walk into a semi-join whose inner side is every
+# row in the table. A pin on the statement is the only one whose scope is the statement rather than
+# the shape of a respelling somebody already met
+_MOVES_STATEMENT_TEXT = (
+    "select b.ts , b.symbol , round ( b.open , 4 ) as open , round ( b.close , 4 ) as close , "
+    "round ( 100 * ( b.close - b.open ) / b.open , 4 ) as move_pct from bars b join market_days m "
+    "on b.ts >= m.open_ts and b.ts < m.close_ts where m.day >= %(start)s and m.day <= %(end)s and "
+    "b.ts >= %(after_ts)s and ( b.ts , b.symbol ) > ( %(after_ts)s , %(after_symbol)s ) and "
+    "b.ts <= %(hi)s and b.open <> 0 and abs ( 100 * ( b.close - b.open ) / b.open ) >= "
+    "%(min_move_pct)s :: numeric order by b.ts , b.symbol limit %(fetch)s"
+)
+
+
+def _moves_statement_pin_problems(sql: str) -> list[str]:
+    """Every way sql differs from the shipped statement, read as Postgres resolves names in it."""
+    tokens, problems = _postgres_tokens(sql)
+    text = _postgres_text(tokens)
+    if text != _MOVES_STATEMENT_TEXT:
+        shared = len(os.path.commonprefix([text, _MOVES_STATEMENT_TEXT]))
+        problems.append(
+            f"the statement differs from the pinned text at {shared}:"
+            f" {text[shared:shared + 60]!r} against {_MOVES_STATEMENT_TEXT[shared:shared + 60]!r}"
+        )
+    return problems
+
+
 def _moves_join_pin_problems(sql: str) -> list[str]:
     """Every way sql reads market_days other than the half-open pair and the two day bounds."""
     tokens, problems = _postgres_tokens(sql)
@@ -184,6 +218,9 @@ def volatility_client(migrated_dsn):
     load(migrated_dsn)
     load_flat_symbol(migrated_dsn, "FLAT")
     load_sparse_symbol(migrated_dsn, "SPARSE", TRADING_DAYS, (0, 5, 35, 40, 65))
+    # bars that are neither flat nor contiguous: the only shape on which this statement's two
+    # statistical choices are both observable from a response
+    load_discontiguous_symbol(migrated_dsn, "DISC")
     with TestClient(create_app(migrated_dsn)) as c:
         yield c
 
@@ -338,6 +375,39 @@ def test_largest_moves_at_zero_threshold_includes_every_flat_bar_inclusively(mov
     flat_rows = [row for row in body["data"] if row["symbol"] == "FLAT"]
     assert flat_rows
     assert all(float(row["move_pct"]) == 0 for row in flat_rows)
+
+
+def test_largest_moves_drops_a_zero_open_bar_rather_than_dividing_the_page_by_zero(
+    moves_zero_client, migrated_dsn
+):
+    # planted directly, the way 05_largest_moves.sql's own zero-open test does: ingest/validate.py
+    # refuses a zero open and is the only thing that does -- there is no CHECK on bars.open in
+    # db/schema.sql or any migration -- so the guard has to be tested against the database's rules
+    # and not the loader's. Without the guard this request is a 500 for the whole page, and with it
+    # the zero-open row is the one bar `min_move_pct = 0` does not return
+    with connect(migrated_dsn) as conn:
+        conn.execute(
+            "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+            " VALUES ('ZERO', 'ZERO', 'X', true, %s) ON CONFLICT (symbol) DO NOTHING",
+            (bar_ts(PLAIN_TUESDAY, 4),),
+        )
+        conn.execute(
+            "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+            " VALUES ('ZERO', %s, 0, 50, 0, 50, 100, 1, 25)",
+            (bar_ts(PLAIN_TUESDAY, 4),),
+        )
+        conn.commit()
+
+    response = moves_zero_client.get(
+        "/analytics/largest-moves",
+        params={"start": "2026-03-01", "end": "2026-03-31", "min_move_pct": 0, "limit": 1000},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "ZERO" not in {row["symbol"] for row in body["data"]}
+    # the other forty are all still there, so the guard drops the zero-open row and nothing else
+    assert len(body["data"]) == BARS_PER_SESSION * len(TRADING_DAYS) * 2
 
 
 def test_largest_moves_above_a_threshold_excludes_flat_bars_and_keeps_the_negative_move(
@@ -643,7 +713,16 @@ def test_the_session_join_cannot_be_hashed(migrated_dsn):
                     "EXPLAIN " + api.routes._MOVES_SQL, {**params, "fetch": fetch}
                 ).fetchall()
             )
-            assert "Hash Join" not in plan, (fetch, plan)
+            # every hash-join node Postgres names and not the plain inner form alone: it prints
+            # Hash Join, Hash Left / Right / Full Join, Hash Semi Join, Hash Anti Join and
+            # Hash Right Semi / Anti Join, and only the first contains the literal "Hash Join" --
+            # a predicate that forces a semi-join prints one of the others
+            assert not re.search(r"Hash(?: \w+)* Join", plan), (fetch, plan)
+            # and no sort of any kind: what this exists to prevent is the bounded ordered walk being
+            # traded for a hash plus a Sort on (ts, symbol), and the Sort is the half that shows
+            # whatever the join node above it is called. The shipped plan is a Nested Loop over
+            # index scans with no Sort node at either fetch
+            assert not re.search(r"\b(?:Incremental )?Sort\b", plan), (fetch, plan)
 
 
 def test_the_session_join_pins_the_half_open_pair_and_nothing_that_could_be_hashed(migrated_dsn):
@@ -663,6 +742,22 @@ def test_the_session_join_pins_the_half_open_pair_and_nothing_that_could_be_hash
     # against the migrated table, so a column added to market_days cannot be read unnoticed
     assert {name for (name,) in columns} == _MARKET_DAYS_COLUMNS
     assert _moves_join_pin_problems(api.routes._MOVES_SQL) == []
+    assert _moves_statement_pin_problems(api.routes._MOVES_SQL) == []
+
+    # the case the join pin cannot see, and the reason this test needs a pin on the whole statement
+    # to deserve its name: a predicate on a column market_days does not have, added after the last
+    # bound. It leaves all six counted names at their pinned counts, and it makes the planner build
+    # a semi-join whose inner side is every row of bars -- 16x the shipped page's estimate on the
+    # loaded database, and a hash plus a Sort on the small fixture
+    added_predicate = api.routes._MOVES_SQL.replace(
+        "      AND b.ts <= %(hi)s\n",
+        "      AND b.ts <= %(hi)s\n"
+        "      AND EXISTS (SELECT 1 FROM bars b4"
+        " WHERE b4.volume = b.volume AND b4.symbol <> b.symbol)\n",
+    )
+    assert added_predicate != api.routes._MOVES_SQL
+    assert _moves_join_pin_problems(added_predicate) == []
+    assert _moves_statement_pin_problems(added_predicate)
 
 
 # the session-date equality respelled: in the ON clause or after the WHERE clause's last bound, each
@@ -939,6 +1034,42 @@ def test_volatility_annualizes_by_the_square_root_of_minutes_in_a_year(volatilit
     assert float(bucket["stddev_pct"]) > 0
     ratio = float(bucket["annualized_pct"]) / float(bucket["stddev_pct"])
     assert isclose(ratio, sqrt(98280), rel_tol=1e-3)
+
+
+def test_volatility_is_the_sample_estimator_over_close_to_close_returns(volatility_client):
+    # both of this statement's statistical choices, read from the response alone. Every other
+    # assertion on stddev_pct in this file is `== 0` or `> 0`, which the population estimator
+    # satisfies too, and the other mutation -- a return measured inside the bar rather than close to
+    # close -- is caught here only by the SPARSE tests, and only because SPARSE writes flat bars, so
+    # both choices lean on the query-level file through the shared .sql text
+    bars = volatility_client.get(
+        "/symbols/DISC/bars", params={"start": "2026-03-01", "end": "2026-03-31"}
+    ).json()["data"]
+    sessions = {}
+    for bar in bars:
+        sessions.setdefault(bar["ts"][:10], []).append(bar)
+    close_to_close, intra_bar = [], []
+    for day_bars in sessions.values():
+        day_bars.sort(key=lambda bar: bar["ts"])
+        for previous, bar in zip(day_bars, day_bars[1:]):
+            close_to_close.append(
+                100 * (bar["close"] - previous["close"]) / previous["close"]
+            )
+            intra_bar.append(100 * (bar["close"] - bar["open"]) / bar["open"])
+    # the recomputation is only a test of the definition while the two disagree on this fixture
+    assert sorted(round(value, 6) for value in close_to_close) != sorted(
+        round(value, 6) for value in intra_bar
+    )
+
+    data = volatility_client.get(
+        "/analytics/volatility",
+        params={"symbol": "DISC", "start": "2026-03-01", "end": "2026-03-31"},
+    ).json()["data"]
+    assert [row["bucket_minute"] for row in data] == [0]
+    assert data[0]["returns"] == len(close_to_close)
+    assert float(data[0]["stddev_pct"]) == round(stdev(close_to_close), 6)
+    assert float(data[0]["stddev_pct"]) != round(pstdev(close_to_close), 6)
+    assert float(data[0]["stddev_pct"]) != round(stdev(intra_bar), 6)
 
 
 def test_volatility_on_a_window_with_no_bars_answers_an_empty_list(volatility_client):

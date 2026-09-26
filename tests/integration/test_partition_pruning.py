@@ -9,7 +9,10 @@ is not redundant -- the design measures it at 71 index descents per trading day 
 one to four, on every Class A call -- has been resting on the comment alone.
 """
 
+import re
 from datetime import date
+
+import pytest
 
 from db.session import connect
 from tests.market_fixture import ensure_partition
@@ -28,18 +31,49 @@ def _six_months_of_partitions(dsn: str) -> str:
     return dsn
 
 
-def test_the_scalar_bound_on_bars_ts_prunes_every_partition_outside_the_window(migrated_dsn, query_sql):
+WINDOW = {"start": date(2026, 3, 1), "end": date(2026, 3, 31)}
+# all five statements the docstring above names, two of
+# which the analytics endpoints serve and whose Class A numbers are published. Each entry is a
+# statement and the parameters it declares
+STATEMENTS = (
+    ("01_volatility.sql", {"symbol": "AAA", **WINDOW}),
+    ("02_correlation.sql", {"symbol_a": "AAA", "symbol_b": "BBB", **WINDOW}),
+    ("03_gaps.sql", {"symbol": "AAA", **WINDOW}),
+    ("05_largest_moves.sql", {"min_move_pct": 0, "limit": 10, **WINDOW}),
+    ("06_daily_rollup.sql", {"symbol": "AAA", **WINDOW}),
+)
+# the rendered spelling of both halves of the bound; the file's own are
+# AND b.ts >= :'start'::date and AND b.ts <  :'end'::date + INTERVAL '1 day'. Both, because the
+# upper half alone still prunes the three partitions above the window and the control has to remove
+# every scalar comparison on the partition key to show the join prunes nothing by itself
+_BOUND = re.compile(
+    r"\n\s*AND b\.ts >= %\(start\)s::date"
+    r"|\n\s*AND b\.ts <\s+%\(end\)s::date \+ INTERVAL '1 day'"
+)
+
+
+def _plan(conn, sql, params):
+    return "\n".join(row[0] for row in conn.execute("EXPLAIN " + sql, params).fetchall())
+
+
+@pytest.mark.parametrize("name,params", STATEMENTS, ids=[name for name, _ in STATEMENTS])
+def test_the_scalar_bound_on_bars_ts_prunes_every_partition_outside_the_window(
+    migrated_dsn, query_sql, name, params
+):
     dsn = _six_months_of_partitions(migrated_dsn)
+    sql = query_sql(name)
+    # the same statement with the bound's lower half taken out of the RENDERED text, never out of
+    # the committed file: it is the negative control, and it is what makes the assertion below a
+    # statement about the bound rather than about the join or the calendar
+    without_bound, substitutions = _BOUND.subn("", sql)
+    assert substitutions == 2, f"{name} carries {substitutions} halves of the bound, expected 2"
 
     with connect(dsn) as conn:
-        plan = "\n".join(
-            row[0] for row in conn.execute(
-                "EXPLAIN " + query_sql("06_daily_rollup.sql"),
-                {"symbol": "AAA", "start": date(2026, 3, 1), "end": date(2026, 3, 31)},
-            ).fetchall()
-        )
+        plan = _plan(conn, sql, params)
+        unbounded = _plan(conn, without_bound, params)
 
     # the bound is a plain comparison against bars.ts, the partition key, and the bind values are
     # known by executor init -- which plain EXPLAIN reaches even without ANALYZE -- so pruning
     # does not need a live run to show up. five of the six children fall outside the window
-    assert "Subplans Removed: 5" in plan
+    assert "Subplans Removed: 5" in plan, plan
+    assert "Subplans Removed" not in unbounded, unbounded

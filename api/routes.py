@@ -123,6 +123,11 @@ WHERE m.day >= %(start)s AND m.day <= %(end)s
       AND b.ts >= %(after_ts)s
       AND (b.ts, b.symbol) > (%(after_ts)s, %(after_symbol)s)
       AND b.ts <= %(hi)s
+      -- db/schema.sql declares open as a bare numeric, so a zero is a row the database permits and
+      -- one of them divides the whole page by zero rather than one row. Kept, which means this
+      -- endpoint answers every regular-session bar with a NON-ZERO open at min_move_pct = 0 and not
+      -- literally every one: the deviation is published in docs/QUERY_PERFORMANCE.md, and the
+      -- alternative is a 500 on data only the ingest's own validation keeps out
       AND b.open <> 0
       AND abs(100 * (b.close - b.open) / b.open) >= %(min_move_pct)s::numeric
 ORDER BY b.ts, b.symbol
