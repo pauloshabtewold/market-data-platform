@@ -884,6 +884,16 @@ exist matters more than anything else in this subsection.
 **Block counts are execution only**; planning has its own column, as in the `/bars` subsection
 above.
 
+**What `min_move_pct = 0` returns, exactly.** Every regular-session bar in the window **whose open is
+not zero**. The statement carries `AND b.open <> 0`, and that is a deviation from "no filter at all"
+worth stating rather than leaving to a reader of the SQL: `db/schema.sql` declares `open` as a bare
+`numeric` with no constraint, so a zero is a value the database accepts, and the move is a percentage
+of the open. Without the guard one such row is not one missing row — it is `division by zero`, which
+is a 500 for the whole page and for every page of that window. The ingest refuses a zero open
+(`ingest/validate.py`) and is the only thing that does, so the guard covers rows written by any route
+that bypasses it. No such row exists in the loaded database, so no figure in this subsection moves
+either way.
+
 `:symbol = AAPL`, `:start = 2026-04-01`, `:end = 2026-06-30` — the window Class A is bound at above.
 `/analytics/largest-moves` takes no symbol; it binds `min_move_pct = 0` and `limit =
 AGG_PAGE_DEFAULT`, so `fetch = 101`, and its page 1 binds the window's own lower instant as the
@@ -1060,11 +1070,18 @@ probes the process held at 3 asyncio tasks and 10 open descriptors throughout an
 s, with no traceback logged — a shutdown with no check in flight. A check that is in flight at
 shutdown is cancelled rather than waited out, so shutdown does not carry the remainder of that
 check's 2 s deadline either; the suite bounds that case at under two seconds. A probe still waiting
-on that check when it is cancelled is ended with it and gets no response rather than a 500, which is
-one of the outcomes the single error shape does not cover: a request the HTTP server refuses before
-the app sees it answers 400 as plain text, and one whose headers it cannot read is closed with no
-response at all. Probes that overlap share one check rather than each opening a connection of their
-own, so the log carries one line per check and not per probe — 13 lines for 14 probes, the second
+on that check when it is cancelled receives a **`text/plain` 500 from the HTTP server itself**, not
+this service's `{"error": {...}}` and not silence — measured on a real uvicorn with
+`--timeout-graceful-shutdown` shorter than the probe's remaining deadline, which is the one way to
+reach this path: the cancellation arrives as `CancelledError`, a `BaseException`, so it passes
+through the route's own `except Exception` and through the middleware that would otherwise build the
+body. It is one of the outcomes the single error shape does not cover, and the others are the same
+kind: a request the HTTP server refuses before the app sees it answers 400 as plain text, and one
+whose headers it cannot read is closed with no response at all. **A monitor must therefore not read
+"no response" as the signature of a shutdown**; it is a 500 whose content type is the only thing
+distinguishing it from a live failure. The service as deployed sets no graceful-shutdown timeout, so
+uvicorn waits for the probe and it finishes at its own 2 s bound with a correctly shaped JSON 500.
+Probes that overlap share one check rather than each opening a connection of their own, so the log carries one line per check and not per probe — 13 lines for 14 probes, the second
 having joined a check already in flight and answered in 0.76 s, server-side like the two ranges
 above. The sharing is what holds under a flood: 60 concurrent probes against a container configured
 with `max_connections=16` answered **200 on all 60** in each of three runs, an administrative
