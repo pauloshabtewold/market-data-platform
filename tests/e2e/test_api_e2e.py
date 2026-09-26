@@ -272,6 +272,12 @@ def universe(client) -> tuple[list, dict]:
 
 
 def test_health_answers_ok_with_a_real_version(client):
+    # what this establishes and what it cannot. build_version() reads the installed package metadata
+    # and not the database, so a /health that answered without ever running its query would satisfy
+    # both tests here and the whole of this suite -- measured, on a service built with the check
+    # removed. Nothing reachable over HTTP against a healthy database distinguishes the two, so the
+    # check's existence is held by tests/integration/test_health.py, which drives a real server and a
+    # relay that refuses the query; this suite's subject is the contract a client sees
     response = client.get("/health")
     assert response.status_code == 200
     body = response.json()
@@ -483,9 +489,15 @@ def test_volatility_and_gaps_silently_ignore_an_undeclared_limit_and_cursor(
         "limit": settings.AGG_PAGE_MAX + 1,
         "cursor": _BAD_CURSOR,
     }
+    declared = {**window, "symbol": symbols[0]}
     for path in ("/analytics/volatility", "/analytics/gaps"):
         body = _page(client.get(path, params=params), path)
         assert body["next_cursor"] is None, path
+        # against the same request WITHOUT them, which is what makes this falsifiable: FastAPI drops
+        # an undeclared query parameter before the handler runs, so `next_cursor is None` alone is
+        # true of every possible implementation of these two endpoints, including one that honoured
+        # a limit. Identical bodies are not
+        assert body == _page(client.get(path, params=declared), path), path
 
 
 def test_a_bars_second_page_follows_the_cursor_without_repeating_a_row(client, window, symbols):
@@ -624,6 +636,69 @@ def test_a_largest_moves_page_has_non_decreasing_timestamps_and_every_row_clears
         assert abs(_dec(row["move_pct"])) >= threshold, row
 
 
+def test_a_largest_moves_page_that_spans_a_symbol_boundary_is_ordered_by_time(client, daily_rows):
+    # every other ordering check here reads a page that cannot span a symbol boundary: one liquid
+    # symbol contributes far more bars to the configured window than any limit this suite uses, so a
+    # page ordered by symbol and a page ordered by time are the same rows in the same order. This
+    # asks for a page that must cross one -- a single session, so the scan stays narrow, and a
+    # threshold that leaves only a handful of qualifying bars per symbol -- and the contract is
+    # chronological across the whole universe rather than ranked or grouped
+    day = daily_rows[-1]["day"]
+    params = {
+        "start": day,
+        "end": day,
+        "min_move_pct": "0.1",
+        "limit": min(100, settings.AGG_PAGE_MAX),
+    }
+    body = _page(client.get("/analytics/largest-moves", params=params), "largest-moves one session")
+    rows = body["data"]
+    assert rows, "no bar in the last session clears the threshold"
+    order = [row["symbol"] for row in rows]
+    # the page has to cross a boundary or nothing below distinguishes the two orderings
+    assert len(set(order)) > 1, order
+    timestamps = [_ts_key(row) for row in rows]
+    assert all(a <= b for a, b in zip(timestamps, timestamps[1:])), order
+    # and the symbols are NOT in ascending order, which is what a page ordered by symbol would be:
+    # under ORDER BY symbol, ts the symbol column never descends, and under ORDER BY ts, symbol it
+    # must, as soon as one timestamp is followed by an earlier-sorting symbol at a later one
+    assert any(a > b for a, b in zip(order, order[1:])), order
+
+
+def test_a_bad_parameter_is_refused_ahead_of_an_unknown_symbol(client, window):
+    # the precedence spec section 4 pins and resolve_request guarantees structurally: parameters
+    # (400) before range semantics (422) before existence (404), so a request carrying a bad cursor
+    # AND an unknown symbol is a 400. The suite drove the 422-before-404 half and never this one --
+    # every refusal test here holds every other input legal, which is the right way to test a
+    # refusal and the wrong way to test a precedence. A service that looked the symbol up first
+    # would answer 404 and would spend a pool checkout doing it
+    unknown_paths = (
+        (f"/symbols/{_UNKNOWN_SYMBOL}/bars", dict(window), settings.BARS_PAGE_MAX),
+        (f"/symbols/{_UNKNOWN_SYMBOL}/daily", dict(window), settings.AGG_PAGE_MAX),
+    )
+    for path, params, cap in unknown_paths:
+        error = _refusal(
+            client.get(path, params={**params, "cursor": _BAD_CURSOR}), 400, "invalid_cursor", path
+        )
+        assert error["detail"]["reason"] == "not_base64", (path, error)
+        error = _refusal(
+            client.get(path, params={**params, "limit": cap + 1}), 400, "invalid_params", path
+        )
+        assert error["detail"]["reason"] == "limit_out_of_range", (path, error)
+    # the two analytics endpoints that look a symbol up declare no cursor and no limit, so their
+    # 400 tier is reached through a malformed window bound instead
+    for path in ("/analytics/volatility", "/analytics/gaps"):
+        error = _refusal(
+            client.get(
+                path,
+                params={"symbol": _UNKNOWN_SYMBOL, "start": "2026/04/01", "end": window["end"]},
+            ),
+            400,
+            "invalid_params",
+            path,
+        )
+        assert error["detail"]["reason"] == "invalid_parameter", (path, error)
+
+
 def test_symbols_pages_walked_at_a_small_limit_concatenate_to_one_larger_page(client):
     _assert_walk_matches_one_larger_page(
         client, "/symbols", {}, small_limit=2, big_limit=5, cap=settings.BARS_PAGE_MAX
@@ -710,6 +785,7 @@ def test_the_configured_windows_first_and_last_session_are_not_dropped_by_any_en
     # ground truth from a codepath the rollup never touches: a largest-moves row for the symbol on
     # the window's literal edge is a regular-session bar there, so the rollup must report that day
     # and not a neighbour. A /bars row would not do, since a pre- or post-market bar is no session
+    checked, unchecked = [], []
     for literal, reported, label in (
         (window["start"], reported_first, "first"),
         (window["end"], reported_last, "last"),
@@ -721,8 +797,32 @@ def test_the_configured_windows_first_and_last_session_are_not_dropped_by_any_en
             ),
             f"/analytics/largest-moves at the window's literal {label} day",
         )
-        if any(row["symbol"] == symbol for row in edge["data"]):
+        traded = {row["symbol"] for row in edge["data"]}
+        if not traded:
+            # the literal edge is not a trading session at all, so there is nothing here for the
+            # rollup to have dropped. Recorded rather than passed over in silence: nothing in
+            # config.e2e_configuration_problems requires E2E_START or E2E_END to be a session, so
+            # whether the check below runs is a property of the calendar
+            unchecked.append((label, literal))
+            continue
+        if symbol in traded:
             assert reported == literal, f"daily dropped the window's {label} session"
+        # and the same claim without depending on the configured symbol having traded that day: any
+        # symbol with a regular-session bar at the literal edge is a symbol whose rollup must report
+        # that day, so this half holds whatever the configured symbol did
+        edge_symbol = sorted(traded)[0]
+        edge_daily = _page(
+            client.get(
+                f"/symbols/{edge_symbol}/daily", params={"start": literal, "end": literal}
+            ),
+            f"/daily for {edge_symbol} at the window's literal {label} day",
+        )
+        assert [row["day"] for row in edge_daily["data"]] == [literal], (
+            f"daily dropped the window's {label} session for {edge_symbol}"
+        )
+        checked.append((label, literal, edge_symbol))
+    # one of the two edges has to be a session, or this test established nothing
+    assert checked, f"neither window edge is a trading session: {unchecked}"
 
 
 def test_largest_moves_values_agree_with_bars_and_daily_for_one_symbol(
@@ -957,3 +1057,14 @@ def test_volatility_buckets_agree_with_a_recomputation_from_the_session_bars(
         factor_high = high if factor_high is None else min(factor_high, high)
     # whatever the annualisation factor is, one factor must scale every bucket's own deviation
     assert factor_high is None or factor_low <= factor_high, (factor_low, factor_high)
+    # and it is THAT factor: a bracket satisfied by any single multiplier is satisfied by a wrong
+    # one, which is how sqrt(252) in place of sqrt(252 x 390) -- a 19.75x error in every published
+    # annualized_pct -- would pass the line above. The returns are per minute, so the minutes in a
+    # trading year are the unit of the scaling
+    if factor_high is not None:
+        minutes_a_year = Decimal(252 * 390).sqrt()
+        assert factor_low <= minutes_a_year <= factor_high, (
+            factor_low,
+            minutes_a_year,
+            factor_high,
+        )
