@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import psycopg
 from fastapi import FastAPI
 from psycopg import pq
+from pydantic import BaseModel
 
 from api.deps import build_pool, build_version, mask_secrets
 from api.errors import INTERNAL_MESSAGE, RESPONSE_500, ApiError, install_error_handlers
@@ -19,6 +20,14 @@ from config import hot_window_configuration_problems, settings
 HEALTH_TIMEOUT_SECONDS = 2.0
 
 log = logging.getLogger(__name__)
+
+
+class HealthResponse(BaseModel):
+    """What a healthy probe is answered with, published for the same reason the pages are: through
+    the route's `responses` and never as response_model, so nothing re-serialises the reply."""
+
+    status: str
+    version: str
 
 
 def configure_logging(level: str) -> None:
@@ -189,7 +198,14 @@ def create_app(dsn: str | None = None) -> FastAPI:
     # on app.state so the lifespan can end a check still in flight at shutdown
     app.state.checks = checks
 
-    @app.get("/health", summary="Service and database health", responses={500: RESPONSE_500})
+    @app.get(
+        "/health",
+        summary="Service and database health",
+        responses={
+            200: {"model": HealthResponse, "description": "The service answered and the database did."},
+            500: RESPONSE_500,
+        },
+    )
     async def health():
         try:
             # shielded, so a probe that gives up does not cancel the check other probes share

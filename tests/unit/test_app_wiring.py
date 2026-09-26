@@ -9,6 +9,7 @@ import psycopg_pool
 import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.responses import PlainTextResponse
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from fastapi.testclient import TestClient
 from psycopg.rows import dict_row
@@ -709,6 +710,50 @@ def test_the_generated_documentation_answers_and_redoc_does_not(monkeypatch):
     assert error_info["properties"]["message"]["type"] == "string"
     detail_branches = error_info["properties"]["detail"]["anyOf"]
     assert sorted(branch.get("type") for branch in detail_branches) == ["null", "object"]
+
+    # the 200 READ, and not only counted as a key. A route that declares no schema for its success
+    # publishes `{"schema": {}}`, which a client generates as an untyped Any -- data's element shape,
+    # every column name and next_cursor with it -- so counting the status without reading it leaves
+    # the whole success contract unspecified
+    success_models = {
+        "/symbols": ("SymbolsPage", "SymbolRow"),
+        "/symbols/{symbol}/bars": ("BarsPage", "BarRow"),
+        "/symbols/{symbol}/daily": ("DailyPage", "DailyRow"),
+        "/analytics/volatility": ("VolatilityPage", "VolatilityBucket"),
+        "/analytics/gaps": ("GapsPage", "GapsSummary"),
+        "/analytics/largest-moves": ("MovesPage", "MoveRow"),
+    }
+    assert set(success_models) == data_routes
+    for path, (page_model, row_model) in success_models.items():
+        success = paths[path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert success == {"$ref": f"#/components/schemas/{page_model}"}, path
+        page_schema = schemas[page_model]
+        assert sorted(page_schema["required"]) == ["data", "next_cursor"], path
+        assert page_schema["properties"]["data"]["items"] == {
+            "$ref": f"#/components/schemas/{row_model}"
+        }, path
+        # required AS WELL AS nullable: spec section 4 pins next_cursor present-and-explicitly-null
+        # on the last page so a client checking presence and one checking truthiness behave alike,
+        # and a client generated from a document that marks the key optional cannot honour that
+        assert sorted(
+            branch.get("type") for branch in page_schema["properties"]["next_cursor"]["anyOf"]
+        ) == ["null", "string"], path
+    health = paths["/health"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert health == {"$ref": "#/components/schemas/HealthResponse"}
+    assert sorted(schemas["HealthResponse"]["required"]) == ["status", "version"]
+    # and every one of those is published through `responses`, never as response_model: a
+    # response_model re-serialises each row on the request path, which moves what a numeric column
+    # looks like on the wire and what a published page costs. Both containers,
+    # because this fastapi keeps an included router's routes behind an _IncludedRouter rather than
+    # on the app -- and the count pinned, so a seventh route cannot arrive unenumerated
+    documented = [
+        route
+        for container in (client.app.router, api.routes.router)
+        for route in getattr(container, "routes", ())
+        if isinstance(route, APIRoute)
+    ]
+    assert len(documented) == len(success_models) + 1
+    assert [route.path for route in documented if route.response_model is not None] == []
 
     # limit's minimum, maximum and default are published purely for documentation -- they mirror
     # what resolve_request enforces against the RESOLVED limit, without adding pydantic validation

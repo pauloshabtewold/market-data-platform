@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import AfterValidator, WithJsonSchema
+from pydantic import AfterValidator, BaseModel, WithJsonSchema
 from pydantic_core import PydanticCustomError
 from psycopg_pool import ConnectionPool
 
@@ -136,6 +136,125 @@ _NUMERIC_MAX_DIGITS_AFTER_POINT = 16_383
 # the largest exponent Postgres numeric reads (INT32_MAX / 2, measured): the one bound on a zero's
 # positive exponent, since a zero is stored with no digits before the point however far it moves
 _NUMERIC_MAX_EXPONENT = 1_073_741_823
+
+
+# The shape of a 200, published so the generated document says what a request returns and not only
+# how it can fail. Declared through `responses={200: {"model": ...}}` and NEVER as response_model,
+# which would re-serialise every row through pydantic on the request path: that moves what a numeric
+# column looks like on the wire and adds per-row validation to a 1,000-row page whose block and
+# latency figures are already published. These models are read by the document generator alone, so
+# the wire is byte-for-byte what it was.
+# Every numeric column is `float`, which publishes `type: number`: a whole-dollar price reaches the
+# wire as a JSON integer and a fractional one as a JSON float, and `number` is the one JSON Schema
+# type that admits both. Every column db/schema.sql leaves nullable is nullable here.
+# next_cursor carries no default in any page, so the document marks it required AS WELL AS nullable
+# -- spec section 4 pins it present-and-explicitly-null on the last page precisely so a generated
+# client that checks presence and one that checks truthiness behave alike, and a client generated
+# from a document where the key is optional cannot honour that.
+
+
+class SymbolRow(BaseModel):
+    symbol: str
+    name: str | None
+    exchange: str | None
+    active: bool | None
+    first_bar_ts: datetime | None
+
+
+class SymbolsPage(BaseModel):
+    data: list[SymbolRow]
+    next_cursor: str | None
+
+
+class BarRow(BaseModel):
+    ts: datetime
+    open: float | None
+    high: float | None
+    low: float | None
+    close: float | None
+    volume: int | None
+    trade_count: int | None
+    vwap: float | None
+
+
+class BarsPage(BaseModel):
+    data: list[BarRow]
+    next_cursor: str | None
+
+
+class DailyRow(BaseModel):
+    day: date
+    open: float | None
+    high: float | None
+    low: float | None
+    close: float | None
+    volume: int | None
+    bars: int
+
+
+class DailyPage(BaseModel):
+    data: list[DailyRow]
+    next_cursor: str | None
+
+
+class VolatilityBucket(BaseModel):
+    bucket_minute: int
+    returns: int
+    # null wherever the statistic is undefined on the rows it aggregates: stddev_samp of a single
+    # return is NULL, and an annualised figure derived from it is NULL with it
+    avg_minutes_per_return: float | None
+    stddev_pct: float | None
+    annualized_pct: float | None
+
+
+class VolatilityPage(BaseModel):
+    data: list[VolatilityBucket]
+    next_cursor: str | None
+
+
+class GapsSummary(BaseModel):
+    # 03_gaps.sql has no GROUP BY, so this is always exactly one row: a window holding no gap
+    # answers the counts as zero and every distribution field as null
+    gaps: int
+    gaps_spanning_a_skipped_session: int
+    mean_pct: float | None
+    stddev_pct: float | None
+    min_pct: float | None
+    p25_pct: float | None
+    median_pct: float | None
+    p75_pct: float | None
+    max_pct: float | None
+    gaps_up: int
+    gaps_down: int
+    gaps_flat: int
+
+
+class GapsPage(BaseModel):
+    data: list[GapsSummary]
+    next_cursor: str | None
+
+
+class MoveRow(BaseModel):
+    ts: datetime
+    symbol: str
+    open: float | None
+    close: float | None
+    move_pct: float | None
+
+
+class MovesPage(BaseModel):
+    data: list[MoveRow]
+    next_cursor: str | None
+
+
+_PAGE_200 = "A page of results, oldest first, with next_cursor null on the last page."
+_WHOLE_200 = "The whole result for the window; this endpoint does not paginate, so next_cursor is null."
+RESPONSE_200_SYMBOLS = {"model": SymbolsPage, "description": _PAGE_200}
+RESPONSE_200_BARS = {"model": BarsPage, "description": _PAGE_200}
+RESPONSE_200_DAILY = {"model": DailyPage, "description": _PAGE_200}
+RESPONSE_200_VOLATILITY = {"model": VolatilityPage, "description": _WHOLE_200}
+RESPONSE_200_GAPS = {"model": GapsPage, "description": _WHOLE_200}
+RESPONSE_200_MOVES = {"model": MovesPage, "description": _PAGE_200}
 
 
 def _reject_numeric_overflow(value: Decimal) -> Decimal:
@@ -275,7 +394,12 @@ def require_symbol(conn, symbol: str) -> None:
     summary="List ingested symbols",
     # no window, so no 422; default is declared instead because FastAPI adds a 422 in its own
     # shape to any route with a parameter that documents none of 422, 4XX or default
-    responses={400: RESPONSE_400, 500: RESPONSE_500, "default": RESPONSE_DEFAULT},
+    responses={
+        200: RESPONSE_200_SYMBOLS,
+        400: RESPONSE_400,
+        500: RESPONSE_500,
+        "default": RESPONSE_DEFAULT,
+    },
 )
 def list_symbols(
     active: bool | None = None,
@@ -304,7 +428,13 @@ def list_symbols(
     "/symbols/{symbol}/bars",
     summary="Minute bars for one symbol",
     description=_BARS_DESCRIPTION,
-    responses={400: RESPONSE_400, 404: RESPONSE_404, 422: RESPONSE_422, 500: RESPONSE_500},
+    responses={
+        200: RESPONSE_200_BARS,
+        400: RESPONSE_400,
+        404: RESPONSE_404,
+        422: RESPONSE_422,
+        500: RESPONSE_500,
+    },
 )
 def list_bars(
     symbol: str,
@@ -341,7 +471,13 @@ def list_bars(
 @router.get(
     "/symbols/{symbol}/daily",
     summary="Daily bars for one symbol",
-    responses={400: RESPONSE_400, 404: RESPONSE_404, 422: RESPONSE_422, 500: RESPONSE_500},
+    responses={
+        200: RESPONSE_200_DAILY,
+        400: RESPONSE_400,
+        404: RESPONSE_404,
+        422: RESPONSE_422,
+        500: RESPONSE_500,
+    },
 )
 def list_daily(
     symbol: str,
@@ -381,7 +517,13 @@ def list_daily(
 @router.get(
     "/analytics/volatility",
     summary="Realized volatility by half-hour bucket",
-    responses={400: RESPONSE_400, 404: RESPONSE_404, 422: RESPONSE_422, 500: RESPONSE_500},
+    responses={
+        200: RESPONSE_200_VOLATILITY,
+        400: RESPONSE_400,
+        404: RESPONSE_404,
+        422: RESPONSE_422,
+        500: RESPONSE_500,
+    },
 )
 def analytics_volatility(
     symbol: str,
@@ -411,7 +553,13 @@ def analytics_volatility(
 @router.get(
     "/analytics/gaps",
     summary="Overnight gap distribution for one symbol",
-    responses={400: RESPONSE_400, 404: RESPONSE_404, 422: RESPONSE_422, 500: RESPONSE_500},
+    responses={
+        200: RESPONSE_200_GAPS,
+        400: RESPONSE_400,
+        404: RESPONSE_404,
+        422: RESPONSE_422,
+        500: RESPONSE_500,
+    },
 )
 def analytics_gaps(
     symbol: str,
@@ -438,7 +586,12 @@ def analytics_gaps(
 @router.get(
     "/analytics/largest-moves",
     summary="Minute moves at or above a threshold, universe-wide",
-    responses={400: RESPONSE_400, 422: RESPONSE_422, 500: RESPONSE_500},
+    responses={
+        200: RESPONSE_200_MOVES,
+        400: RESPONSE_400,
+        422: RESPONSE_422,
+        500: RESPONSE_500,
+    },
 )
 def analytics_largest_moves(
     start: date,
