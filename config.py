@@ -67,7 +67,10 @@ class Settings(BaseSettings):
     AGG_PAGE_MAX: int = 1000
     DB_POOL_MIN: int = 1
     DB_POOL_MAX: int = 10
-    LOG_LEVEL: str = "INFO"
+    # NonBlankStr like the other six string keys: a .env line with a trailing space before the
+    # newline is tolerated on those six and refused the service on this one alone, and the closed
+    # vocabulary below is checked against the stripped value
+    LOG_LEVEL: NonBlankStr = "INFO"
     # the end-to-end suite's target, defaulted because CI starts no service and exports none of
     # them. The window is exactly AGG_MAX_WINDOW_DAYS and sits inside the hot window Feature 10
     # copies to RDS, so the identical suite runs against the deployed database unchanged. Plain
@@ -97,11 +100,15 @@ class Settings(BaseSettings):
     @classmethod
     def _an_empty_measured_key_is_unset(cls, value):
         # .env.example ships these four as `KEY=` until they are measured, and unset is what makes
-        # require() name the key at use rather than a parse error stopping every import of config
-        return None if value == "" else value
+        # require() name the key at use rather than a parse error stopping every import of config.
+        # blank rather than only empty: python-dotenv trims an unquoted value, so `KEY=` and
+        # `KEY=   ` both arrive here as "" while a quoted `KEY="  "` keeps its spaces -- the same
+        # intent written three ways, and a rule written against "" alone reads two of them as a
+        # measurement and refuses to parse it
+        return None if isinstance(value, str) and not value.strip() else value
 
     @model_validator(mode="after")
-    def _page_pool_and_log_level_bounds_hold(self):
+    def _page_pool_window_and_log_level_bounds_hold(self):
         if self.BARS_PAGE_DEFAULT > self.BARS_PAGE_MAX:
             raise ValueError(
                 f"BARS_PAGE_DEFAULT={self.BARS_PAGE_DEFAULT} exceeds"
@@ -119,6 +126,15 @@ class Settings(BaseSettings):
         if self.DB_POOL_MAX < 1:
             raise ValueError(
                 f"DB_POOL_MAX={self.DB_POOL_MAX} is below the minimum pool size of 1"
+            )
+        # floored here because a missing floor on this key does not merely accept a bad value, it
+        # switches a different check off: hot_window_configuration_problems compares a span that is
+        # never negative against this number, so at zero or below that comparison can only pass and
+        # the hot-window gate goes quiet for every hot window, however short
+        if self.AGG_MAX_WINDOW_DAYS < 1:
+            raise ValueError(
+                f"AGG_MAX_WINDOW_DAYS={self.AGG_MAX_WINDOW_DAYS} is below the minimum window of"
+                " 1 day; the hot-window check compares against it and cannot fire below it"
             )
         # checked here because basicConfig accepts a bad level silently once a handler already exists
         if self.LOG_LEVEL not in logging.getLevelNamesMapping():

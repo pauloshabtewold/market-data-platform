@@ -506,6 +506,29 @@ def test_a_pool_maximum_below_one_is_refused(clean_env):
         Settings(_env_file=None, DB_POOL_MIN=0, DB_POOL_MAX=0, **REQUIRED)
 
 
+def test_a_window_cap_below_one_day_is_refused_and_the_hot_window_gate_still_fires_at_the_floor(
+    clean_env,
+):
+    # the floor is not about accepting a silly number: hot_window_configuration_problems compares
+    # (INGEST_END - cutoff).days, which is never negative, against this key, so at zero or below the
+    # only reachable answer is "no problems" and the startup gate goes quiet for every hot window.
+    # The second half is what makes that a floor rather than a rename -- at 1, the gate still refuses
+    for cap in (0, -1, -1000):
+        with pytest.raises(ValidationError, match="AGG_MAX_WINDOW_DAYS"):
+            Settings(_env_file=None, AGG_MAX_WINDOW_DAYS=cap, **REQUIRED)
+    required = {key: value for key, value in REQUIRED.items() if key != "INGEST_END"}
+    at_the_floor = Settings(
+        _env_file=None,
+        AGG_MAX_WINDOW_DAYS=1,
+        HOT_WINDOW_MONTHS=1,
+        INGEST_END="2026-06-01",
+        **required,
+    )
+    assert config.hot_window_configuration_problems(at_the_floor) == [
+        _short_hot_window(1, date(2026, 6, 1), 0, date(2026, 6, 1), 1)
+    ]
+
+
 def test_an_unknown_log_level_is_refused(clean_env):
     with pytest.raises(ValidationError, match="LOG_LEVEL"):
         Settings(_env_file=None, LOG_LEVEL="NOTALEVEL", **REQUIRED)
@@ -640,6 +663,23 @@ def test_an_empty_measured_key_is_unset_wherever_it_comes_from(no_env, monkeypat
     numeric_zero = Settings(_env_file=None, **REQUIRED, **{key: 0 for key in MEASURED})
     for key in MEASURED:
         assert getattr(numeric_zero, key) == 0, key
+    # blank as well as empty, and from both spellings a .env line can carry: python-dotenv trims an
+    # unquoted value, so only the quoted form reaches Settings with its spaces intact -- a rule
+    # written against "" alone reads that one as a measurement and refuses to parse it
+    for key in MEASURED:
+        monkeypatch.setenv(key, "   ")
+    blank_from_env = Settings(_env_file=env_file)
+    for key in MEASURED:
+        assert getattr(blank_from_env, key) is None, key
+        monkeypatch.delenv(key)
+    quoted = tmp_path / "quoted.env"
+    quoted.write_text(
+        "".join(f"{key}={value}\n" for key, value in REQUIRED.items())
+        + "".join(f'{key}="   "\n' for key in MEASURED)
+    )
+    blank_from_file = Settings(_env_file=quoted)
+    for key in MEASURED:
+        assert getattr(blank_from_file, key) is None, key
 
 
 def test_a_value_padded_with_whitespace_is_read_without_it():
@@ -651,9 +691,17 @@ def test_a_value_padded_with_whitespace_is_read_without_it():
         ALPACA_KEY_ID=" key ",
         ALPACA_TRADING_HOST="\thttps://paper-api.alpaca.markets\n",
         ALPACA_FEED=" iex ",
+        # the seventh string key, stripped like the six above: unstripped, a padded value fails the
+        # closed vocabulary below, which is a refusal for a trailing space in a .env line
+        LOG_LEVEL="  INFO  ",
     )
     settings = Settings(_env_file=None, **padded)
     assert settings.DATABASE_URL == "postgresql://appuser:s3cr3t@127.0.0.1:5432/marketdata"
     assert settings.ALPACA_KEY_ID == "key"
     assert settings.ALPACA_TRADING_HOST == "https://paper-api.alpaca.markets"
     assert settings.ALPACA_FEED == "iex"
+    assert settings.LOG_LEVEL == "INFO"
+    # and the refusal's own words for a value that is nothing but padding, which is what tells a
+    # blank value apart from a missing one in the line an operator reads
+    with pytest.raises(ValidationError, match="must not be empty or all whitespace"):
+        Settings(_env_file=None, **dict(REQUIRED, ALPACA_KEY_ID="   "))
