@@ -280,8 +280,11 @@ def _reject_numeric_overflow(value: Decimal) -> Decimal:
     return value
 
 
-# a date followed by a time separator, which is the shape pydantic reads as a datetime
-_A_DATE_WITH_A_TIME = re.compile(r"\d{4}-\d{2}-\d{2}[T ]")
+# a date followed by a time separator, which is the shape pydantic reads as a datetime. The four
+# characters are measured rather than assumed: pydantic-core accepts t, T, _ and a space between the
+# date and the time and nothing else, so a set written from the two obvious ones would leave the
+# other two silently reinterpreted
+_A_DATE_WITH_A_TIME = re.compile(r"\d{4}-\d{2}-\d{2}[tT_ ]")
 
 
 def _reject_a_window_bound_carrying_a_time(value):

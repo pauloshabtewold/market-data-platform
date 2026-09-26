@@ -108,14 +108,16 @@ _WINDOWED = (
     "/analytics/largest-moves",
 )
 # each of these is accepted for a date field by pydantic when its wall-clock time is midnight, and
-# the offset is then discarded in favour of the literal calendar date: 2026-03-10T00:00:00+12:00 is
-# the instant 2026-03-09T12:00:00Z, so the window served would be a day away from the one named
-_BOUNDS_CARRYING_A_TIME = (
-    "2026-04-01T00:00:00",
-    "2026-04-01 00:00:00",
-    "2026-04-01T00:00:00+12:00",
-    "2026-04-01T00:00:00-05:00",
-    "2026-04-01T00:00:00Z",
+# the offset is then discarded in favour of the literal calendar date: 2026-04-01T00:00:00+12:00 is
+# the instant 2026-03-31T12:00:00Z, so the window served would be a day away from the one named.
+# EVERY separator pydantic accepts is driven, not the obvious one: the set is t, T, _ and a space,
+# measured by feeding a date adapter all of string.printable, and a rule written from T and a space
+# alone leaves the other two reinterpreted in silence
+_DATE_TIME_SEPARATORS = ("T", "t", "_", " ")
+_BOUNDS_CARRYING_A_TIME = tuple(
+    f"2026-04-01{separator}00:00:00{offset}"
+    for separator in _DATE_TIME_SEPARATORS
+    for offset in ("", "+12:00", "-05:00", "Z")
 )
 
 
@@ -147,7 +149,9 @@ def test_a_plain_calendar_bound_still_reaches_the_handler_and_other_bad_dates_ke
         legal = client.get(f"{url}{joiner}start=2026-04-01&end=2026-04-02")
         assert legal.status_code == 500, (url, legal.text)
         assert legal.json()["error"]["code"] == "internal", url
-    for value in ("2026/04/01", "nope", ""):
+    # and the neighbours of the separator set that pydantic refuses outright, which must keep their
+    # own slug rather than being claimed by the rule above
+    for value in ("2026/04/01", "nope", "", "2026-04-01x00:00:00", "20260401T000000+1200"):
         response = client.get(f"/symbols/AAA/bars?start={value}&end=2026-04-02")
         assert response.status_code == 400, value
         slug = response.json()["error"]["detail"]["errors"][0]["type"]
