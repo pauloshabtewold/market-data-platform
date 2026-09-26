@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -11,13 +12,19 @@ from config import settings
 
 def _e2e_selection():
     # loaded by path rather than as `tests.e2e_selection`: pytest puts its own rootdir on sys.path,
-    # so a run whose rootdir sits outside this repository has no importable `tests` package
-    module = sys.modules.get("_e2e_selection")
+    # so a run whose rootdir sits outside this repository has no importable `tests` package.
+    # Keyed in sys.modules by that path and not by a bare name: one pytest process can load two
+    # copies of this repository -- a typed path into a snapshot beside the live tree is ordinary
+    # here -- and under a shared key the second copy gets the first copy's module, whose E2E_DIR
+    # names the FIRST tree's tests/e2e. Both guard layers read this function, so a shared key
+    # switches both of them off for every tree but the first
+    path = Path(__file__).resolve().parent.parent / "e2e_selection.py"
+    key = "_e2e_selection_" + hashlib.sha256(str(path).encode()).hexdigest()[:16]
+    module = sys.modules.get(key)
     if module is None:
-        path = Path(__file__).resolve().parent.parent / "e2e_selection.py"
-        spec = importlib.util.spec_from_file_location("_e2e_selection", path)
+        spec = importlib.util.spec_from_file_location(key, path)
         module = importlib.util.module_from_spec(spec)
-        sys.modules["_e2e_selection"] = module
+        sys.modules[key] = module
         spec.loader.exec_module(module)
     return module
 

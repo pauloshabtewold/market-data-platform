@@ -101,10 +101,37 @@ def forms(repo_root, tmp_path_factory):
             }
             return {name: future.result() for name, future in futures.items()}
 
+    # a SECOND copy of this tree's guard, built beside the first: one pytest process loading both
+    # is the case every form below misses, because they all drive one tree
+    second = workdir / "second"
+    (second / "tests" / "e2e").mkdir(parents=True, exist_ok=True)
+    for name in ("conftest.py", "e2e_selection.py"):
+        (second / "tests" / name).write_text((tests_dir / name).read_text())
+    (second / "tests" / "e2e" / "conftest.py").write_text((e2e_dir / "conftest.py").read_text())
+    # a stand-in rather than a copy of the real file: what is under test is which items the guard
+    # hides in the second tree, not what those items do
+    (second / "tests" / "e2e" / "test_second_tree_e2e.py").write_text(
+        "def test_placeholder():\n    pass\n"
+    )
+    # and one outside its tests/e2e, so a collection that never reached the copy at all is
+    # distinguishable from one the guard turned away
+    (second / "tests" / "test_second_tree_unit.py").write_text(
+        "def test_placeholder():\n    pass\n"
+    )
+    # tests/e2e reached through a path that only normalises to it, so the difference between
+    # Path.resolve() and Path.absolute() is observable: absolute() normalises no .. segment
+    dotted_file = "tests/unit/../e2e/test_api_e2e.py"
+
     # the expected sets, from collections the guard cannot touch: --noconftest loads neither
     # conftest, and naming tests/unit and tests/integration never walks into tests/e2e
     collected = run_all(
         {
+            "second_tree_beside_one_live_file": (
+                ["tests/unit/test_pagination.py", str(second / "tests")],
+                repo_root,
+                None,
+            ),
+            "dotted_path_into_e2e": ([dotted_file], repo_root, None),
             "e2e_unguarded": (["--noconftest", "tests/e2e"], repo_root, None),
             "every_other": (["tests/unit", "tests/integration"], repo_root, None),
             "tests": (["tests"], repo_root, None),
@@ -206,6 +233,93 @@ def test_a_dot_argument_from_inside_tests_e2e_collects_every_end_to_end_test(for
     collection = forms["dot_inside_e2e"]
     assert collection.returncode == 0, collection.output
     assert collection.items == forms["e2e_all"], collection.output
+
+
+def test_a_second_copy_of_this_tree_is_guarded_too(forms, repo_root, tmp_path_factory):
+    # the guard's module is cached in sys.modules; under a bare key the first tree loaded in a
+    # process wins and every later copy's tests/e2e is invisible to BOTH layers, so the copy's
+    # end-to-end tests collect although only an ancestor of them was typed. Copies of this tree are
+    # routine here -- a snapshot of a commit, a per-breakage tree -- and a path into one typed
+    # beside a live test file is all it takes
+    collection = forms["second_tree_beside_one_live_file"]
+    assert collection.returncode == 0, collection.output
+    # the copy's own non-e2e test is collected, so the copy was walked: this is the copy's guard
+    # turning its tests/e2e away and not a collection that never reached the copy
+    assert any("test_second_tree_unit.py" in key for key in collection.items), collection.output
+    assert any("test_pagination.py" in key for key in collection.items), collection.output
+    assert [key for key in collection.items if "test_second_tree_e2e.py" in key] == [], (
+        collection.output
+    )
+    assert [key for key in collection.deselected if "test_second_tree_e2e.py" in key] == [], (
+        collection.output
+    )
+
+
+def test_a_typed_path_that_only_normalises_to_tests_e2e_is_typed(forms):
+    # tests/unit/../e2e/test_api_e2e.py IS tests/e2e/test_api_e2e.py, and the guard resolves a path
+    # before comparing it, so the file is typed and collects. Path.absolute() would leave the ..
+    # segment in place, tests/e2e would not be among the parents, and the same request would collect
+    # nothing -- silently, since a guard that hides too much looks like a guard that works
+    collection = forms["dotted_path_into_e2e"]
+    assert collection.returncode == 0, collection.output
+    assert collection.items == forms["e2e_all"], collection.output
+    assert collection.deselected == set(), collection.output
+
+
+def test_a_sibling_whose_name_merely_starts_with_the_end_to_end_directorys_is_not_inside_it():
+    # in process, because the distinction is in one comparison: is_inside_e2e is an equality-or-
+    # ancestor test and not a substring test, and the two agree on every path this repository holds
+    # today. A tests/e2e_old beside tests/e2e, or a tests/e2e.bak, is all it takes for them to
+    # disagree -- and a substring check would read either as opted in
+    from tests.e2e_selection import E2E_DIR, is_inside_e2e
+
+    assert is_inside_e2e(E2E_DIR)
+    assert is_inside_e2e(E2E_DIR / "test_api_e2e.py")
+    assert not is_inside_e2e(E2E_DIR.parent)
+    assert not is_inside_e2e(Path(str(E2E_DIR) + "_old") / "test_api_e2e.py")
+    assert not is_inside_e2e(Path(str(E2E_DIR) + ".bak"))
+
+
+def test_a_path_passed_to_pytest_main_rather_than_on_the_command_line_counts_as_typed(
+    repo_root, tmp_path
+):
+    # the guard reads config.invocation_params.args, which is the list pytest was CALLED with,
+    # rather than sys.argv[1:]: the two are identical for `python -m pytest ...` and nothing else,
+    # and every form in this file is that one. Here they differ -- the interpreter was given -c and
+    # the path was handed to pytest.main -- and the path was typed by whoever called pytest
+    record = tmp_path / "main_record.json"
+    program = (
+        "import sys, pytest;"
+        " sys.exit(pytest.main(['--collect-only', '-q', '-p', 'no:cacheprovider', 'tests/e2e']))"
+    )
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")}
+    env.update(DEAD_ENV)
+    env.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": os.pathsep.join(
+                p for p in (str(tmp_path), env.get("PYTHONPATH")) if p
+            ),
+            "PYTEST_PLUGINS": "e2e_guard_recorder",
+            "E2E_GUARD_RECORD": str(record),
+        }
+    )
+    (tmp_path / "e2e_guard_recorder.py").write_text(_RECORDER)
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    output = (result.stdout + result.stderr)[-4000:]
+    assert result.returncode == 0, output
+    payload = json.loads(record.read_text())
+    assert payload["items"], output
+    e2e_dir = repo_root / "tests" / "e2e"
+    assert all(_inside(key, e2e_dir) for key in payload["items"]), output
+    assert payload["deselected"] == [], output
 
 
 def test_naming_tests_e2e_collects_every_end_to_end_test(forms):
