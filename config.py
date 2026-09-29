@@ -108,7 +108,7 @@ class Settings(BaseSettings):
         return None if isinstance(value, str) and not value.strip() else value
 
     @model_validator(mode="after")
-    def _page_pool_window_and_log_level_bounds_hold(self):
+    def _page_pool_and_log_level_bounds_hold(self):
         if self.BARS_PAGE_DEFAULT > self.BARS_PAGE_MAX:
             raise ValueError(
                 f"BARS_PAGE_DEFAULT={self.BARS_PAGE_DEFAULT} exceeds"
@@ -126,15 +126,6 @@ class Settings(BaseSettings):
         if self.DB_POOL_MAX < 1:
             raise ValueError(
                 f"DB_POOL_MAX={self.DB_POOL_MAX} is below the minimum pool size of 1"
-            )
-        # floored here because a missing floor on this key does not merely accept a bad value, it
-        # switches a different check off: hot_window_configuration_problems compares a span that is
-        # never negative against this number, so at zero or below that comparison can only pass and
-        # the hot-window gate goes quiet for every hot window, however short
-        if self.AGG_MAX_WINDOW_DAYS < 1:
-            raise ValueError(
-                f"AGG_MAX_WINDOW_DAYS={self.AGG_MAX_WINDOW_DAYS} is below the minimum window of"
-                " 1 day; the hot-window check compares against it and cannot fire below it"
             )
         # checked here because basicConfig accepts a bad level silently once a handler already exists
         if self.LOG_LEVEL not in logging.getLevelNamesMapping():
@@ -159,6 +150,16 @@ def hot_window_configuration_problems(settings: Settings) -> list[str]:
         return [
             f"HOT_WINDOW_MONTHS={months} reaches back before year 1 from"
             f" INGEST_END={settings.INGEST_END}"
+        ]
+    # checked here and not in Settings, beside the rule it protects: a missing floor on this key does
+    # not merely accept a bad value, it switches this check off, because the span below is never
+    # negative and so can only clear a cap of zero or less. Settings is the wrong home for it --
+    # AGG_MAX_WINDOW_DAYS is read by api/routes.py alone, and a floor there stops db.migrate and the
+    # ingest importing over a key neither of them reads
+    if settings.AGG_MAX_WINDOW_DAYS < 1:
+        return [
+            f"AGG_MAX_WINDOW_DAYS={settings.AGG_MAX_WINDOW_DAYS} is below the minimum window of"
+            " 1 day; this check compares against it and cannot fire below it"
         ]
     span = (settings.INGEST_END - cutoff).days
     if span < settings.AGG_MAX_WINDOW_DAYS:

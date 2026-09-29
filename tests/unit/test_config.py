@@ -512,10 +512,15 @@ def test_a_window_cap_below_one_day_is_refused_and_the_hot_window_gate_still_fir
     # the floor is not about accepting a silly number: hot_window_configuration_problems compares
     # (INGEST_END - cutoff).days, which is never negative, against this key, so at zero or below the
     # only reachable answer is "no problems" and the startup gate goes quiet for every hot window.
-    # The second half is what makes that a floor rather than a rename -- at 1, the gate still refuses
+    # It lives in that check and not in Settings, so it names the key without stopping the two
+    # programs that never read it -- which is what the second half here pins.
+    # The third half is what makes it a floor rather than a rename: at 1, the gate still refuses
     for cap in (0, -1, -1000):
-        with pytest.raises(ValidationError, match="AGG_MAX_WINDOW_DAYS"):
-            Settings(_env_file=None, AGG_MAX_WINDOW_DAYS=cap, **REQUIRED)
+        settings = Settings(_env_file=None, AGG_MAX_WINDOW_DAYS=cap, **REQUIRED)
+        assert config.hot_window_configuration_problems(settings) == [
+            f"AGG_MAX_WINDOW_DAYS={cap} is below the minimum window of 1 day; this check compares"
+            " against it and cannot fire below it"
+        ]
     required = {key: value for key, value in REQUIRED.items() if key != "INGEST_END"}
     at_the_floor = Settings(
         _env_file=None,
@@ -526,6 +531,44 @@ def test_a_window_cap_below_one_day_is_refused_and_the_hot_window_gate_still_fir
     )
     assert config.hot_window_configuration_problems(at_the_floor) == [
         _short_hot_window(1, date(2026, 6, 1), 0, date(2026, 6, 1), 1)
+    ]
+
+
+def test_a_window_cap_the_api_refuses_lets_migrate_and_the_ingest_start(repo_root):
+    # the other half of moving that floor out of Settings. AGG_MAX_WINDOW_DAYS is read by
+    # api/routes.py alone, so a floor in Settings would stop db.migrate and the ingest importing over
+    # a key neither reads -- and config builds its settings at import, so only a child process shows
+    # it. The cwd stays at the repository root and the value comes through env=, which
+    # pydantic-settings ranks above env_file: a child whose cwd moves cannot find an instrumented
+    # tree's config under the generated mutation harness
+    env = {key: value for key, value in os.environ.items() if key not in Settings.model_fields}
+    env.update(REQUIRED)
+    env.update({"AGG_MAX_WINDOW_DAYS": "0", "PYTHONDONTWRITEBYTECODE": "1"})
+    script = (
+        "import config, db.migrate, ingest.__main__, ingest.pipeline\n"
+        "print(config.settings.AGG_MAX_WINDOW_DAYS)\n"
+        "try:\n"
+        "    import api.main\n"
+        "except RuntimeError as exc:\n"
+        "    print(repr(str(exc)))\n"
+        "else:\n"
+        "    print('api.main imported')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "0",
+        repr(
+            "refusing to build the app:\n- AGG_MAX_WINDOW_DAYS=0 is below the minimum window of"
+            " 1 day; this check compares against it and cannot fire below it"
+        ),
     ]
 
 
