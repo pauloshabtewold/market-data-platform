@@ -178,12 +178,13 @@ _MARKET_DAYS_COLUMNS = frozenset({"day", "open_ts", "close_ts", "session_minutes
 # row in the table. A pin on the statement is the only one whose scope is the statement rather than
 # the shape of a respelling somebody already met
 _MOVES_STATEMENT_TEXT = (
-    "select b.ts , b.symbol , round ( b.open , 4 ) as open , round ( b.close , 4 ) as close , "
-    "round ( 100 * ( b.close - b.open ) / b.open , 4 ) as move_pct from bars b join market_days m "
-    "on b.ts >= m.open_ts and b.ts < m.close_ts where m.day >= %(start)s and m.day <= %(end)s and "
-    "b.ts >= %(after_ts)s and ( b.ts , b.symbol ) > ( %(after_ts)s , %(after_symbol)s ) and "
-    "b.ts <= %(hi)s and b.open <> 0 and abs ( 100 * ( b.close - b.open ) / b.open ) >= "
-    "%(min_move_pct)s :: numeric order by b.ts , b.symbol limit %(fetch)s"
+    "select b.ts , b.symbol , round ( b.open , 4 ) as open , round ( b.close , 4 ) as close , round ( "
+    "100 * ( b.close - b.open ) / b.open , 4 ) as move_pct from bars b join market_days m on b.ts >= "
+    "m.open_ts and b.ts < m.close_ts where m.day >= %(start)s and m.day <= %(end)s and b.ts >= "
+    "%(after_ts)s and ( b.ts , b.symbol ) > ( %(after_ts)s , %(after_symbol)s ) and b.ts <= %(hi)s "
+    "and b.open <> 0 and b.open <> 'NaN' :: numeric and b.close <> 'NaN' :: numeric and abs ( 100 * ( "
+    "b.close - b.open ) / b.open ) >= %(min_move_pct)s :: numeric order by b.ts , b.symbol limit "
+    "%(fetch)s"
 )
 
 
@@ -407,6 +408,46 @@ def test_largest_moves_drops_a_zero_open_bar_rather_than_dividing_the_page_by_ze
     body = response.json()
     assert "ZERO" not in {row["symbol"] for row in body["data"]}
     # the other forty are all still there, so the guard drops the zero-open row and nothing else
+    assert len(body["data"]) == BARS_PER_SESSION * len(TRADING_DAYS) * 2
+
+
+def test_largest_moves_drops_every_open_and_close_the_division_cannot_answer_for(
+    moves_zero_client, migrated_dsn
+):
+    # the three values a bare numeric permits that this division has no answer for, each failing a
+    # different way. Zero aborts the page. NULL is dropped by the threshold comparison rather than
+    # by the guard, so it is excluded for a reason the guard does not supply. NaN passes BOTH
+    # `<> 0` and `abs(...) >= threshold`, because Postgres orders NaN above every number -- and it
+    # reaches the wire as the bare token NaN, which is not JSON, so one such row costs every client
+    # the whole page rather than one row. Planted directly, because ingest/validate.py is the only
+    # thing that refuses any of them and this is about the database's rules, not the loader's
+    planted = {"NANOPEN": "'NaN'", "NANCLOSE": "100", "NULLOPEN": "NULL"}
+    with connect(migrated_dsn) as conn:
+        for symbol, open_value in planted.items():
+            close_value = "'NaN'" if symbol == "NANCLOSE" else "110"
+            conn.execute(
+                "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+                " VALUES (%s, %s, 'X', true, %s) ON CONFLICT (symbol) DO NOTHING",
+                (symbol, symbol, bar_ts(PLAIN_TUESDAY, 4)),
+            )
+            conn.execute(
+                "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                f" VALUES (%s, %s, {open_value}, 200, 1, {close_value}, 100, 1, 25)",
+                (symbol, bar_ts(PLAIN_TUESDAY, 4)),
+            )
+        conn.commit()
+
+    response = moves_zero_client.get(
+        "/analytics/largest-moves",
+        params={"start": "2026-03-01", "end": "2026-03-31", "min_move_pct": 0, "limit": 1000},
+    )
+
+    assert response.status_code == 200, response.text
+    # the raw text, not the parsed body: a NaN reaching the wire is a parse error and not a value,
+    # so a test that only reads response.json() would fail with no sign of which row caused it
+    assert "NaN" not in response.text
+    body = response.json()
+    assert planted.keys() - {row["symbol"] for row in body["data"]} == planted.keys()
     assert len(body["data"]) == BARS_PER_SESSION * len(TRADING_DAYS) * 2
 
 

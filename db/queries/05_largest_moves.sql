@@ -37,8 +37,13 @@ moves AS (
            abs(100 * (close - open) / open)     AS abs_move_pct
     FROM session_bars
     -- a bar cannot be stored with a zero open (the feed emits no bar when any field is 0), but
-    -- the guard is here rather than assumed: a division by zero would abort the whole scan
+    -- the guard is here rather than assumed: a division by zero would abort the whole scan.
+    -- NaN needs its own clause and gets no protection from the one above: Postgres orders NaN
+    -- above every number, so a NaN open passes `<> 0` and a NaN in either column carries through
+    -- the division into the published move
     WHERE open <> 0
+      AND open <> 'NaN'::numeric
+      AND close <> 'NaN'::numeric
 )
 SELECT symbol, day, ts,
        to_char(ts AT TIME ZONE 'America/New_York', 'HH24:MI') AS et_minute,

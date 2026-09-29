@@ -884,15 +884,30 @@ exist matters more than anything else in this subsection.
 **Block counts are execution only**; planning has its own column, as in the `/bars` subsection
 above.
 
-**What `min_move_pct = 0` returns, exactly.** Every regular-session bar in the window **whose open is
-not zero**. The statement carries `AND b.open <> 0`, and that is a deviation from "no filter at all"
-worth stating rather than leaving to a reader of the SQL: `db/schema.sql` declares `open` as a bare
-`numeric` with no constraint, so a zero is a value the database accepts, and the move is a percentage
-of the open. Without the guard one such row is not one missing row — it is `division by zero`, which
-is a 500 for the whole page and for every page of that window. The ingest refuses a zero open
-(`ingest/validate.py`) and is the only thing that does, so the guard covers rows written by any route
-that bypasses it. No such row exists in the loaded database, so no figure in this subsection moves
-either way.
+**What `min_move_pct = 0` returns, exactly.** Every regular-session bar in the window **whose open and
+close are both a real number**. That is a deviation from "no filter at all" worth stating rather than
+leaving to a reader of the SQL, because `db/schema.sql` declares `open` and `close` as bare `numeric`
+columns with no constraint, and the move is a percentage of the open — so three values the database
+accepts are values this division has no answer for, and each one fails differently.
+
+A **zero** open is `division by zero`, which is not one missing row but a 500 for the page that reads
+it; whether every page of the window fails depends on how far each page's scan range reaches, and the
+statement is an ordered walk under a `LIMIT`, so a page that never reaches the row never evaluates the
+division on it. A **NULL** open makes the threshold comparison NULL, so the row is dropped whether or
+not the guard is there — the guard is not what excludes it, and "not zero" does not describe it. A
+**NaN** in either column passes both `<> 0` and `abs(...) >= threshold`, because Postgres orders NaN
+above every number, and then reaches the wire as the bare token `NaN`, which no JSON parser accepts:
+one such row costs every client the whole page rather than one row. The statement therefore carries
+`AND b.open <> 0 AND b.open <> 'NaN'::numeric AND b.close <> 'NaN'::numeric`, and
+`db/queries/05_largest_moves.sql` carries the same three.
+
+The ingest refuses a zero open (`ingest/validate.py`) and is the only thing that does, so the guard
+covers rows written by any route that bypasses it — and it does not cleanly refuse a NaN, since
+`Decimal('NaN') <= 0` raises rather than returning False. **None of the three exists in the loaded
+database**, measured over all 41,668,537 rows — zero opens 0, null opens 0, NaN opens 0, NaN closes 0
+— so no figure in this subsection moves either way. Adding the two NaN clauses leaves the plan for
+`db/queries/05_largest_moves.sql` structurally identical, node for node: they join the existing
+`Filter` on the three partition scans and change no scan, no join order and no pruning.
 
 `:symbol = AAPL`, `:start = 2026-04-01`, `:end = 2026-06-30` — the window Class A is bound at above.
 `/analytics/largest-moves` takes no symbol; it binds `min_move_pct = 0` and `limit =

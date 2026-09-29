@@ -116,6 +116,40 @@ def test_a_bar_with_a_zero_open_is_excluded_rather_than_dividing_by_zero(planted
     assert "ZERO" not in [r["symbol"] for r in rows]
 
 
+def test_a_nan_open_or_close_is_excluded_rather_than_published_as_a_move(planted, query_sql):
+    # a zero is not the only value a bare numeric permits that this division has no answer for, and
+    # NaN gets no protection from the guard above: Postgres orders NaN above every number, so
+    # `open <> 0` and `abs(...) >= threshold` are both TRUE for it and the NaN carries through the
+    # division into the published move. Planted for the same reason the zero is -- nothing but
+    # ingest/validate.py forbids one, and it raises on the comparison rather than refusing cleanly
+    # inserted here rather than through _plant, which derives high/low/vwap with max()/min(): an
+    # ordering comparison between a Decimal NaN and a number raises InvalidOperation in Python, which
+    # is the same reason ingest/validate.py's `open <= 0` cannot cleanly refuse one either
+    with connect(planted) as conn:
+        for symbol, minute, open_, close_ in (
+            ("NANOPEN", 4, "'NaN'", "110"),
+            ("NANCLOSE", 5, "100", "'NaN'"),
+        ):
+            conn.execute(
+                "INSERT INTO symbols (symbol, name, exchange, active, first_bar_ts)"
+                " VALUES (%s, %s, 'X', true, %s) ON CONFLICT (symbol) DO NOTHING",
+                (symbol, symbol, bar_ts(PLAIN_TUESDAY, minute)),
+            )
+            conn.execute(
+                "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
+                f" VALUES (%s, %s, {open_}, 200, 1, {close_}, 100, 1, 105)",
+                (symbol, bar_ts(PLAIN_TUESDAY, minute)),
+            )
+        conn.commit()
+
+    rows = _read(planted, query_sql)
+
+    assert {"NANOPEN", "NANCLOSE"}.isdisjoint(r["symbol"] for r in rows)
+    # and no surviving row carries one either, which is the half that matters to a client: a NaN in
+    # any published column serialises as the bare token NaN, which is not JSON
+    assert not [r for r in rows if any(str(v) == "NaN" for v in r.values())]
+
+
 def test_the_ranking_is_deterministic_when_two_moves_tie(migrated_dsn, query_sql):
     load_calendar(migrated_dsn)
     for symbol in ("ZZZ", "AAA", "MMM"):

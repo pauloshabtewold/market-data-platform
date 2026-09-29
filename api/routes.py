@@ -130,12 +130,20 @@ WHERE m.day >= %(start)s AND m.day <= %(end)s
       AND b.ts >= %(after_ts)s
       AND (b.ts, b.symbol) > (%(after_ts)s, %(after_symbol)s)
       AND b.ts <= %(hi)s
-      -- db/schema.sql declares open as a bare numeric, so a zero is a row the database permits and
-      -- one of them divides the whole page by zero rather than one row. Kept, which means this
-      -- endpoint answers every regular-session bar with a NON-ZERO open at min_move_pct = 0 and not
-      -- literally every one: the deviation is published in docs/QUERY_PERFORMANCE.md, and the
-      -- alternative is a 500 on data only the ingest's own validation keeps out
+      -- db/schema.sql declares open and close as bare numerics, so three values the database permits
+      -- are not values this division can answer for, and each fails differently. A ZERO open divides
+      -- by zero and aborts the page, not the row. A NULL open makes the threshold comparison below
+      -- NULL, which drops the row on its own -- the guard is not what excludes it. A NaN in either
+      -- column passes both `<> 0` and `abs(...) >= threshold`, because Postgres orders NaN above
+      -- every number, and reaches the wire as the bare token NaN, which no JSON parser accepts: one
+      -- such row makes the whole page unreadable to every client.
+      -- So at min_move_pct = 0 this endpoint answers every regular-session bar whose open and close
+      -- are both a real number, and not literally every one. The deviation is published in
+      -- docs/QUERY_PERFORMANCE.md; the alternative is an unparseable page or a 500 on data only the
+      -- ingest's own validation keeps out.
       AND b.open <> 0
+      AND b.open <> 'NaN'::numeric
+      AND b.close <> 'NaN'::numeric
       AND abs(100 * (b.close - b.open) / b.open) >= %(min_move_pct)s::numeric
 ORDER BY b.ts, b.symbol
 LIMIT %(fetch)s"""
