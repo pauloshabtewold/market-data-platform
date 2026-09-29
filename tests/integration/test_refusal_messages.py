@@ -8,7 +8,9 @@ published document, so a null there also contradicts the schema a generated clie
 
 The recipes below are checked for coverage against the routes' own declared responses rather than
 listed by hand alone: a route that documents a status with no recipe here fails, and so does a route
-this file has never heard of.
+this file has never heard of. The routes are compared as a set of their own and not only through
+their statuses, because a route that publishes nothing but a 200 contributes no (path, status) pair
+at all and a comparison of statuses alone cannot see it.
 """
 
 from datetime import datetime, timezone
@@ -27,6 +29,7 @@ from api.errors import (
 )
 from api.main import create_app
 from api.pagination import BARS_CURSOR, encode_cursor
+from config import settings
 from tests.market_fixture import WINDOW_END, WINDOW_START, load
 
 # every (status, code) pair the endpoints produce, and the one message each publishes
@@ -43,21 +46,28 @@ _MESSAGE_FOR = {
 _WINDOW = {"start": WINDOW_START.isoformat(), "end": WINDOW_END.isoformat()}
 _INVERTED = {"start": WINDOW_END.isoformat(), "end": WINDOW_START.isoformat()}
 _BAD_CURSOR = {"cursor": "not-base64-at-all"}
-_OVER_THE_CAP = {"limit": 0}
+# both ends of resolve_request's single limit rule, which refuses `not 1 <= limit <= page_max` at one
+# raise site with one detail: a table driving the floor alone never sends a limit the cap has to
+# refuse, and the two families cap at different numbers, so each needs its own over-the-cap value
+_BELOW_THE_FLOOR = {"limit": 0}
+_OVER_THE_BARS_CAP = {"limit": settings.BARS_PAGE_MAX + 1}
+_OVER_THE_AGG_CAP = {"limit": settings.AGG_PAGE_MAX + 1}
 
 # (documented path, request path, query, status, code). Every entry is a refusal a live endpoint
 # answers; the 500s are driven against a second app whose pool cannot connect
 _RECIPES = (
-    ("/symbols", "/symbols", _OVER_THE_CAP, 400, "invalid_params"),
+    ("/symbols", "/symbols", _BELOW_THE_FLOOR, 400, "invalid_params"),
     ("/symbols", "/symbols", _BAD_CURSOR, 400, "invalid_cursor"),
-    ("/symbols/{symbol}/bars", "/symbols/AAA/bars", {**_WINDOW, **_OVER_THE_CAP}, 400, "invalid_params"),
+    ("/symbols/{symbol}/bars", "/symbols/AAA/bars", {**_WINDOW, **_BELOW_THE_FLOOR}, 400, "invalid_params"),
+    # the bars family's cap, beside its floor above: one endpoint of each family carries both ends
+    ("/symbols/{symbol}/bars", "/symbols/AAA/bars", {**_WINDOW, **_OVER_THE_BARS_CAP}, 400, "invalid_params"),
     ("/symbols/{symbol}/bars", "/symbols/AAA/bars", {**_WINDOW, **_BAD_CURSOR}, 400, "invalid_cursor"),
     ("/symbols/{symbol}/bars", "/symbols/NOPE/bars", _WINDOW, 404, "unknown_symbol"),
     # percent-encoded because a raw control character is refused by the client before it is a
     # request; the server decodes it, so the handler sees a NUL in the path parameter
     ("/symbols/{symbol}/bars", "/symbols/AB%00CD/bars", _WINDOW, 404, "unknown_symbol"),
     ("/symbols/{symbol}/bars", "/symbols/AAA/bars", _INVERTED, 422, "invalid_range"),
-    ("/symbols/{symbol}/daily", "/symbols/AAA/daily", {**_WINDOW, **_OVER_THE_CAP}, 400, "invalid_params"),
+    ("/symbols/{symbol}/daily", "/symbols/AAA/daily", {**_WINDOW, **_BELOW_THE_FLOOR}, 400, "invalid_params"),
     ("/symbols/{symbol}/daily", "/symbols/AAA/daily", {**_WINDOW, **_BAD_CURSOR}, 400, "invalid_cursor"),
     ("/symbols/{symbol}/daily", "/symbols/NOPE/daily", _WINDOW, 404, "unknown_symbol"),
     ("/symbols/{symbol}/daily", "/symbols/AAA/daily", _INVERTED, 422, "invalid_range"),
@@ -67,13 +77,18 @@ _RECIPES = (
     ("/analytics/gaps", "/analytics/gaps", {"symbol": "AAA", "start": "2026/03/01", "end": "2026-03-31"}, 400, "invalid_params"),
     ("/analytics/gaps", "/analytics/gaps", {"symbol": "NOPE", **_WINDOW}, 404, "unknown_symbol"),
     ("/analytics/gaps", "/analytics/gaps", {"symbol": "AAA", **_INVERTED}, 422, "invalid_range"),
-    ("/analytics/largest-moves", "/analytics/largest-moves", {**_WINDOW, **_OVER_THE_CAP}, 400, "invalid_params"),
+    ("/analytics/largest-moves", "/analytics/largest-moves", {**_WINDOW, **_BELOW_THE_FLOOR}, 400, "invalid_params"),
+    # and the aggregate family's cap, which is a tenth of the bars one
+    ("/analytics/largest-moves", "/analytics/largest-moves", {**_WINDOW, **_OVER_THE_AGG_CAP}, 400, "invalid_params"),
     ("/analytics/largest-moves", "/analytics/largest-moves", {**_WINDOW, **_BAD_CURSOR}, 400, "invalid_cursor"),
     ("/analytics/largest-moves", "/analytics/largest-moves", {**_WINDOW, "min_move_pct": "1e131073"}, 400, "invalid_params"),
     ("/analytics/largest-moves", "/analytics/largest-moves", _INVERTED, 422, "invalid_range"),
 )
-# the same request on every endpoint, against an app whose database cannot be reached
+# the same request on every endpoint, against an app whose database cannot be reached. /health is
+# one of them: a 500 internal on an unreachable database is the only refusal it can answer, and it
+# publishes it from its own connection rather than from the pool the six data paths share
 _LEGAL_REQUEST = {
+    "/health": ("/health", {}),
     "/symbols": ("/symbols", {}),
     "/symbols/{symbol}/bars": ("/symbols/AAA/bars", _WINDOW),
     "/symbols/{symbol}/daily": ("/symbols/AAA/daily", _WINDOW),
@@ -82,6 +97,8 @@ _LEGAL_REQUEST = {
     "/analytics/largest-moves": ("/analytics/largest-moves", _WINDOW),
 }
 _DEAD_DSN = "postgresql://nobody:nobody@127.0.0.1:1/none"
+# the operation keys of an OpenAPI path item, which also carries parameters, servers and a summary
+_OPERATIONS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
 
 
 @pytest.fixture
@@ -112,20 +129,33 @@ def _body(response, status, code):
     return error
 
 
-def test_every_documented_refusal_has_a_recipe_here(refusal_client):
+def test_every_documented_route_and_refusal_has_a_recipe_here(refusal_client):
     # the coverage half: the recipes are checked against what the routes declare, so a route that
     # documents a status no recipe drives fails here rather than going unexercised, and a route this
     # file has never heard of fails too
     document = refusal_client.get("/openapi.json").json()
+    # the routes first, as a set of their own: a route publishing nothing but a 200 adds no pair to
+    # the status comparison below, so it would otherwise pass through here unexercised
+    known = {path for path, _, _, _, _ in _RECIPES} | set(_LEGAL_REQUEST)
+    assert set(document["paths"]) == known
     documented = {
         (path, int(status))
         for path, item in document["paths"].items()
-        for status in item["get"]["responses"]
-        if status.isdigit() and status != "200" and path != "/health"
+        # every operation rather than item["get"]: a later path whose only operation is another
+        # method would otherwise raise a bare KeyError instead of naming what has no recipe
+        for method, operation in item.items()
+        if method in _OPERATIONS
+        for status in operation["responses"]
+        # `default` is /symbols' catch-all entry and names no status a recipe could drive
+        if status.isdigit() and status != "200"
     }
     covered = {(path, status) for path, _, _, status, _ in _RECIPES}
     covered |= {(path, 500) for path in _LEGAL_REQUEST}
     assert documented == covered
+    # the code too, which the document cannot supply: it publishes the one closed vocabulary for
+    # every error status rather than the code each status carries, so a recipe naming a pair the
+    # message table has never heard of would otherwise be a KeyError in the test below
+    assert {(status, code) for _, _, _, status, code in _RECIPES} <= set(_MESSAGE_FOR)
 
 
 def test_every_refusal_publishes_the_message_its_code_names(refusal_client):

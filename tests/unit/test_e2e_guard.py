@@ -118,6 +118,12 @@ def forms(repo_root, tmp_path_factory):
     (second / "tests" / "test_second_tree_unit.py").write_text(
         "def test_placeholder():\n    pass\n"
     )
+    # a directory below the copy's tests/, as the anchor --confcutdir needs: pytest skips only the
+    # STRICT PARENTS of confcutdir, so pointing it here is the one way to skip the copy's
+    # tests/conftest.py while still loading the tests/e2e/conftest.py below it
+    second_unit = second / "tests" / "unit"
+    second_unit.mkdir(parents=True, exist_ok=True)
+    (second_unit / "test_second_tree_deep.py").write_text("def test_placeholder():\n    pass\n")
     # tests/e2e reached through a path that only normalises to it, so the difference between
     # Path.resolve() and Path.absolute() is observable: absolute() normalises no .. segment
     dotted_file = "tests/unit/../e2e/test_api_e2e.py"
@@ -128,6 +134,13 @@ def forms(repo_root, tmp_path_factory):
         {
             "second_tree_beside_one_live_file": (
                 ["tests/unit/test_pagination.py", str(second / "tests")],
+                repo_root,
+                None,
+            ),
+            # the same copy with its OUTER layer cut and this tree's tests/e2e typed, so this tree's
+            # inner conftest loads first and the copy's inner conftest is the copy's only guard
+            "second_tree_with_only_its_inner_layer": (
+                [f"--confcutdir={second_unit}", "tests/e2e", str(second / "tests")],
                 repo_root,
                 None,
             ),
@@ -251,6 +264,30 @@ def test_a_second_copy_of_this_tree_is_guarded_too(forms, repo_root, tmp_path_fa
         collection.output
     )
     assert [key for key in collection.deselected if "test_second_tree_e2e.py" in key] == [], (
+        collection.output
+    )
+
+
+def test_a_second_copy_guarded_by_its_inner_layer_alone_is_guarded_too(forms):
+    # the form above reaches the copy's OUTER layer only: that layer hides the copy's tests/e2e from
+    # collection entirely, so the copy's tests/e2e/conftest.py never loads and a shared key in THAT
+    # file alone goes unmeasured. Here --confcutdir below the copy's tests/ skips the copy's
+    # tests/conftest.py, which is the run the inner layer exists for, and this tree's typed
+    # tests/e2e loads this tree's inner conftest first -- so under a shared key the copy's inner
+    # layer measures the copy's own tests against THIS tree's tests/e2e, matches none of them, and
+    # deselects none of them
+    collection = forms["second_tree_with_only_its_inner_layer"]
+    assert collection.returncode == 0, collection.output
+    # this tree's typed tests/e2e still collects whole, which is what loaded its inner conftest
+    assert forms["e2e_all"] <= collection.items, collection.output
+    # the copy was walked below its own tests/, so its tests/e2e was reached rather than skipped
+    assert any("test_second_tree_deep.py" in key for key in collection.items), collection.output
+    assert [key for key in collection.items if "test_second_tree_e2e.py" in key] == [], (
+        collection.output
+    )
+    # deselected and not merely uncollected, which is what says the COPY's own inner layer refused
+    # it: its outer layer is cut, and this tree's inner layer never claims a path outside this tree
+    assert [key for key in collection.deselected if "test_second_tree_e2e.py" in key], (
         collection.output
     )
 
