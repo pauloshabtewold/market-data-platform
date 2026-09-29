@@ -1085,17 +1085,37 @@ probes the process held at 3 asyncio tasks and 10 open descriptors throughout an
 s, with no traceback logged — a shutdown with no check in flight. A check that is in flight at
 shutdown is cancelled rather than waited out, so shutdown does not carry the remainder of that
 check's 2 s deadline either; the suite bounds that case at under two seconds. A probe still waiting
-on that check when it is cancelled receives a **`text/plain` 500 from the HTTP server itself**, not
-this service's `{"error": {...}}` and not silence — measured on a real uvicorn with
-`--timeout-graceful-shutdown` shorter than the probe's remaining deadline, which is the one way to
-reach this path: the cancellation arrives as `CancelledError`, a `BaseException`, so it passes
-through the route's own `except Exception` and through the middleware that would otherwise build the
-body. It is one of the outcomes the single error shape does not cover, and the others are the same
-kind: a request the HTTP server refuses before the app sees it answers 400 as plain text, and one
-whose headers it cannot read is closed with no response at all. **A monitor must therefore not read
-"no response" as the signature of a shutdown**; it is a 500 whose content type is the only thing
-distinguishing it from a live failure. The service as deployed sets no graceful-shutdown timeout, so
-uvicorn waits for the probe and it finishes at its own 2 s bound with a correctly shaped JSON 500.
+in flight when the **server** cancels it receives a **`text/plain` 500 from the HTTP server itself**,
+not this service's `{"error": {...}}` — measured on a real uvicorn: the cancellation arrives as
+`CancelledError`, a `BaseException`, so it passes through the route's own `except Exception` and
+through the middleware that would otherwise build the body, and uvicorn's protocol layer answers
+instead.
+
+**The agent is uvicorn, not `checks.close()`.** The lifespan's own cancellation cannot produce this,
+because `lifespan.shutdown()` runs only after uvicorn has finished waiting for in-flight requests —
+measured by neutering `close()` entirely, which gives the identical `text/plain` 500. What produces
+it is uvicorn cancelling the request task, and there are **two** ways to reach that, not one: a
+`--timeout-graceful-shutdown` shorter than the probe's remaining deadline, and a second `SIGINT`,
+which sets `force_exit` and skips the wait (a second `SIGTERM` does not). So making `close()`
+gentler, or removing the route's `asyncio.shield`, changes none of it.
+
+**A monitor must not read either "no response" or a `text/plain` 500 as the signature of a
+shutdown, because a shutdown produces both.** Two measured outcomes give no bytes at all, and the
+first needs no graceful-shutdown timeout and so is what the deployed configuration does: uvicorn's
+first act on `SIGTERM` is to close every connection with no request in flight, so a monitor holding a
+kept-alive socket — which is the default, and what an ALB, a kubelet probe and a blackbox exporter
+all do — gets **zero bytes on its next probe**, measured at 0.000 s. The second is `SIGTERM` followed
+by `SIGKILL`, which is what `docker compose stop` does once `stop_grace_period` expires, and the
+compose file leaves that at the 10 s default. Treating silence as "the service is down" therefore
+pages someone on every rolling restart.
+
+Two further outcomes escape the single error shape and are not shutdown-specific: a request the HTTP
+server refuses before the app sees it answers 400 as plain text, and one whose headers it cannot read
+is closed with no response. This list is the set measured, not a proof there is no other.
+
+The service as deployed sets no graceful-shutdown timeout, so uvicorn waits — for **every** in-flight
+request, with no bound, not merely for the probe — and a probe finishes at its own 2 s bound with a
+correctly shaped JSON 500.
 Probes that overlap share one check rather than each opening a connection of their own, so the log carries one line per check and not per probe — 13 lines for 14 probes, the second
 having joined a check already in flight and answered in 0.76 s, server-side like the two ranges
 above. The sharing is what holds under a flood: 60 concurrent probes against a container configured

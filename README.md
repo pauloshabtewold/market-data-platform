@@ -15,7 +15,9 @@ bucket, minutes since that day's own open, for one symbol), `GET /analytics/gaps
 overnight gap distribution, prior close to next open, for one symbol as a single aggregate
 row) and `GET /analytics/largest-moves` (every regular-session minute bar in the window whose
 absolute percentage move is at least `min_move_pct`, across the full universe,
-keyset-paginated on `(ts, symbol)`). All three refuse a window longer than 90 days with a 422;
+keyset-paginated on `(ts, symbol)` — excluding a bar whose open or close is a value the
+percentage has no answer for, which `docs/QUERY_PERFORMANCE.md` states exactly and no row in
+the loaded data is). All three refuse a window longer than 90 days with a 422;
 the first two take no `limit` or `cursor` and answer with `next_cursor` always null. The
 OpenAPI document is generated from the routes and served at `/openapi.json`, with an
 interactive page at `/docs`.
