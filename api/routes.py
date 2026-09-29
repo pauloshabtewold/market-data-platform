@@ -1,10 +1,17 @@
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import AfterValidator, BaseModel, BeforeValidator, WithJsonSchema
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    TypeAdapter,
+    ValidationError,
+    WithJsonSchema,
+)
 from pydantic_core import PydanticCustomError
 from psycopg_pool import ConnectionPool
 
@@ -280,35 +287,78 @@ def _reject_numeric_overflow(value: Decimal) -> Decimal:
     return value
 
 
-# a date followed by a time separator, which is the shape pydantic reads as a datetime. The four
-# characters are measured rather than assumed: pydantic-core accepts t, T, _ and a space between the
-# date and the time and nothing else, so a set written from the two obvious ones would leave the
-# other two silently reinterpreted
-_A_DATE_WITH_A_TIME = re.compile(r"\d{4}-\d{2}-\d{2}[tT_ ]")
+# A window bound is a calendar date and nothing else, which is what the published schema says
+# (`format: date`). pydantic's lax `date` accepts two further shapes and misreads both: a full ISO
+# datetime whose wall-clock time is exactly midnight, where the offset is DISCARDED and the literal
+# calendar date kept -- 2026-04-01T00:00:00+12:00 is the instant 2026-03-31T12:00:00Z and would be
+# served as 2026-04-01 -- and a Unix timestamp in seconds or milliseconds. The bounds are compared
+# against a timestamptz column in UTC, so no reading of an offset-aware request honours what it
+# names, and a client in a positive-offset zone formatting its window as offset-aware ISO timestamps
+# is the obvious thing to do against an API whose rows carry +00:00.
+_A_PLAIN_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# the four separators are measured rather than assumed: pydantic-core accepts t, T, _ and a space
+# between the date and the time and nothing else, from feeding a date adapter all of
+# string.printable. Used only to say WHICH of the two misreadings a refused bound is, never to decide
+# whether to refuse it
+_A_TIME_SEPARATOR = re.compile(r"\d{4}-\d{2}-\d{2}[tT_ ]")
+_A_DATE = TypeAdapter(date)
+_MIDNIGHT = time(0, 0)
+_CARRIES_A_TIME_MESSAGE = (
+    "a window bound is a calendar date (YYYY-MM-DD); a time or an offset on one cannot be honoured,"
+    " so it is refused rather than dropped"
+)
+_NOT_A_DATE_MESSAGE = (
+    "a window bound is a calendar date (YYYY-MM-DD); a timestamp is read as a different day than it"
+    " names, and the published schema admits no other spelling"
+)
 
 
-def _reject_a_window_bound_carrying_a_time(value):
-    # pydantic accepts a full ISO datetime for a date field when its wall-clock time is exactly
-    # midnight, and then keeps the LITERAL calendar date and discards the offset: the instant
-    # 2026-03-10T00:00:00+12:00 is 2026-03-09 in UTC and would be served as 2026-03-10. The bounds
-    # are compared against a timestamptz column in UTC, so no reading of such a request honours what
-    # it names -- and a client in a positive-offset zone formatting its window as offset-aware ISO
-    # timestamps is the obvious thing to do against an API whose rows carry +00:00. Refused under the
-    # parameter's own name rather than silently shifted by a day.
-    # Only this shape: a value that is malformed in any other way keeps pydantic's own slug
-    if isinstance(value, str) and _A_DATE_WITH_A_TIME.match(value.strip()):
-        raise PydanticCustomError(
-            "date_carries_a_time",
-            "a window bound is a calendar date (YYYY-MM-DD); a time or an offset on one cannot be"
-            " honoured, so it is refused rather than dropped",
-        )
-    return value
+def _reject_a_window_bound_that_is_not_a_calendar_date(value):
+    # The decision is delegated to pydantic rather than pattern-matched, and that is the whole point.
+    # A rule written from the spellings a finding exhibited claims every neighbour that merely
+    # resembles them: matching `date + separator` refused 2026-13-01T00:00:00, 2026-04-32 00:00:00,
+    # 9999-99-99T and a bare 2026-04-01t -- eleven values pydantic itself rejects -- under a slug
+    # saying their time could not be honoured, which is the one machine-readable field a client
+    # reads. Asking pydantic keeps "malformed, so its own slug is the accurate one" apart from
+    # "accepted and misread, so this rule owns it", by construction and not by enumeration.
+    #
+    # Judged over every type pydantic's lax `date` accepts and not only the one HTTP delivers: a
+    # query parameter is always a str over the wire, so the three branches below are reachable from
+    # an in-process caller alone, but pydantic misreads bytes and an offset-aware datetime exactly as
+    # it misreads the text forms, and a guard scoped to `str` leaves the same defect one type over.
+    if isinstance(value, bytes):
+        try:
+            value = value.decode()
+        except UnicodeDecodeError:
+            return value
+    if isinstance(value, (int, float)):
+        # bool is an int in Python, and no reading of True is a calendar date either
+        raise PydanticCustomError("date_is_not_a_calendar_date", _NOT_A_DATE_MESSAGE)
+    if isinstance(value, datetime):
+        # a datetime is a date subclass, so this branch must precede the date one. pydantic keeps
+        # the literal calendar date and discards the offset, the same misreading as the text form
+        if value.tzinfo is not None or value.time() != _MIDNIGHT:
+            raise PydanticCustomError("date_carries_a_time", _CARRIES_A_TIME_MESSAGE)
+        return value
+    if not isinstance(value, str):
+        return value
+    if _A_PLAIN_DATE.fullmatch(value):
+        return value
+    # pydantic refuses every padded plain date, so fullmatch above and pydantic's own accept set
+    # agree exactly on what a calendar date is and nothing has to be stripped here
+    try:
+        _A_DATE.validate_python(value)
+    except ValidationError:
+        return value
+    if _A_TIME_SEPARATOR.match(value):
+        raise PydanticCustomError("date_carries_a_time", _CARRIES_A_TIME_MESSAGE)
+    raise PydanticCustomError("date_is_not_a_calendar_date", _NOT_A_DATE_MESSAGE)
 
 
 # the date bound itself is deliberate and load-bearing -- it is what makes the partition comparison
-# IMMUTABLE and the pruning stable -- so the remedy for the coercion above is a validator and never
+# IMMUTABLE and the pruning stable -- so the remedy for the coercions above is a validator and never
 # a type change
-WindowBound = Annotated[date, BeforeValidator(_reject_a_window_bound_carrying_a_time)]
+WindowBound = Annotated[date, BeforeValidator(_reject_a_window_bound_that_is_not_a_calendar_date)]
 
 
 # Query lives inside the Annotated alias rather than as the parameter's default value: this

@@ -1,11 +1,13 @@
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic_core import PydanticCustomError
 
 from api.main import create_app
-from api.routes import _reject_numeric_overflow
+from api.routes import _reject_a_window_bound_that_is_not_a_calendar_date, _reject_numeric_overflow
 
 # unreachable and never entered as a context manager: every case here is decided by the
 # validation tier, which answers before the lifespan would open a pool
@@ -121,38 +123,165 @@ _BOUNDS_CARRYING_A_TIME = tuple(
 )
 
 
+def _refused_bound(client, url, name, bound):
+    # params= and never an interpolated query string: a raw `+` in a query string decodes to a SPACE,
+    # so writing start=2026-04-01T00:00:00+12:00 into the URL delivers 2026-04-01T00:00:00 12:00 --
+    # which is not the value under test, and is the one spelling every finding here exhibited
+    other = "end" if name == "start" else "start"
+    base, _, query = url.partition("?")
+    params = {name: bound, other: "2026-04-01" if other == "start" else "2026-04-02"}
+    if query:
+        key, _, value = query.partition("=")
+        params[key] = value
+    response = client.get(base, params=params)
+    assert response.status_code == 400, (url, name, bound, response.text)
+    detail = response.json()["error"]["detail"]
+    assert detail["reason"] == "invalid_parameter", (url, name, bound)
+    return detail["errors"]
+
+
 def test_a_window_bound_carrying_a_time_or_an_offset_is_refused_on_every_endpoint():
     client = _client()
     for url in _WINDOWED:
-        joiner = "&" if "?" in url else "?"
         for bound in _BOUNDS_CARRYING_A_TIME:
-            for name, query in (
-                ("start", f"start={bound}&end=2026-04-02"),
-                ("end", f"start=2026-04-01&end={bound}"),
-            ):
-                response = client.get(f"{url}{joiner}{query}")
-                assert response.status_code == 400, (url, name, bound, response.text)
-                detail = response.json()["error"]["detail"]
-                assert detail["reason"] == "invalid_parameter", (url, name, bound)
-                assert detail["errors"] == [
+            for name in ("start", "end"):
+                assert _refused_bound(client, url, name, bound) == [
                     {"parameter": name, "location": "query", "type": "date_carries_a_time"}
                 ], (url, name, bound)
 
 
+# A timestamp is the second shape pydantic accepts for a date field: seconds, or milliseconds above
+# its own 2e10 threshold, with or without a sign or a fractional part, accepted when the instant is
+# exactly UTC midnight. The published schema says `format: date`, which admits none of these, so a
+# client generated from it cannot send one
+_BOUNDS_THAT_ARE_TIMESTAMPS = (
+    "1774915200",
+    "+1774915200",
+    "1774915200.0",
+    "1774915200000",
+    "0",
+    "-2208988800",
+)
+# Values pydantic itself REFUSES, every one of which the rule must leave alone. These are the cases a
+# pattern-matched rule claims and this one must not: a month of 13, a day of 32, an hour of 24, a
+# separator with nothing after it, a date that is not one, and the four whitespace and NUL paddings
+# that a strip() would have folded onto a legal shape
+_BOUNDS_THE_RULE_MUST_NOT_CLAIM = (
+    "2026-13-01T00:00:00",
+    "2026-04-32 00:00:00",
+    "0000-00-00T00:00:00",
+    "9999-99-99T",
+    "2026-04-01t",
+    "2026-04-01Tnonsense",
+    "2026-04-01T24:00:00+12:00",
+    " 2026-04-01T00:00:00+12:00",
+    "2026-04-01T00:00:00+12:00 ",
+    "\t2026-04-01T00:00:00+12:00",
+    "2026-04-01T00:00:00+12:00\x00",
+    "2026/04/01",
+    "nope",
+    "",
+    "2026-04-01x00:00:00",
+    "20260401T000000+1200",
+    " 2026-04-01",
+    "2026-4-1",
+)
+
+
+def test_every_bound_under_test_reaches_the_service_as_it_is_written():
+    # the delivery itself, because four of the sixteen time-carrying bounds carry a `+` and a query
+    # string decodes one to a SPACE: a test that interpolates them into the URL drives
+    # 2026-04-01T00:00:00 12:00 in place of the positive-offset spelling every finding in this area
+    # exhibited, and a rule matching on the separator alone claims the mangled value too -- so the
+    # test and the rule were wrong in a way that cancelled out
+    client = _client()
+    for bound in (*_BOUNDS_CARRYING_A_TIME, *_BOUNDS_THAT_ARE_TIMESTAMPS):
+        response = client.get("/symbols/AAA/bars", params={"start": bound, "end": "2026-04-02"})
+        delivered = parse_qs(urlparse(str(response.request.url)).query)["start"][0]
+        assert delivered == bound, (bound, delivered)
+
+
+def test_a_window_bound_written_as_a_timestamp_is_refused_on_every_endpoint():
+    client = _client()
+    for url in _WINDOWED:
+        for bound in _BOUNDS_THAT_ARE_TIMESTAMPS:
+            for name in ("start", "end"):
+                assert _refused_bound(client, url, name, bound) == [
+                    {
+                        "parameter": name,
+                        "location": "query",
+                        "type": "date_is_not_a_calendar_date",
+                    }
+                ], (url, name, bound)
+
+
 def test_a_plain_calendar_bound_still_reaches_the_handler_and_other_bad_dates_keep_their_own_slug():
-    # the refusal above is scoped to the one shape pydantic would otherwise accept and misread: a
-    # plain date passes validation and reaches the never-opened pool, which is the 500 below, and a
-    # date that is malformed in any other way keeps pydantic's own slug rather than this one
+    # the two refusals above are scoped to the two shapes pydantic would otherwise accept and
+    # misread: a plain date passes validation and reaches the never-opened pool, which is the 500
+    # below, and a date malformed in any OTHER way keeps pydantic's own slug rather than either of
+    # theirs. That half is what makes the rule a statement about what pydantic accepts instead of a
+    # pattern over what a bad date looks like, so it is driven on every case that merely resembles
+    # one -- including the paddings a strip() folds onto a legal shape
     client = _client()
     for url in _WINDOWED:
         joiner = "&" if "?" in url else "?"
         legal = client.get(f"{url}{joiner}start=2026-04-01&end=2026-04-02")
         assert legal.status_code == 500, (url, legal.text)
         assert legal.json()["error"]["code"] == "internal", url
-    # and the neighbours of the separator set that pydantic refuses outright, which must keep their
-    # own slug rather than being claimed by the rule above
-    for value in ("2026/04/01", "nope", "", "2026-04-01x00:00:00", "20260401T000000+1200"):
-        response = client.get(f"/symbols/AAA/bars?start={value}&end=2026-04-02")
-        assert response.status_code == 400, value
+    for value in _BOUNDS_THE_RULE_MUST_NOT_CLAIM:
+        response = client.get("/symbols/AAA/bars", params={"start": value, "end": "2026-04-02"})
+        assert response.status_code == 400, (value, response.text)
         slug = response.json()["error"]["detail"]["errors"][0]["type"]
-        assert slug != "date_carries_a_time", (value, slug)
+        assert slug == "date_from_datetime_parsing", (value, slug)
+
+
+def test_both_window_bound_refusals_say_what_they_refused():
+    # asserted here because here is the only place either sentence is readable: the validation
+    # handler answers with INVALID_PARAMS_MESSAGE and publishes the slug alone in detail.errors, so
+    # neither message ever reaches a client and nothing else could pin it
+    for value, slug, message in (
+        (
+            "2026-04-01T00:00:00+12:00",
+            "date_carries_a_time",
+            "a window bound is a calendar date (YYYY-MM-DD); a time or an offset on one cannot be"
+            " honoured, so it is refused rather than dropped",
+        ),
+        (
+            "1774915200",
+            "date_is_not_a_calendar_date",
+            "a window bound is a calendar date (YYYY-MM-DD); a timestamp is read as a different day"
+            " than it names, and the published schema admits no other spelling",
+        ),
+    ):
+        with pytest.raises(PydanticCustomError) as excinfo:
+            _reject_a_window_bound_that_is_not_a_calendar_date(value)
+        assert excinfo.value.type == slug, value
+        assert str(excinfo.value) == message, value
+    # and a legal bound is returned unchanged rather than reparsed
+    assert _reject_a_window_bound_that_is_not_a_calendar_date("2026-04-01") == "2026-04-01"
+
+
+def test_every_type_pydantic_accepts_for_a_date_is_judged_and_not_only_the_string_one():
+    # a query parameter is always a str over the wire, so these are reachable from an in-process
+    # caller alone -- but pydantic misreads bytes and an offset-aware datetime exactly as it misreads
+    # the text forms, and a guard scoped to str leaves the same defect one type over
+    refuse = _reject_a_window_bound_that_is_not_a_calendar_date
+    for value, slug in (
+        (b"2026-04-01t00:00:00+12:00", "date_carries_a_time"),
+        (b"1774915200", "date_is_not_a_calendar_date"),
+        (1774915200, "date_is_not_a_calendar_date"),
+        (1774915200.0, "date_is_not_a_calendar_date"),
+        (True, "date_is_not_a_calendar_date"),
+        (datetime(2026, 4, 1, 0, 0, tzinfo=timezone(timedelta(hours=12))), "date_carries_a_time"),
+        (datetime(2026, 4, 1, 2, 30), "date_carries_a_time"),
+    ):
+        with pytest.raises(PydanticCustomError) as excinfo:
+            refuse(value)
+        assert excinfo.value.type == slug, value
+    # and the ones that are already the value they mean pass through untouched
+    assert refuse(b"2026-04-01") == "2026-04-01"
+    assert refuse(date(2026, 4, 1)) == date(2026, 4, 1)
+    assert refuse(datetime(2026, 4, 1, 0, 0)) == datetime(2026, 4, 1, 0, 0)
+    # and a value no reading can decode is left for pydantic to refuse under its own slug
+    assert refuse(b"\xff\xfe") == b"\xff\xfe"
+    assert refuse(object) is object
