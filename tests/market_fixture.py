@@ -261,13 +261,20 @@ def load_sparse_symbol(dsn: str, symbol: str, days, minutes, *, scrambled: bool 
         conn.commit()
 
 
-# each bar's open is neither the previous bar's close nor its own close, and no two returns are
-# equal. Every other fixture here is CONTIGUOUS -- a bar's open IS the previous bar's close -- which
-# makes "close against the previous close" and "close against this bar's own open" numerically
-# identical on every row, so neither definition is observable on them. The closes
-# are 100 -> 110 -> 132, exactly +10% and +20%, and the opens are far away from both, so a statement
-# that measured the intra-minute move instead would answer a different number rather than the same
-# one. Three bars in the first three minutes, so every return lands in bucket 0.
+# Bars whose open is neither the previous bar's close nor their own, plus a twin carrying the same
+# closes with every open sitting on its own bar's close: a close-to-close return reads the two as
+# one series and an intra-minute return reads the twin as a flat zero, which is what makes the
+# return definition observable from the statement's output alone.
+#
+# No shape above shows it. _BAR_SHAPE, _SPREAD_SHAPE and load_flat_symbol are CONTIGUOUS -- a bar's
+# open IS the previous bar's close -- so the two definitions are the same number on every row of
+# them. load_sparse_symbol and load_run_symbol are not: they write open == close, so the two do
+# differ there, but the intra-minute one is identically zero on every bar, which only an assertion
+# on a returned VALUE rather than on a count can catch.
+#
+# The closes are 100 -> 110 -> 132, exactly +10% and +20%, repeated unchanged on each session, so
+# the pooled returns are four copies of each. Three bars in the first three minutes, so every
+# return lands in bucket 0.
 #                open, high, low, close
 _DISCONTIGUOUS_SHAPE = (
     (90, 100, 90, 100),
@@ -276,11 +283,20 @@ _DISCONTIGUOUS_SHAPE = (
 )
 # what the closes above give, close to close, in the order the returns are produced
 DISCONTIGUOUS_RETURNS_PCT = (10, 20)
+# the twin: the same closes at the same minutes, each bar's open, high and low on its own close
+_FLAT_OPEN_SHAPE = tuple((close, close, close, close) for *_, close in _DISCONTIGUOUS_SHAPE)
 
 
-def load_discontiguous_symbol(dsn: str, symbol: str, days=TRADING_DAYS) -> None:
+def load_discontiguous_symbol(
+    dsn: str, symbol: str, days=TRADING_DAYS, *, flat_opens: bool = False
+) -> None:
     """Bars whose open is unrelated to their close and to the previous bar's, so a close-to-close
-    return and an intra-bar one are different numbers rather than the same one."""
+    return and an intra-bar one are different numbers rather than the same one.
+
+    flat_opens writes the twin instead: the same closes with each bar's open on its own close, so
+    a close-to-close return is unchanged and an intra-bar one collapses to zero everywhere.
+    """
+    shape = _FLAT_OPEN_SHAPE if flat_opens else _DISCONTIGUOUS_SHAPE
     with connect(dsn) as conn:
         for day in days:
             ensure_partition(conn, day)
@@ -290,7 +306,7 @@ def load_discontiguous_symbol(dsn: str, symbol: str, days=TRADING_DAYS) -> None:
             (symbol, symbol, open_ts(min(days))),
         )
         for day in days:
-            for minute, (open_, high, low, close) in enumerate(_DISCONTIGUOUS_SHAPE):
+            for minute, (open_, high, low, close) in enumerate(shape):
                 conn.execute(
                     "INSERT INTO bars (symbol, ts, open, high, low, close, volume, trade_count, vwap)"
                     " VALUES (%s, %s, %s, %s, %s, %s, 100, 1, %s)",

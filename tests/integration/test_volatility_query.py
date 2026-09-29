@@ -204,30 +204,50 @@ def test_the_window_orders_by_ts_rather_than_trusting_physical_order(migrated_ds
 
 
 def test_a_return_is_close_to_close_and_not_the_bars_own_intra_minute_move(migrated_dsn, query_sql):
-    # every other fixture in this file is contiguous -- a bar's open is the previous bar's close --
-    # so the two definitions agree on every row and this file passed with either. On bars whose open
-    # is unrelated to both closes they disagree, and the assertions below are the close-to-close
-    # answer with the intra-bar one computed beside it to show the fixture can tell them apart
+    # the same closes at the same timestamps twice, once with the opens far away from them and once
+    # with each bar's open on its own close. a close-to-close return cannot tell the two symbols
+    # apart and an intra-minute one reads the second as a flat zero, so this equality is the
+    # definition and nothing else: it survives every edit that moves both answers together, which
+    # is what keeps a partition-key or a rounding change from failing a test named for the return
+    load_calendar(migrated_dsn)
+    load_discontiguous_symbol(migrated_dsn, "DISC")
+    load_discontiguous_symbol(migrated_dsn, "FLATOPEN", flat_opens=True)
+
+    with connect(migrated_dsn) as conn:
+        written = {
+            symbol: (opens, closes)
+            for symbol, opens, closes in conn.execute(
+                "SELECT symbol, array_agg(open ORDER BY ts), array_agg(close ORDER BY ts)"
+                " FROM bars WHERE symbol IN ('DISC', 'FLATOPEN') GROUP BY symbol"
+            ).fetchall()
+        }
+    # a twin that had degenerated into a copy would satisfy the equality below vacuously
+    assert written["DISC"][1] == written["FLATOPEN"][1]
+    assert written["DISC"][0] != written["FLATOPEN"][0]
+
+    varied_opens = _read(migrated_dsn, query_sql, symbol="DISC")
+    flat_opens = _read(migrated_dsn, query_sql, symbol="FLATOPEN")
+
+    # and neither is the equality between two empty results or two zeros: the closes move
+    assert varied_opens
+    assert varied_opens[0][3] > 0
+    assert varied_opens == flat_opens
+
+
+def test_the_dispersion_is_the_sample_estimator_over_the_returns_the_closes_give(
+    migrated_dsn, query_sql
+):
     load_calendar(migrated_dsn)
     load_discontiguous_symbol(migrated_dsn, "DISC")
 
     rows = _read(migrated_dsn, query_sql, symbol="DISC")
 
     close_to_close = [pct for _ in TRADING_DAYS for pct in DISCONTIGUOUS_RETURNS_PCT]
-    intra_bar = [
-        100 * (close - open_) / open_
-        for _ in TRADING_DAYS
-        for open_, close in ((210, 110), (310, 132))
-    ]
-    # the fixture is only a test of the definition while the two answers differ on it
-    assert not any(
-        abs(a - b) < 1e-9 for a, b in zip(sorted(close_to_close), sorted(intra_bar))
-    )
     assert [row[0] for row in rows] == [0]
     assert rows[0][1] == len(close_to_close)
-    # the sample estimator, computed by a different implementation from the statement's: with eight
-    # returns, sample and population differ in the fourth significant figure, so this pins
-    # stddev_samp as well as the return definition
+    # an exact value, computed by a different implementation from the statement's: with eight
+    # returns sample and population differ in the fourth significant figure, so the second
+    # assertion is what pins stddev_samp rather than stddev_pop
     assert rows[0][3] == Decimal(str(round(statistics.stdev(close_to_close), 6)))
     assert rows[0][3] != Decimal(str(round(statistics.pstdev(close_to_close), 6)))
 
