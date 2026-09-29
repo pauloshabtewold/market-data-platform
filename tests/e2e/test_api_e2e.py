@@ -10,6 +10,20 @@ from config import settings
 
 _UNKNOWN_SYMBOL = "ZZZZ-NOT-A-SYMBOL"
 _BAD_CURSOR = "not-a-cursor"
+# every separator pydantic-core accepts between a date and a time -- t, T, _ and a space -- each on
+# a bound whose wall-clock time is midnight, the only shape it takes as a date while discarding
+# what follows. The offset one is why the rule exists: 2026-04-01t00:00:00+12:00 is the instant
+# 2026-03-31T12:00:00Z and would have been served as 2026-04-01
+_BOUNDS_CARRYING_A_TIME = (
+    "2026-04-01T00:00:00",
+    "2026-04-01t00:00:00+12:00",
+    "2026-04-01_00:00:00",
+    "2026-04-01 00:00:00",
+)
+# a Unix timestamp in seconds and the same instant in milliseconds, both landing exactly on midnight
+# UTC: an unaligned one pydantic refuses itself under its own slug, so these are the spellings of a
+# timestamp that reach the service's rule at all
+_BOUNDS_THAT_ARE_NOT_A_DATE = ("1775001600", "1775001600000")
 _FOUR_PLACES = Decimal("0.0001")
 _SIX_PLACES = Decimal("0.000001")
 _TWO_PLACES = Decimal("0.01")
@@ -118,6 +132,42 @@ def _cursor_endpoints(window: dict, symbol: str):
         (f"/symbols/{symbol}/daily", window, settings.AGG_PAGE_MAX),
         ("/analytics/largest-moves", window, settings.AGG_PAGE_MAX),
     ]
+
+
+def _windowed_endpoints(symbol: str):
+    # every route that takes a window, with whatever else each one requires, shared so the bound
+    # cases below cover one list rather than two that can drift apart
+    return [
+        (f"/symbols/{symbol}/bars", {}),
+        (f"/symbols/{symbol}/daily", {}),
+        ("/analytics/volatility", {"symbol": symbol}),
+        ("/analytics/gaps", {"symbol": symbol}),
+        ("/analytics/largest-moves", {}),
+    ]
+
+
+def _assert_a_window_bound_is_refused(client, window: dict, symbol: str, values, slug: str) -> None:
+    # detail["errors"] carries the per-entry type, and that is the one machine-readable field a
+    # client reads off a refused bound: a bound pydantic accepts and MISREADS is refused under this
+    # service's own slug, while one pydantic refuses outright keeps pydantic's, so only the slug
+    # separates the two and a 400 alone would not. Every spelling on the first endpoint and one of
+    # them on the rest: the rule is one validator all five share, so the rest test the wiring to it
+    for index, (path, extra) in enumerate(_windowed_endpoints(symbol)):
+        for value in values if index == 0 else values[:1]:
+            for bound in ("start", "end"):
+                label = (path, bound, value)
+                # params= and never an interpolated URL: a raw + in a query string decodes to a
+                # space, which would send a different value than the offset spelling names here
+                error = _refusal(
+                    client.get(path, params={**window, **extra, bound: value}),
+                    400,
+                    "invalid_params",
+                    label,
+                )
+                assert error["detail"]["reason"] == "invalid_parameter", label
+                assert error["detail"]["parameter"] == bound, label
+                assert error["detail"]["location"] == "query", label
+                assert [e["type"] for e in error["detail"]["errors"]] == [slug], (label, error)
 
 
 def _page_budget(max_rows: int, limit: int) -> int:
@@ -275,9 +325,13 @@ def test_health_answers_ok_with_a_real_version(client):
     # what this establishes and what it cannot. build_version() reads the installed package metadata
     # and not the database, so a /health that answered without ever running its query would satisfy
     # both tests here and the whole of this suite -- measured, on a service built with the check
-    # removed. Nothing reachable over HTTP against a healthy database distinguishes the two, so the
-    # check's existence is held by tests/integration/test_health.py, which drives a real server and a
-    # relay that refuses the query; this suite's subject is the contract a client sees
+    # removed. Nothing in the CONTRACT reachable over HTTP distinguishes the two: the check opens a
+    # connection of its own, so /health does answer measurably slower than a path routing nowhere
+    # (medians 20.330 ms against 3.155 ms over 25 samples each, a 6.4x separation), but latency is
+    # published in no schema, does not hold across machines or under load, and an assertion on it
+    # would need a reference measurement this suite has no way to take. So the check's existence is
+    # held by tests/integration/test_health.py, which drives a real server and a relay that refuses
+    # the query; this suite's subject is the contract a client sees
     response = client.get("/health")
     assert response.status_code == 200
     body = response.json()
@@ -481,23 +535,27 @@ def test_a_limit_over_the_cap_is_refused_on_every_endpoint_that_declares_one(
 def test_volatility_and_gaps_silently_ignore_an_undeclared_limit_and_cursor(
     client, window, symbols
 ):
-    # over the cap by construction: AGG_PAGE_MAX is the pair both handlers pass to the range tier,
-    # and neither declares a limit a request could use to reach it
-    params = {
-        **window,
-        "symbol": symbols[0],
-        "limit": settings.AGG_PAGE_MAX + 1,
-        "cursor": _BAD_CURSOR,
-    }
     declared = {**window, "symbol": symbols[0]}
-    for path in ("/analytics/volatility", "/analytics/gaps"):
-        body = _page(client.get(path, params=params), path)
-        assert body["next_cursor"] is None, path
-        # against the same request WITHOUT them, which is what makes this falsifiable: FastAPI drops
-        # an undeclared query parameter before the handler runs, so `next_cursor is None` alone is
-        # true of every possible implementation of these two endpoints, including one that honoured
-        # a limit. Identical bodies are not
-        assert body == _page(client.get(path, params=declared), path), path
+    # the same request WITHOUT them is what makes this falsifiable: FastAPI drops an undeclared
+    # query parameter before the handler runs, so `next_cursor is None` alone is true of every
+    # possible implementation of these two endpoints, including one that declared a limit and
+    # honoured it. Identical bodies are not
+    baselines = {
+        path: _page(client.get(path, params=declared), path)
+        for path in ("/analytics/volatility", "/analytics/gaps")
+    }
+    # three limits, because no single value falsifies both endpoints. AGG_PAGE_MAX + 1 is over the
+    # cap the range tier already knows, so a declared limit validated against it answers 400; 1
+    # truncates volatility's buckets but not the single aggregate row gaps answers, which is what
+    # the version of this test resting on the cap alone could not see; 0 empties any body that
+    # honours it and is below the floor a declared limit would carry, so it shows on both
+    for undeclared_limit in (settings.AGG_PAGE_MAX + 1, 1, 0):
+        params = {**declared, "limit": undeclared_limit, "cursor": _BAD_CURSOR}
+        for path, baseline in baselines.items():
+            label = (path, f"an undeclared limit={undeclared_limit}")
+            body = _page(client.get(path, params=params), label)
+            assert body["next_cursor"] is None, label
+            assert body == baseline, label
 
 
 def test_a_bars_second_page_follows_the_cursor_without_repeating_a_row(client, window, symbols):
@@ -640,9 +698,11 @@ def test_a_largest_moves_page_that_spans_a_symbol_boundary_is_ordered_by_time(cl
     # every other ordering check here reads a page that cannot span a symbol boundary: one liquid
     # symbol contributes far more bars to the configured window than any limit this suite uses, so a
     # page ordered by symbol and a page ordered by time are the same rows in the same order. This
-    # asks for a page that must cross one -- a single session, so the scan stays narrow, and a
-    # threshold that leaves only a handful of qualifying bars per symbol -- and the contract is
-    # chronological across the whole universe rather than ranked or grouped
+    # asks for a page that must cross one -- a single session, so the scan stays narrow, over the
+    # whole universe, where the threshold leaves far more than a page: measured on one session,
+    # 3,805 rows clear 0.1 over 99 symbols at 386 distinct timestamps, at most 50 rows sharing any
+    # one of them -- and the contract is chronological across the whole universe rather than
+    # ranked or grouped
     day = daily_rows[-1]["day"]
     params = {
         "start": day,
@@ -654,10 +714,20 @@ def test_a_largest_moves_page_that_spans_a_symbol_boundary_is_ordered_by_time(cl
     rows = body["data"]
     assert rows, "no bar in the last session clears the threshold"
     order = [row["symbol"] for row in rows]
-    # the page has to cross a boundary or nothing below distinguishes the two orderings
-    assert len(set(order)) > 1, order
     timestamps = [_ts_key(row) for row in rows]
     assert all(a <= b for a, b in zip(timestamps, timestamps[1:])), order
+    # the descent below is carried entirely by the page crossing a MINUTE boundary, and that is a
+    # property of the page size against the rows one minute holds rather than of the service: inside
+    # a single timestamp the two orderings agree, so a page held to one minute ascends by symbol
+    # under either of them and the descent is unreachable. Asserted with its own message, because a
+    # page cap at or below the rows one minute holds is a configuration this test cannot judge and
+    # must not report as a wrong ordering
+    assert len(set(timestamps)) > 1, (
+        f"this page did not cross a minute boundary: all {len(rows)} rows sit at"
+        f" {timestamps[0].isoformat()} on {day}, against limit={params['limit']}"
+    )
+    # and it has to cross a symbol boundary too, or nothing below distinguishes the two orderings
+    assert len(set(order)) > 1, order
     # and the symbols are NOT in ascending order, which is what a page ordered by symbol would be:
     # under ORDER BY symbol, ts the symbol column never descends, and under ORDER BY ts, symbol it
     # must, as soon as one timestamp is followed by an earlier-sorting symbol at a later one
@@ -684,6 +754,18 @@ def test_a_bad_parameter_is_refused_ahead_of_an_unknown_symbol(client, window):
             client.get(path, params={**params, "limit": cap + 1}), 400, "invalid_params", path
         )
         assert error["detail"]["reason"] == "limit_out_of_range", (path, error)
+        # and through a malformed window bound, which is a different mechanism from the two above:
+        # pydantic refuses that one while solving the request, before resolve_request runs at all.
+        # So this half says the 404 loses to the validation layer as well as to the two ApiError
+        # tiers, and on these two routes it is the only way the window itself reaches the 400 tier
+        error = _refusal(
+            client.get(path, params={**params, "start": _BOUNDS_CARRYING_A_TIME[0]}),
+            400,
+            "invalid_params",
+            path,
+        )
+        assert error["detail"]["reason"] == "invalid_parameter", (path, error)
+        assert error["detail"]["parameter"] == "start", (path, error)
     # the two analytics endpoints that look a symbol up declare no cursor and no limit, so their
     # 400 tier is reached through a malformed window bound instead
     for path in ("/analytics/volatility", "/analytics/gaps"):
@@ -697,6 +779,60 @@ def test_a_bad_parameter_is_refused_ahead_of_an_unknown_symbol(client, window):
             path,
         )
         assert error["detail"]["reason"] == "invalid_parameter", (path, error)
+
+
+def test_a_window_bound_carrying_a_time_or_an_offset_is_refused_on_every_windowed_endpoint(
+    client, window, symbols
+):
+    # a bound written as a calendar date is the whole of the published schema, and pydantic's lax
+    # date takes every one of these spellings and keeps the literal calendar date while discarding
+    # the time and the offset -- serving an instant in another day under the name of this one
+    _assert_a_window_bound_is_refused(
+        client, window, symbols[0], _BOUNDS_CARRYING_A_TIME, "date_carries_a_time"
+    )
+
+
+def test_a_window_bound_that_is_a_unix_timestamp_is_refused_on_every_windowed_endpoint(
+    client, window, symbols
+):
+    # the other half of the same rule and a slug of its own, because a timestamp names no day at all
+    # rather than naming one and carrying more: pydantic's lax date reads these as the epoch day
+    # they compute to, which is not the day any client writing them meant
+    _assert_a_window_bound_is_refused(
+        client, window, symbols[0], _BOUNDS_THAT_ARE_NOT_A_DATE, "date_is_not_a_calendar_date"
+    )
+
+
+def test_a_bad_cursor_or_limit_is_refused_ahead_of_an_inverted_window(client, window, symbols):
+    # the middle pair of spec section 4's precedence, which this suite drove at neither end: 400
+    # before 422. It drove 400-before-404 and 422-before-404 and never these two against each other,
+    # and resolve_request decodes the cursor before it range-validates the window, so a tampered
+    # cursor on an inverted window answers 400 invalid_cursor and NOT 422 start_after_end -- which
+    # that function's own docstring flags as looking wrong and being what the spec mandates. Pinned
+    # here so a later reader who "corrects" the order to answer the range first breaks something
+    inverted = {"start": window["end"], "end": window["start"]}
+    for path, cap in (
+        (f"/symbols/{symbols[0]}/bars", settings.BARS_PAGE_MAX),
+        (f"/symbols/{symbols[0]}/daily", settings.AGG_PAGE_MAX),
+        ("/analytics/largest-moves", settings.AGG_PAGE_MAX),
+    ):
+        # the window on its own first, so what it answers with no parameter fault is on the record
+        # and the two below are a precedence rather than a cursor test written a third time
+        error = _refusal(client.get(path, params=inverted), 422, "invalid_range", path)
+        assert error["detail"]["reason"] == "start_after_end", (path, error)
+
+        error = _refusal(
+            client.get(path, params={**inverted, "cursor": _BAD_CURSOR}),
+            400,
+            "invalid_cursor",
+            path,
+        )
+        assert error["detail"]["reason"] == "not_base64", (path, error)
+
+        error = _refusal(
+            client.get(path, params={**inverted, "limit": cap + 1}), 400, "invalid_params", path
+        )
+        assert error["detail"]["reason"] == "limit_out_of_range", (path, error)
 
 
 def test_symbols_pages_walked_at_a_small_limit_concatenate_to_one_larger_page(client):
@@ -782,47 +918,70 @@ def test_the_configured_windows_first_and_last_session_are_not_dropped_by_any_en
         )
         assert all(_ts_key(row).date().isoformat() == day for row in moves["data"]), label
 
-    # ground truth from a codepath the rollup never touches: a largest-moves row for the symbol on
-    # the window's literal edge is a regular-session bar there, so the rollup must report that day
-    # and not a neighbour. A /bars row would not do, since a pre- or post-market bar is no session
-    checked, unchecked = [], []
-    for literal, reported, label in (
-        (window["start"], reported_first, "first"),
-        (window["end"], reported_last, "last"),
+    # ground truth from a codepath the rollup never touches: a largest-moves row for a symbol on a
+    # given day is a regular-session bar there, so the rollup must report that day and not a
+    # neighbour. A /bars row would not do, since a pre- or post-market bar is no session.
+    #
+    # The day checked is the nearest session walked INWARD from each window bound, not the bound
+    # itself. Nothing in the suite's configuration rules requires E2E_START or E2E_END to be a
+    # trading session -- they are pure arithmetic over dates with no calendar to consult, and the
+    # earliest E2E_END they admit is itself a Sunday -- so an assertion pinned to the literal bound
+    # fails on a legal configuration rather than on a broken service. Walking inward keeps the
+    # subject it was written for: the session adjacent to a bound is exactly the one an off-by-one
+    # on that bound drops. The walk is bounded by the window itself rather than by a guess at the
+    # longest run of closed days, so no assumption about the calendar can make it refuse a legal
+    # window, and it cannot come up empty -- /daily has already reported three sessions inside here
+    span_days = (settings.E2E_END - settings.E2E_START).days + 1
+    checked = []
+    for bound, inward, reported, label in (
+        (window["start"], timedelta(days=1), reported_first, "first"),
+        (window["end"], timedelta(days=-1), reported_last, "last"),
     ):
-        edge = _page(
-            client.get(
-                "/analytics/largest-moves",
-                params={"start": literal, "end": literal, "limit": settings.AGG_PAGE_MAX},
-            ),
-            f"/analytics/largest-moves at the window's literal {label} day",
-        )
-        traded = {row["symbol"] for row in edge["data"]}
-        if not traded:
-            # the literal edge is not a trading session at all, so there is nothing here for the
-            # rollup to have dropped. Recorded rather than passed over in silence: nothing in
-            # config.e2e_configuration_problems requires E2E_START or E2E_END to be a session, so
-            # whether the check below runs is a property of the calendar
-            unchecked.append((label, literal))
-            continue
+        session = date.fromisoformat(bound)
+        for _ in range(span_days):
+            edge = _page(
+                client.get(
+                    "/analytics/largest-moves",
+                    params={
+                        "start": session.isoformat(),
+                        "end": session.isoformat(),
+                        "limit": settings.AGG_PAGE_MAX,
+                    },
+                ),
+                f"/analytics/largest-moves walking in to the window's {label} session",
+            )
+            traded = {row["symbol"] for row in edge["data"]}
+            if traded:
+                break
+            session += inward
+        else:
+            pytest.fail(
+                f"no day in {window} reached inward from its {label} bound {bound} has a"
+                " regular-session bar for any symbol",
+                pytrace=False,
+            )
+        literal = session.isoformat()
+        # this is the window's own first (or last) session universe-wide, so if the configured
+        # symbol traded in it then /daily's first (or last) row is that day and nothing adjacent
         if symbol in traded:
             assert reported == literal, f"daily dropped the window's {label} session"
         # and the same claim without depending on the configured symbol having traded that day: any
-        # symbol with a regular-session bar at the literal edge is a symbol whose rollup must report
+        # symbol with a regular-session bar in that session is a symbol whose rollup must report
         # that day, so this half holds whatever the configured symbol did
         edge_symbol = sorted(traded)[0]
         edge_daily = _page(
             client.get(
                 f"/symbols/{edge_symbol}/daily", params={"start": literal, "end": literal}
             ),
-            f"/daily for {edge_symbol} at the window's literal {label} day",
+            f"/daily for {edge_symbol} at the window's {label} session",
         )
         assert [row["day"] for row in edge_daily["data"]] == [literal], (
             f"daily dropped the window's {label} session for {edge_symbol}"
         )
         checked.append((label, literal, edge_symbol))
-    # one of the two edges has to be a session, or this test established nothing
-    assert checked, f"neither window edge is a trading session: {unchecked}"
+    # both ends, not one: the walk cannot run out of days, so anything short of two is a defect in
+    # the loop above rather than a calendar this suite has to tolerate
+    assert len(checked) == 2, checked
 
 
 def test_largest_moves_values_agree_with_bars_and_daily_for_one_symbol(
