@@ -1189,3 +1189,87 @@ def test_a_limit_over_the_cap_and_a_garbage_cursor_are_four_hundreds_on_largest_
     assert body["code"] == "invalid_cursor"
     assert body["message"] == "the cursor is not one this endpoint issued"
     assert body["detail"] == {"reason": "not_base64"}
+
+
+def test_every_endpoint_sends_the_statement_its_module_constant_declares(monkeypatch, migrated_dsn):
+    """What the request path executes, not what a module attribute holds.
+
+    Every other guard on these statements -- both pins above, the plan test, the ORDER BY assertion
+    -- reads `api.routes._MOVES_SQL` by name, and nothing tied any of them to the SQL a request
+    sends. Adding a second constant and pointing the route at it left all of them green and the
+    whole suite byte-identical, because a name is not a call site. This reads the statements off the
+    connection the handler used, so a route served by anything other than its declared constant
+    fails here whatever the constant still says.
+    """
+    load(migrated_dsn)
+    sent: list[str] = []
+    original = psycopg.Connection.execute
+
+    def recording(self, query, params=None, **kwargs):
+        sent.append(query if isinstance(query, str) else query.as_string(self))
+        return original(self, query, params, **kwargs)
+
+    monkeypatch.setattr(psycopg.Connection, "execute", recording)
+
+    symbol = "AAA"
+    window = {"start": WINDOW_START.isoformat(), "end": WINDOW_END.isoformat()}
+    # every endpoint that runs one of these statements, with the constant it must send
+    expected = {
+        ("/symbols", frozenset()): api.routes._SYMBOLS_SQL,
+        (f"/symbols/{symbol}/bars", frozenset(window.items())): api.routes._BARS_SQL,
+        (f"/symbols/{symbol}/daily", frozenset(window.items())): api.routes._DAILY_SQL,
+        ("/analytics/volatility", frozenset({**window, "symbol": symbol}.items())): (
+            api.routes._VOLATILITY_SQL
+        ),
+        ("/analytics/gaps", frozenset({**window, "symbol": symbol}.items())): api.routes._GAPS_SQL,
+        ("/analytics/largest-moves", frozenset({**window, "min_move_pct": 0}.items())): (
+            api.routes._MOVES_SQL
+        ),
+    }
+    with TestClient(create_app(migrated_dsn)) as client:
+        for (path, params), statement in expected.items():
+            sent.clear()
+            response = client.get(path, params=dict(params))
+            assert response.status_code == 200, (path, response.text)
+            assert statement in sent, (
+                f"{path} did not send the statement its module constant declares;"
+                f" it sent {[s for s in sent if 'SELECT' in s.upper()]!r}"
+            )
+            # and nothing else that reads bars or market_days: a handler that sends its own
+            # statement BESIDE the pinned one is the same defect with the pin still passing
+            reads = [
+                s
+                for s in sent
+                if s != statement
+                and s != api.routes.REQUIRE_SYMBOL_SQL
+                and re.search(r"\bfrom\s+(bars|market_days)\b", s, re.IGNORECASE)
+            ]
+            assert reads == [], (path, reads)
+
+
+def test_no_inline_statement_carries_a_percent_this_project_does_not_double(monkeypatch):
+    """db/sql.py doubles every literal percent before rendering a committed query, because a bare
+    one fails the bind with an error naming neither comments nor the file. The statements written
+    inline in api/routes.py never pass through that loader, so the same `100%` in a comment -- or a
+    stray `%(name)s` written into one, which becomes a real bind -- is unprotected here.
+    """
+    inline = {
+        name: getattr(api.routes, name)
+        for name in dir(api.routes)
+        if name.endswith("_SQL") and isinstance(getattr(api.routes, name), str)
+    }
+    # the two rendered through db.sql are the loader's business, not this test's
+    inline = {n: s for n, s in inline.items() if n not in {"_VOLATILITY_SQL", "_GAPS_SQL"}}
+    assert set(inline) == {"REQUIRE_SYMBOL_SQL", "_SYMBOLS_SQL", "_BARS_SQL", "_DAILY_SQL", "_MOVES_SQL"}
+    for name, statement in inline.items():
+        # every percent must open a named placeholder, which is the only form psycopg reads here
+        for match in re.finditer(r"%", statement):
+            tail = statement[match.start():]
+            assert re.match(r"%\(\w+\)s", tail), (
+                f"{name} carries a percent at {match.start()} that is not a %(name)s placeholder:"
+                f" {statement[max(0, match.start() - 30):match.start() + 30]!r}"
+            )
+        # and no whitespace Python discards that Postgres refuses: \x0b and \x1c-\x1f are dropped by
+        # a \s-based tokeniser and are syntax errors to the server, so a pin over tokens would pass
+        # a statement that cannot run
+        assert not set(statement) & set("\x0b\x1c\x1d\x1e\x1f"), name
