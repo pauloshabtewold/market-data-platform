@@ -22,10 +22,12 @@ HEALTH_TIMEOUT_SECONDS = 2.0
 log = logging.getLogger(__name__)
 
 
+# The shape of a healthy 200, declared through the route's `responses` and never as response_model,
+# for the same reason the page models are. A comment and not a docstring: a docstring on a published
+# model becomes that schema's `description`, which every generated client carries as its own class
+# documentation and every reader of the page sees -- wrapped across source lines, as one run-on line.
+# What /health answers is described client-facing in the route's own 200 entry instead.
 class HealthResponse(BaseModel):
-    """What a healthy probe is answered with, published for the same reason the pages are: through
-    the route's `responses` and never as response_model, so nothing re-serialises the reply."""
-
     status: str
     version: str
 
