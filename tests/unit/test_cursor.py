@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from api.errors import ApiError
+from api.errors import INVALID_CURSOR_MESSAGE, ApiError
 from api.pagination import (
     BARS_CURSOR,
     DAILY_CURSOR,
@@ -275,6 +275,16 @@ def test_a_string_field_postgres_text_cannot_hold_is_refused_before_any_query():
         assert excinfo.value.status == 400
         assert excinfo.value.code == "invalid_cursor"
         assert excinfo.value.detail["reason"] == "wrong_types"
+        # the message as well as the reason, and this is the only raise site in decode_cursor that
+        # needed saying so. There are two that answer `wrong_types` -- the type check above this one,
+        # and this one -- and the test that reads a refusal's message drives the first: its own
+        # wrong_types case is a cursor whose ts is a number, which never reaches here. So the message
+        # on this site was replaceable by None with every test in the repository still passing, and a
+        # published body would then carry error.message null, which the document declares required
+        # and non-nullable. Asserted against the shared constant rather than the text, which is
+        # pinned once above: what this site has to hold is that it publishes the SAME message as
+        # every other cursor refusal.
+        assert excinfo.value.message == INVALID_CURSOR_MESSAGE
 
 
 def test_a_cursor_carrying_a_urlsafe_alphabet_character_decodes_rather_than_being_refused():
