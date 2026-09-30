@@ -707,7 +707,12 @@ def test_the_probes_query_waits_for_the_socket_while_it_is_still_going_out():
             near, flushes=[1, 0], results=[_FakeResult(pq.ExecStatus.TUPLES_OK, values=[b"1"])]
         )
 
-        asyncio.run(api.main._select_one(pgconn))
+        # bounded for the same reason the two assertions above are, and with more cause: _select_one
+        # carries NO deadline of its own -- measured, a buffer that never drains spins it until the
+        # process is killed, and only _bounded_check's wait_for ends it in the service. So the way a
+        # regression in this loop or in _socket_ready surfaces here is a run that never finishes and
+        # names no test, which is exactly what this bound converts into a failure.
+        _within_seconds(5.0, lambda: asyncio.run(api.main._select_one(pgconn)))
 
         assert pgconn.sent == [b"SELECT 1"]
 
