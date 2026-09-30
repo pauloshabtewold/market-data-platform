@@ -403,7 +403,7 @@ DEAD_ENV = {
 
 
 def test_the_run_reaches_a_real_stream_at_info(tmp_path):
-    # basicConfig is a no-op once a handler exists and pytest installs one, so the level it sets is invisible in process -- the same blindness that let D-048's stream move unnoticed. A subprocess is the only place the emitted bytes are real.
+    # basicConfig is a no-op once a handler exists and pytest installs one, so the level it sets is invisible in process -- which is why a change to the stream this run writes to can pass every in-process test. A subprocess is the only place the emitted bytes are real.
     tickers = _tickers(tmp_path, "AAPL")
     program = (
         "import sys, types\n"

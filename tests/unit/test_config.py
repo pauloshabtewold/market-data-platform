@@ -103,7 +103,7 @@ def test_the_three_lists_between_them_name_every_setting_on_the_right_side():
     required = {name for name, field in Settings.model_fields.items() if field.is_required()}
     # a config.py mutation of a required key has to be applied in isolating form -- for LOG_LEVEL's
     # default that means LOG_LEVEL=INFO in the environment -- or module-level settings = Settings()
-    # turns the kill into six collection errors that name no test, which is D-222's shape
+    # turns the kill into six collection errors that name no test, which reads as a survivor
     assert set(REQUIRED) == required
     assert set(MEASURED) | set(DEFAULTED) == set(Settings.model_fields) - required
 
