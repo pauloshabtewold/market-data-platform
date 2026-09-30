@@ -8,6 +8,7 @@ import anyio.to_thread
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.conninfo import conninfo_to_dict
 
 import api.deps
 import api.main
@@ -374,6 +375,80 @@ def test_a_password_that_contains_another_configured_secret_is_masked_whole():
     prefix_pair = "host=h dbname=d password=secretpw sslpassword=secretpw-and-more"
     masked = api.deps.mask_secrets('rejected "secretpw-and-more" and "secretpw"', prefix_pair)
     assert masked == 'rejected "***" and "***"'
+
+
+def test_a_secret_is_masked_at_the_two_characters_the_guards_branch_on():
+    # _mask reads the secret's FIRST and LAST character to decide whether to bound the match to a
+    # whole token, and switches to a different pair of guards below _STANDALONE_UNDER. Every other
+    # password in this file is a word -- five characters or more, alphanumeric at both ends -- so
+    # the else-arm of each guard and the length boundary itself were taken by nothing, and nine
+    # mutations of those three lines survived a whole generated campaign twice. Three of them stop
+    # masking a real password, which is the direction that leaks.
+
+    # exactly at the boundary: four characters still take the token branch, where the standalone
+    # branch would not mask a secret followed by a hyphen
+    at_the_boundary = "host=h dbname=d password=1234"
+    assert api.deps.mask_secrets("connection to 1234-5 failed", at_the_boundary) == (
+        "connection to ***-5 failed"
+    )
+
+    # an edge that is not a token character at all: there is no word boundary to anchor, so the
+    # guard is empty and the escaped secret has to match on its own
+    for dsn, refusal, masked in (
+        ("host=h dbname=d password='!secret'", 'rejected "!secret"', 'rejected "***"'),
+        ("host=h dbname=d password='secret!'", 'rejected "secret!"', 'rejected "***"'),
+    ):
+        assert api.deps.mask_secrets(refusal, dsn) == masked, dsn
+
+    # and the other direction, which is what the token bounds exist for: a secret that occurs inside
+    # a longer identifier is left alone, whatever the case of the characters around it. The existing
+    # "marketdata" case cannot see this -- its continuation is lowercase, so a mutated character
+    # class still excludes it; only a capital on one side and a lowercase on the other pins both.
+    inside_a_word = "host=h dbname=d password=market"
+    for entry in (
+        'FATAL: cluster DBmarket is down',
+        'FATAL: cluster xmarket is down',
+        'FATAL: database "marketDATA" does not exist',
+    ):
+        assert api.deps.mask_secrets(entry, inside_a_word) == entry, entry
+
+    # the same for WHICH character each guard reads: with a non-alphanumeric one position in from
+    # either end, reading secret[1] instead of secret[0] -- or secret[-2] instead of secret[-1] --
+    # picks the wrong guard and starts masking inside a word
+    for dsn, entry in (
+        ("host=h dbname=d password='a-bcdef'", "FATAL: role xa-bcdef is unknown"),
+        ("host=h dbname=d password='a-bcdef'", "FATAL: role a-bcdefX is unknown"),
+        ("host=h dbname=d password='abcde-f'", "FATAL: role abcde-fX is unknown"),
+    ):
+        assert api.deps.mask_secrets(entry, dsn) == entry, (dsn, entry)
+
+
+def test_the_keyword_fallback_finds_a_password_in_a_string_libpq_itself_refuses():
+    # _secrets_in reads the DSN twice: through libpq, and through its own two regexes. The regexes
+    # exist ONLY for the strings libpq refuses -- and every test of their quoting and unescaping used
+    # a string libpq ACCEPTS, where conninfo_to_dict supplies the password anyway and the regex path
+    # cannot be observed at all. Four mutations of it survived two campaigns; on a refused string each
+    # one drops the real password out of the set, and a password that is not in the set is not masked
+    # out of the line an operator reads.
+    #
+    # The refusal is asserted rather than assumed: if a later libpq accepts one of these, this test
+    # says the premise moved instead of quietly testing the path that was already covered.
+    for dsn, password in (
+        # a quoted value with an escaped quote inside it, in a string carrying an unknown keyword
+        (r"password='s3c\'r3t' host=h dbname=d nosuchkeyword=1", "s3c'r3t"),
+        # an unterminated quote, which only the regex can read
+        ("host=h dbname=d password='", "'"),
+    ):
+        with pytest.raises(psycopg.ProgrammingError):
+            conninfo_to_dict(dsn)
+        assert password in api.deps._secrets_in(dsn), dsn
+        assert api.deps.mask_secrets(f'the server rejected "{password}"', dsn) == (
+            'the server rejected "***"'
+        ), dsn
+
+    # and an empty quoted password is no secret: it unwraps to "" and is dropped, so nothing in a
+    # diagnostic is masked on account of it
+    assert api.deps._secrets_in("host=h dbname=d password=''") == []
 
 
 def test_masking_answers_rather_than_raises_on_anything_it_is_handed():
