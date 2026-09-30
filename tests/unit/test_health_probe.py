@@ -1,6 +1,8 @@
 import asyncio
+import contextlib
 import logging
 import selectors
+import socket
 import threading
 import time
 
@@ -8,6 +10,7 @@ import anyio.to_thread
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from psycopg import pq
 from psycopg.conninfo import conninfo_to_dict
 
 import api.deps
@@ -24,6 +27,116 @@ class _IdlePool:
 
     def close(self):
         pass
+
+
+class _FakeResult:
+    """One libpq result: the four members the two checks read off one, and nothing else."""
+
+    def __init__(self, status, values=(), error=None):
+        self.status = status
+        self._values = values
+        self._error = error
+
+    @property
+    def ntuples(self):
+        return len(self._values)
+
+    def get_value(self, row, column):
+        return self._values[row]
+
+    def get_error_message(self):
+        return self._error
+
+
+class _FakePgconn:
+    """A PGconn whose output buffer takes more than one flush to drain.
+
+    Both connection checks wait for the socket inside `while pgconn.flush():`, and a query as small
+    as an empty one or SELECT 1 always leaves a loopback socket in a single call -- so that branch is
+    unreachable against a real connection, however the peer behaves, and only a fake reaches it. The
+    descriptor is a real socketpair end, because the selector and the event loop watch a real one.
+
+    flushes is read one element at a time and its last value repeats, so [1, 0] drains after one wait
+    and [1] never drains at all.
+    """
+
+    transaction_status = pq.TransactionStatus.IDLE
+
+    def __init__(self, sock, flushes, results=()):
+        self._sock = sock
+        self._flushes = list(flushes)
+        self._results = list(results)
+        self.sent = []
+
+    @property
+    def socket(self):
+        return self._sock.fileno()
+
+    def send_query(self, query):
+        self.sent.append(query)
+
+    def flush(self):
+        return self._flushes.pop(0) if len(self._flushes) > 1 else self._flushes[0]
+
+    def consume_input(self):
+        pass
+
+    def is_busy(self):
+        return False
+
+    def get_result(self):
+        return self._results.pop(0) if self._results else None
+
+
+class _FakeConn:
+    closed = False
+
+    def __init__(self, pgconn):
+        self.pgconn = pgconn
+
+    def close(self):
+        self.closed = True
+
+
+@contextlib.contextmanager
+def _socketpair():
+    near, far = socket.socketpair()
+    try:
+        yield near, far
+    finally:
+        near.close()
+        far.close()
+
+
+def _within_seconds(deadline, call, *args):
+    """Run call in a thread and fail by name if it is still running at the deadline.
+
+    A deadline that stops working inside the thing under test does not make a pytest.raises FAIL --
+    it makes the test STOP, because the exception that would end it never fires and the wait it is
+    stuck in has no bound of its own. There is no per-test timeout configured anywhere here, so
+    without this the regression is a run that reaches the CI job limit and names no test at all.
+
+    The thread is a daemon: if it really is stuck, it is stuck in a syscall that no flag will
+    interrupt, and the assertion below has already recorded why.
+    """
+    out = {}
+
+    def run():
+        try:
+            out["value"] = call(*args)
+        except BaseException as exc:  # noqa: BLE001 -- re-raised below, on the calling thread
+            out["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(deadline)
+    assert not thread.is_alive(), (
+        f"{getattr(call, '__name__', call)} did not return within {deadline} s, so its own deadline "
+        "did not fire; that is the regression this bound exists to name rather than hang on"
+    )
+    if "error" in out:
+        raise out["error"]
+    return out["value"]
 
 
 class _Arrivals:
@@ -525,8 +638,71 @@ def test_the_checks_own_refusals_name_the_bound_and_the_answer_they_refused():
         match=f"the connection did not answer its check within {api.deps.POOL_CHECK_TIMEOUT_SECONDS} s",
     ):
         # a selector with nothing registered and a deadline already past: the shape of a peer that
-        # accepted the query and then stopped answering
-        api.deps._wait_for_socket(selectors.DefaultSelector(), time.monotonic() - 1)
+        # accepted the query and then stopped answering.
+        # bounded in wall clock because this assertion is the ONLY thing standing behind the check's
+        # deadline, and the way that deadline breaks is by never firing: computed the wrong way round
+        # it becomes twice the monotonic clock, the wait blocks for about a week, and a bare
+        # pytest.raises here neither passes nor fails -- it stops. Nothing configures a per-test
+        # timeout, so that regression would surface as a CI job hitting its own limit with no test
+        # named.
+        _within_seconds(
+            5.0, api.deps._wait_for_socket, selectors.DefaultSelector(), time.monotonic() - 1
+        )
+
+    # and the same refusal from the other side of the branch, which the case above cannot reach: a
+    # deadline still in the future, a descriptor registered, and a peer that never makes it ready.
+    # That is the wait itself timing out rather than the deadline being past on arrival.
+    with _socketpair() as (near, _far):
+        with selectors.DefaultSelector() as selector:
+            selector.register(near.fileno(), selectors.EVENT_READ)
+            with pytest.raises(psycopg.OperationalError, match="did not answer its check within"):
+                _within_seconds(
+                    5.0, api.deps._wait_for_socket, selector, time.monotonic() + 0.05
+                )
+
+
+def test_the_check_waits_for_the_socket_while_its_query_is_still_going_out():
+    # the send half of the check. Against any real connection `while pgconn.flush():` runs zero
+    # times, because an empty query never fills a loopback socket's send buffer, so the wait inside
+    # it -- and the deadline that wait enforces -- is reached by nothing the suite can build out of a
+    # real peer. A PGconn that reports its buffer as not yet drained is the only way in.
+    with _socketpair() as (near, _far):
+        pgconn = _FakePgconn(near, flushes=[1, 0], results=[_FakeResult(pq.ExecStatus.EMPTY_QUERY)])
+        conn = _FakeConn(pgconn)
+
+        api.deps._check_within_deadline(conn)
+
+        assert pgconn.sent == [b""]
+        # left as found: the check opens no transaction and a connection that answered is handed back
+        assert conn.closed is False
+
+
+def test_a_query_that_never_finishes_going_out_is_refused_at_the_checks_deadline(monkeypatch):
+    # the same branch, now with a buffer that never drains: the deadline has to end the wait, and the
+    # connection has to be closed on the way out so the pool replaces it rather than handing back one
+    # that is still mid-query
+    monkeypatch.setattr(api.deps, "POOL_CHECK_TIMEOUT_SECONDS", 0.05)
+    with _socketpair() as (near, _far):
+        conn = _FakeConn(_FakePgconn(near, flushes=[1]))
+
+        with pytest.raises(psycopg.OperationalError, match="did not answer its check within 0.05 s"):
+            _within_seconds(5.0, api.deps._check_within_deadline, conn)
+
+        assert conn.closed is True
+
+
+def test_the_probes_query_waits_for_the_socket_while_it_is_still_going_out():
+    # /health's own check has the same send half and the same blind spot: SELECT 1 leaves a loopback
+    # socket in one call, so the writer watcher this registers -- and the watcher it has to remove
+    # again before the descriptor can be reused -- runs in no test against a real database
+    with _socketpair() as (near, _far):
+        pgconn = _FakePgconn(
+            near, flushes=[1, 0], results=[_FakeResult(pq.ExecStatus.TUPLES_OK, values=[b"1"])]
+        )
+
+        asyncio.run(api.main._select_one(pgconn))
+
+        assert pgconn.sent == [b"SELECT 1"]
 
 
 def test_shutdown_returns_only_once_the_check_it_cancelled_has_finished(monkeypatch):
