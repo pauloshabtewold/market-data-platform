@@ -367,6 +367,31 @@ def test_the_check_leaves_a_connection_idle_and_refuses_one_inside_a_transaction
                 deps._check_within_deadline(conn)
 
 
+def test_libpq_never_reports_an_empty_message_for_a_result_that_carried_no_error(migrated_dsn):
+    # the premise both refusals rest on, asserted against a real server rather than assumed. psycopg
+    # substitutes a non-empty placeholder when a result has no error to report, so any
+    # `get_error_message() or <fallback>` in the two checks is a fallback that can never fire -- which
+    # is why both of them name the ExecStatus alongside the message instead of behind it. If a later
+    # psycopg returns an empty string or None here, this fails by name and says which premise stopped
+    # holding, rather than leaving a refusal that names nothing.
+    with connect(migrated_dsn) as conn:
+        conn.read_only = True
+        pgconn = conn.pgconn
+        for query in (b"SELECT 1", b"SET timezone='UTC'", b""):
+            pgconn.send_query(query)
+            while pgconn.flush():
+                pass
+            pgconn.consume_input()
+            while pgconn.is_busy():
+                pgconn.consume_input()
+            seen = []
+            while (result := pgconn.get_result()) is not None:
+                seen.append((pq.ExecStatus(result.status).name, result.get_error_message()))
+            assert seen, query
+            for status, message in seen:
+                assert message, (query, status, message)
+
+
 def test_a_pooled_connection_carries_the_configured_keepalives(migrated_dsn):
     app = create_app(migrated_dsn)
     with TestClient(app):

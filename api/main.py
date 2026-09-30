@@ -88,7 +88,11 @@ async def _select_one(pgconn: pq.abc.PGconn) -> None:
         if result.status == pq.ExecStatus.TUPLES_OK and result.ntuples == 1:
             answers.append(result.get_value(0, 0))
         else:
-            answers.append(result.get_error_message() or pq.ExecStatus(result.status).name)
+            # the status beside libpq's own message, the way the pool's check reports one: psycopg
+            # returns a non-empty placeholder for a result that carries no error, so a message alone
+            # names nothing when the answer is well formed and simply not one row -- a COMMAND_OK,
+            # an empty query and a two-row answer all read "no error details available"
+            answers.append((pq.ExecStatus(result.status).name, result.get_error_message()))
     # a connection that is refused its query answers with an error result rather than raising
     if answers != [b"1"]:
         raise psycopg.OperationalError(f"SELECT 1 answered {answers!r}")

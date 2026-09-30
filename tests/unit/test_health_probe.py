@@ -29,10 +29,17 @@ class _IdlePool:
         pass
 
 
+# what libpq answers when a result carries no error. Not None and not empty: psycopg substitutes this
+# placeholder, so any `get_error_message() or <fallback>` in the code under test never reaches its
+# fallback against a real connection. The fake carries it so a test cannot pass on a shape libpq
+# never produces -- the divergence that hid the unreachable fallback in _select_one.
+NO_ERROR_MESSAGE = "no error details available"
+
+
 class _FakeResult:
     """One libpq result: the four members the two checks read off one, and nothing else."""
 
-    def __init__(self, status, values=(), error=None):
+    def __init__(self, status, values=(), error=NO_ERROR_MESSAGE):
         self.status = status
         self._values = values
         self._error = error
@@ -703,6 +710,39 @@ def test_the_probes_query_waits_for_the_socket_while_it_is_still_going_out():
         asyncio.run(api.main._select_one(pgconn))
 
         assert pgconn.sent == [b"SELECT 1"]
+
+
+def test_an_answer_that_is_not_one_row_is_refused_by_the_status_it_arrived_with():
+    # the else arm of the probe's result loop. libpq never returns a falsy message for a result
+    # carrying no error, so a refusal reading `get_error_message() or <the status name>` can never
+    # reach its second operand and calls a COMMAND_OK or an empty-query answer
+    # "no error details available" -- which names nothing an operator can act on. The status is the
+    # half that says what actually arrived, so the refusal carries it whatever the message says.
+    for status, message in (
+        (pq.ExecStatus.COMMAND_OK, NO_ERROR_MESSAGE),
+        (pq.ExecStatus.EMPTY_QUERY, NO_ERROR_MESSAGE),
+        # and the error case, where the message is the informative half and must survive beside it
+        (pq.ExecStatus.FATAL_ERROR, "permission denied for table x"),
+    ):
+        with _socketpair() as (near, _far):
+            pgconn = _FakePgconn(
+                near, flushes=[0], results=[_FakeResult(status, error=message)]
+            )
+            with pytest.raises(psycopg.OperationalError) as excinfo:
+                _within_seconds(5.0, lambda: asyncio.run(api.main._select_one(pgconn)))
+        assert status.name in str(excinfo.value), (status, excinfo.value)
+        assert message in str(excinfo.value), (status, excinfo.value)
+
+    # a two-row answer takes the same arm: it is TUPLES_OK, so only the row count refuses it, and a
+    # message-only refusal would have called it "no error details available" as well
+    with _socketpair() as (near, _far):
+        pgconn = _FakePgconn(
+            near,
+            flushes=[0],
+            results=[_FakeResult(pq.ExecStatus.TUPLES_OK, values=[b"1", b"1"])],
+        )
+        with pytest.raises(psycopg.OperationalError, match="TUPLES_OK"):
+            _within_seconds(5.0, lambda: asyncio.run(api.main._select_one(pgconn)))
 
 
 def test_only_a_check_that_actually_failed_is_reported(caplog):
