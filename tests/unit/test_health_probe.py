@@ -705,6 +705,59 @@ def test_the_probes_query_waits_for_the_socket_while_it_is_still_going_out():
         assert pgconn.sent == [b"SELECT 1"]
 
 
+def test_only_a_check_that_actually_failed_is_reported(caplog):
+    # the guard in front of the reporting line, over all three outcomes a check can reach. Every
+    # existing assertion about this logger drives a FAILED check -- which is the one outcome where
+    # both readings of the guard agree -- so replacing its `or` with `and` left the whole suite green
+    # while turning a healthy probe into a false alarm and a cancelled one into an exception raised
+    # out of a done-callback. task.exception() RAISES on a cancelled task rather than returning None,
+    # which is why the order of the two terms is load-bearing rather than stylistic.
+    caplog.set_level(logging.DEBUG, logger="api.main")
+
+    async def scenario():
+        async def succeeds():
+            return None
+
+        async def fails():
+            raise psycopg.OperationalError("the probe database is unreachable")
+
+        async def hangs():
+            await asyncio.sleep(30)
+
+        loop = asyncio.get_running_loop()
+        log_failure = api.main._failed_check_logger(DEAD_DSN)
+        logged, raised = {}, {}
+        for name, body in (("success", succeeds), ("failure", fails), ("cancelled", hangs)):
+            caplog.clear()
+            task = loop.create_task(body())
+            if name == "cancelled":
+                await asyncio.sleep(0)
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            # called here rather than through add_done_callback, and each call caught, so that what
+            # it LOGS and whether it RAISES are two findings rather than one: an exception on the
+            # third outcome would otherwise end the loop before the first outcome is asserted at all
+            try:
+                log_failure(task)
+            except BaseException as exc:  # noqa: BLE001 -- the point is that nothing escapes
+                raised[name] = type(exc).__name__
+            logged[name] = [record.getMessage() for record in caplog.records if record.name == "api.main"]
+        return logged, raised
+
+    logged, raised = asyncio.run(scenario())
+
+    # a check that answered says nothing: the version and the 200 are the whole report
+    assert logged["success"] == []
+    # and a cancelled one says nothing either
+    assert logged["cancelled"] == []
+    assert logged["failure"] == [
+        "database check failed: OperationalError: the probe database is unreachable"
+    ]
+    # nothing escapes the callback on any of the three. asyncio would only print such an exception
+    # through the loop's handler, which no assertion reads, so a broken guard here is silent
+    assert raised == {}
+
+
 def test_shutdown_returns_only_once_the_check_it_cancelled_has_finished(monkeypatch):
     # the check holds a socket, and a task still unwinding when the loop is torn down leaves it open
     async def _hangs(connection_string, **kwargs):
