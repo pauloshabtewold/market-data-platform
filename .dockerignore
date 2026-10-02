@@ -1,0 +1,11 @@
+# An allow-list: every path not named here is excluded by construction, so working
+# documents and secrets stay out of the build context without being named.
+*
+!api/
+!db/
+!ingest/
+!config.py
+!pyproject.toml
+!requirements.lock
+!README.md
+!LICENSE
