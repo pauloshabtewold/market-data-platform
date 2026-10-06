@@ -84,6 +84,38 @@ SVC_SG=                   # filled in under Resources
 RDS_SG=                   #   "
 ```
 
+## The image
+
+```
+ECR image: $ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/market-data:0.1.0
+ECR digest: sha256:a459650b037efc1cd90419f266348f199e9e9afdb939543265dc4df88294ac0e
+ECR repository created: 2026-10-06T01:41:32Z
+```
+
+The registry address carries the account id, so it is written above as the same `$ACCOUNT`
+placeholder the Names block uses; export it and the address resolves. The digest is the identity
+that matters, and the repository's tag policy is `IMMUTABLE`, so the tag `0.1.0` can never be moved
+to different content — which is what lets a later step check that the deployed task runs this exact
+image by digest rather than trusting a tag.
+
+The image is `linux/arm64`, built on an Apple Silicon machine. Fargate's task-definition default is
+`X86_64`, so the task definition must set `runtimePlatform.cpuArchitecture` to `ARM64` or the task
+fails to pull with a manifest-platform error — and that failure would land after the database is
+already running and charging. Fargate supports ARM64 and it is the cheaper of the two.
+
+The image was built once, before the registry existed, and pushed unchanged. It is not rebuilt: a
+rebuild resolves the base image and the dependency stack afresh, and pinning both is the whole
+reason this file records a digest. The immutable tag makes that one-way in any case.
+
+The repository is the first resource in this deployment that costs anything, which is why its
+creation time is recorded at all. Compared against the `Alarm created:` line near the top of this
+file, it lands 25 minutes and 20 seconds later: the bound existed before the first thing that
+bills, which is a different and stronger statement than the bound existing.
+
+Read both in UTC before comparing them. `aws ecr describe-repositories` returns `createdAt` in the
+caller's local offset while `aws cloudwatch describe-alarms` returns UTC, so comparing the two
+strings as printed reports the order backwards.
+
 ## Teardown
 
 Run this on the teardown date, in this order, and only after the demo capture has been played back
