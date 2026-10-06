@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 15
     strategy:
       matrix:
-        python-version: ["3.11", "3.13"]
+        python-version: ["3.11", "3.13", "3.14"]
     env:
       ALPACA_KEY_ID: placeholder-key-id
       ALPACA_SECRET_KEY: placeholder-secret-key
