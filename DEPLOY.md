@@ -129,9 +129,11 @@ Log group: /ecs/market-data-api
 SSM parameter: /market-data/DATABASE_URL
 Service SG: sg-0836f2ca88ccf54ee
 RDS SG: sg-0e7293540c59bf35c
-Public address: http://3.231.22.177:8000
+Public address: http://100.58.98.13:8000
 RDS /32 opened: 2026-10-06T03:29:42Z
 RDS /32 closed: 2026-10-06T03:30:47Z
+RDS /32 opened: 2026-10-06T06:11:04Z
+RDS /32 closed: 2026-10-06T06:18:28Z
 ```
 
 The SSM parameter above is a **name**, not a value. The connection string it holds is a
@@ -216,6 +218,156 @@ gateway, which is the thing that actually has to be true.
 
 The image is pinned **by digest**, not by tag, so the running task is tied to one build rather
 than to a name that could be moved.
+
+## The hot window
+
+```
+Copy finished: 2026-10-06T06:15:12Z
+```
+
+The four months copied, which are **read** from the hot-window cutoff and never chosen:
+
+```
+- bars_2026_03
+- bars_2026_04
+- bars_2026_05
+- bars_2026_06
+```
+
+The cutoff is `2026-03-01`. The naive reading — the end of the ingest window minus four months,
+with no truncation to a month start — gives `2026-02-28` and pulls `bars_2026_02` in instead, so
+the month list comes from the same function the application uses rather than from arithmetic done
+by hand.
+
+Row counts, as four addends rather than one total, each equal to the development database's:
+
+| partition | rows | bounds |
+| --- | --- | --- |
+| `bars_2026_03` | 715,229 | `['2026-03-01', '2026-04-01')` |
+| `bars_2026_04` | 666,146 | `['2026-04-01', '2026-05-01')` |
+| `bars_2026_05` | 651,616 | `['2026-05-01', '2026-06-01')` |
+| `bars_2026_06` | 699,245 | `['2026-06-01', '2026-07-01')` |
+
+Rows outside `['2026-03-01', '2026-07-01')`: **0**. Span `2026-03-02 13:01:00+00` to
+`2026-06-30 20:54:00+00`. `symbols` 100 and `market_days` 1,484, both copied **in full and
+first** — see below. Grouping the parent's rows by their source table returns four rows matching
+the four counts above, which is what distinguishes a copy that was attached from one that was
+not.
+
+### The arithmetic, and why the window is a choice rather than a limit
+
+The copy is **584,507,392 bytes**, which is 557 MB:
+
+| | bytes |
+| --- | --- |
+| `bars_2026_03` | 152,854,528 |
+| `bars_2026_04` | 142,417,920 |
+| `bars_2026_05` | 139,345,920 |
+| `bars_2026_06` | 149,512,192 |
+| `market_days` | 303,104 |
+| `symbols` | 73,728 |
+| sum | **584,507,392** |
+
+Against a 10 GB ceiling — half the 20 GB the instance is provisioned with — that is **18.4× under,
+5.44% of the ceiling**. The depth floor runs the other way: the deep-pagination claim needs
+1,000,000 + 1,000 + 1 = **1,001,001** rows inside the window a request can actually ask for, and
+the window the deep page requests holds **2,009,487** session rows, clearing it by **2.007×**. The
+widest window the cap permits inside these months holds 2,028,716, clearing by 2.027×. The two
+bounds do not cross and neither is close, so the deep-page depth is not reduced.
+
+**The whole development database is 6.52 GiB and would itself fit under that ceiling.** So the hot
+window is a design choice, not a storage constraint: batch ingestion runs where disk is cheap and
+the deployed service serves a recent window. A reader who divides 557 MB by 20 GB will ask, which
+is why the margin is written down rather than left to look like a padded guess.
+
+### Three ways this copy fails silently, all three checked
+
+**The partial index is not copied.** Creating a partition with `LIKE bars INCLUDING ALL` copies
+the indexes of the table named in the `LIKE` — the parent — and the hot-window partial index
+deliberately lives on the children. Measured here: each new partition arrived with **two**
+indexes, the primary key and the `(ts, symbol)` index, and **zero** hot-window indexes. So the
+copy arrives with exactly the index the hot window exists to have, missing. The four were created
+by hand afterwards and their definitions compared character for character against the development
+database's live catalog, which is a stronger comparison than against the published template. The
+listing is taken **twice**, before and after: one listing taken only afterwards cannot tell an
+index that was copied from one that was created.
+
+**The two small tables must go first, in full.** Both are populated by the ingestion pipeline, and
+the pipeline never runs against this database, so replaying the migrations leaves them empty — and
+nothing warns you. The service starts, the health check passes, every request for a named symbol
+is a correct 404 by the existence rule, and every session-bounded query joins an empty calendar
+and correctly returns no rows. The whole end-to-end suite then fails on a build that is working.
+The check that makes "first" mean something is reading all three counts at the one moment both
+small tables are full and `bars` is still empty: **0, 100, 1484**.
+
+**Analysing is not the same as vacuuming.** Analysing fixes the statistics the planner costs with.
+It does not set the visibility map, and the published hot-window result is an index-only scan with
+no heap fetches at all — on an unset map such a scan silently falls back to fetching from the heap
+and reads an order of magnitude more blocks, which a reader then attributes to a missing index or
+to the window size. So the copy is followed by a vacuum **and** an analyse, not an analyse alone.
+
+That third one has a trap of its own worth stating, because it tempts a reader into skipping the
+step. Read 27 seconds after the copy finished, the four partitions were already at **99.42% to
+99.94%** all-visible — autovacuum had reached all four within half a minute. None was complete, so
+the explicit vacuum did real work: it took all four to **100.0000%** and truncated the empty
+trailing pages, bringing the page counts to exactly the development database's. **The map does not
+stay empty; it fills part-way, on its own, fast enough to look finished.** Read it immediately or
+the reading argues for skipping the step that produced it.
+
+### Do not move a partition with a table-level dump
+
+```
+Do not pg_dump -t a child partition. The restored table is not attached to bars, so every
+query through the parent returns nothing, correctly, forever.
+```
+
+Selecting a child by name is unsupported for standalone restore: the dump makes no attempt to
+include objects the selected table depends upon, and the parent, its partition key and the
+statement that binds the child to it are all such dependencies. The failure is the quiet one — a
+table that restores without error, carries the right name and the right rows, and is simply not
+part of the hierarchy. The emitted definitions vary between dump versions, so a bad dump cannot
+reliably be recognised by reading it. Creating the partitions and copying rows through the parent,
+as above, sidesteps the question entirely. `--table-and-children` and `--load-via-partition-root`
+are the right flags if this hierarchy is ever dumped; neither is needed here.
+
+### What was deliberately not copied, and what was
+
+`ingest_progress` is **not** copied. It is read by the coverage query, the ingestion pipeline and
+the tests, and by no request handler — so an empty one here is correct, and saying so stops a
+future reader treating it as a failed copy.
+
+`first_bar_ts` **is** copied as it stands, which means it names an instant earlier than any row
+this database holds, because it was derived from the whole history rather than from the copied
+window. Recomputing it would make the same endpoint answer differently here than it does locally,
+for no benefit to any check. Copied in full, and recorded.
+
+### Reading a plan difference, in this order
+
+A plan that differs from the published figures is attributed in a fixed order, because the
+explanations are not interchangeable and the cheapest one is also the most common:
+
+1. **Is the partial index there?** Four of them, one per partition, verified against the
+   development catalog.
+2. **Is the visibility map complete?** 100.0000% on all four, and the page counts match.
+3. **Do the engine version and the planner settings agree?** Engine 16.15 both sides; the three
+   pinned settings read back from the server; the parameter group in sync.
+4. **Only then, the window size.** Four months here against seventy-one.
+
+Getting this order wrong is how "it has four months instead of seventy-one" comes to explain a
+difference that is really a missing index. With the first three confirmed,
+**plans on RDS will differ on the smaller window** and that difference is the one measured.
+
+Measured here on the statement the page-cost comparison uses, at the pinned parameters: an
+**index-only scan on each planned partition's hot-window index, with no heap fetches**, no sort
+node above the scans, and three of the four partitions planned — the fourth is excluded by the
+window's own start, before execution begins. Eight blocks per page, identical across five runs,
+and the structured plan's root cross-checked against the text plan's.
+
+Two conditions of that comparison are recorded beside every figure taken from it. The pinned
+settings are `work_mem` 4096 kB, `effective_cache_size` 524288 pages and
+`max_parallel_workers_per_gather` 2. The unpinnable difference is `shared_buffers`, 23081 pages
+here against 16384 locally, which moves the proportion of a read that comes from cache and not the
+number of blocks read.
 
 ## Teardown
 
