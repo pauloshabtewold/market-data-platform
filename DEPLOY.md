@@ -116,6 +116,107 @@ Read both in UTC before comparing them. `aws ecr describe-repositories` returns 
 caller's local offset while `aws cloudwatch describe-alarms` returns UTC, so comparing the two
 strings as printed reports the order backwards.
 
+## Resources
+
+```
+Cluster: market-data
+Task definition: market-data-api:1
+Service: market-data-api
+RDS instance: market-data-db
+RDS endpoint: market-data-db.cudeym8881ns.us-east-1.rds.amazonaws.com:5432
+Parameter group: market-data-pg16
+Log group: /ecs/market-data-api
+SSM parameter: /market-data/DATABASE_URL
+Service SG: sg-0836f2ca88ccf54ee
+RDS SG: sg-0e7293540c59bf35c
+Public address: http://3.231.22.177:8000
+RDS /32 opened: 2026-10-06T03:29:42Z
+RDS /32 closed: 2026-10-06T03:30:47Z
+```
+
+The SSM parameter above is a **name**, not a value. The connection string it holds is a
+`SecureString` and is written nowhere in this file. Read it with
+`aws ssm get-parameter --name "$SSM_DSN" --with-decryption` when a step needs it, and do not
+paste the result anywhere.
+
+### The engine, and the three planner inputs that are pinned
+
+`--engine-version` is **16.15**, discovered rather than demanded: it is the latest 16.x this
+account is offered and it equals the development database's own `server_version`, so the
+comparison behind every one of this project's published block counts is like-for-like down to the
+minor. Pinning it mattered because the account's default is **18.3** — two majors on, a different
+planner, and a confound that sits above window size in the attribution order with no way to
+subtract it.
+
+Be careful reading the version list: the available 16.x versions sort **lexically** to 16.9 and
+**numerically** to 16.15, so a `sort | tail -1` picks the wrong minor.
+
+The parameter group `market-data-pg16` (family `postgres16`) pins three values to the development
+database's, each one read back from the server rather than from the API:
+
+| setting | pinned | read from `pg_settings` |
+| --- | --- | --- |
+| `work_mem` | 4096 kB | 4096 |
+| `effective_cache_size` | 524288 × 8 kB = 4 GB | 524288 |
+| `max_parallel_workers_per_gather` | 2 | 2 |
+
+All three are `dynamic`, so `ApplyMethod=immediate` needed no reboot and
+`ParameterApplyStatus` reads `in-sync`. **`pending-reboot` would mean the values are set and
+not active, and any figure taken in that state is measured on the defaults instead.**
+
+**Two differences cannot be pinned, and both are recorded rather than worked around.**
+`shared_buffers` has `postmaster` context, so it is fixed at instance start: it reads **23081
+pages (≈180 MB)** here against **16384 pages (128 MB)** on the development database. That one is
+benign for block counts — `shared_buffers` moves the hit/read split and not the sum — which is
+why the pinned three are the ones that enter the cost model. The second is total instance RAM:
+`db.t4g.micro` is 1 GiB against the development host's 8 GiB. `TimeZone` is `UTC` on both.
+
+### Why the database is publicly accessible
+
+`PubliclyAccessible` is **true**, deliberately. Two steps run `psql` from a laptop, and with it
+off the instance has no public DNS or IP to resolve at all — so a temporary firewall rule does not
+help and the remedy becomes a bastion host or a VPN, which are more billable resources on a finite
+balance. It also cannot be flipped later without a modify-and-reboot.
+
+**The safety property is the security group, not privacy.** The database's group allows 5432 from
+the service's group and from nothing else; it holds exactly one rule. A laptop `/32` is added for
+one narrow window, used, and removed, and both timestamps are recorded above. A publicly
+addressable database with an open-to-the-world 5432 rule is the actual mistake, and it is a
+different mistake from this one.
+
+The service's group allows 8000 from `0.0.0.0/0` and carries **no rule for any single
+address** — nothing ever connects to the task directly.
+
+### One address is allocated that no step asked for
+
+A publicly accessible database is given a **service-managed elastic address** — here
+`54.208.233.222`, which is what the endpoint name resolves to, on an interface owned by the
+database service rather than by this account's user. So a check that expects **zero** elastic
+addresses cannot pass while the database is reachable from a laptop, and the two decisions are in
+tension by construction. The check that means what was intended is *zero addresses this project
+allocated*: filter to the ones with no managing service, which reads **0**, and record the
+managed one at **1**.
+
+It matters at teardown. The managed address is released when the instance is deleted, so
+**after** the database goes, the total must fall back to zero — and an address left allocated and
+unattached bills by the hour indefinitely. Item 3's checklist carries that check.
+
+### What is deliberately absent
+
+No load balancer, no NAT gateway, and no task-level health check. The first two are ruled out on
+cost. The health check is omitted because without a load balancer the public address belongs to
+the task's own network interface and **changes every time the task is replaced** — so a
+health-check-driven replacement would quietly invalidate any address written down. The task's
+address is auto-assigned and is not an elastic address, which is why it survives nothing.
+
+`assignPublicIp` is `ENABLED`. That single setting is what lets a task in a public subnet pull
+its image with no NAT gateway; without it the task dies before the application runs. The subnets
+are public by route, not merely by flag — the route table carries a default route to an internet
+gateway, which is the thing that actually has to be true.
+
+The image is pinned **by digest**, not by tag, so the running task is tied to one build rather
+than to a name that could be moved.
+
 ## Teardown
 
 Run this on the teardown date, in this order, and only after the demo capture has been played back
@@ -157,6 +258,9 @@ aws rds describe-db-instances --db-instance-identifier "$RDS_ID"
 #   -> exits 254 with DBInstanceNotFound. That exit code is the pass.
 aws rds describe-db-snapshots --query 'length(DBSnapshots)'                 # -> 0
 aws rds describe-db-parameter-groups --query 'length(DBParameterGroups)'    # -> 2 or more, the control
+# the service-managed address goes with the instance. If it does not, it bills by the hour
+# indefinitely, and nothing else on this list would notice.
+aws ec2 describe-addresses --query 'length(Addresses)'                      # -> 0
 ```
 
 - [ ] 4. ECR images, then the repository
