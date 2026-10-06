@@ -203,8 +203,12 @@ Result: **19,232,857 bars**, **2 rejected**, **no failed units**, in **1,152.9 s
   session rather than because anything changed in the pipeline
 - **100 symbols**, all with `first_bar_ts` set; `bars` reconciles against
   `sum(ingest_progress.row_count)` at 41,668,537 on both sides
-- On-disk size is **5,291 MB** (5,547,909,120 bytes), summed with `pg_total_relation_size` over the
-  child partitions; against the parent it still reads `0 bytes`
+- On-disk size, measured **2026-08-27**, is **5,291 MB** (5,547,909,120 bytes), summed with
+  `pg_total_relation_size` over the child partitions; against the parent it still reads `0 bytes`.
+  The date belongs to the figure and not just to the entry: that function counts indexes, and
+  indexes were added to `bars` after this load, so the same sum over the same rows reads larger at
+  any later date. `docs/METHODOLOGY.md` carries the standing total and reconciles it against this
+  reading index by index
 - **Wall clock for the whole universe is 2,544.6 s, 42.4 minutes**, across the two runs
 
 ### Coverage by period, all 100 symbols
@@ -222,6 +226,11 @@ Same method as the fifty-symbol table above — bars inside `[open_ts, close_ts)
 The 2022 and 2025 ranges are unchanged from the fifty-symbol table because both extremes belong to
 symbols in the first fifty; only the pooled figures moved. The gate query reports
 `missing_units 0`, `coverage_pct 72.16`, `uningested_symbols 0`.
+
+Every range in this table is a per-symbol floor **inside one month**, so none of them is the
+lowest figure this load produced. The lowest single symbol-month over the whole window, the symbol
+and month it belongs to, and its arithmetic are in `docs/METHODOLOGY.md`, which is where the
+coverage method is published; it is lower than the 7.59% above.
 
 ### Two deviations from the plan, recorded rather than smoothed over
 
@@ -244,3 +253,35 @@ unquoted `$(... | sed 's/^/--symbol /')`. That works in bash and does **not** wo
 does not word-split unquoted command substitutions unless `SH_WORD_SPLIT` is set — the whole list
 arrives as a single argument and argparse rejects it. Piping through `xargs` is shell-agnostic and
 is what this run used; the argument vector was checked to be 102 arguments before launching.
+
+## 2026-10-06 — hot-window copy into the deployed database, not a feed load
+
+**This entry is a copy rather than an ingest, and it spent no vendor request.** The four most
+recent monthly partitions were copied out of the database the two runs above built, into the
+deployed instance the service runs against, so that service answers from real data without
+re-fetching any of it. Nothing was requested from the vendor and no vendor quota was consumed;
+there is no feed, no adjustment list and no per-unit window to record, because no unit was
+requested.
+
+- **Source:** the loaded universe in this repository's development database
+- **Copied first, in full, before any bar:** `symbols` (**100** rows) and `market_days`
+  (**1,484** rows)
+- **Partitions:** `bars_2026_03`, `bars_2026_04`, `bars_2026_05`, `bars_2026_06` — the hot window,
+  read from the application's own cutoff of `2026-03-01` rather than chosen
+- **Rows:** **2,732,236** bars, as four addends — 715,229 + 666,146 + 651,616 + 699,245 — each
+  equal to its source partition's own count, and **6.56%** of the 41,668,537 the two loads above
+  produced
+- **Requests:** none, of any kind
+- **Finished:** 2026-10-06T06:15:12Z. Elapsed time was not recorded, so no rate is published for
+  this entry
+
+The order of the two small tables is load-bearing rather than tidy. With either of them empty the
+service still starts and still answers: every symbol lookup is a correct 404, and every
+session-bounded query joins an empty calendar and correctly returns no rows. A wrong order
+therefore fails as a complete, plausible, empty dataset rather than as an error, which is why they
+go first and in full and why the bar count is checked at the moment they land.
+
+The coverage figures earlier in this file are properties of the whole 71-month load and are not
+re-derivable from this copy, whose window is four months wide. `DEPLOY.md` carries the deployed
+side of it — the partition bounds, the byte sizing, the indexes the copy does **not** inherit, and
+why four months is a deliberate scope rather than a storage limit.

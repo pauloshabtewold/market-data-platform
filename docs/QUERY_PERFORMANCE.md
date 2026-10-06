@@ -12,8 +12,17 @@ The full `EXPLAIN (ANALYZE, BUFFERS)` output behind the before/after and candida
 and the plans are the evidence. The coverage-variant table comes from a separate harness run
 whose output is kept beside it. The hot-index and BRIN tables are one exception: their harness
 wrote to a path that no longer exists, so those two tables are the record of that measurement
-rather than a summary of one. The Class A/B wall-clock re-run sweeps are a second: that harness
-overwrites a single output file on every run, so only the most recent survives as an artifact —
+rather than a summary of one. **Those two tables also differ in what re-running them would cost.**
+BRIN's rows can be retaken, because that index was built for the measurement and dropped after it.
+The hot-index table's 1,012-block "before" row cannot: it is the reading taken against the plain
+inherited index, and the four partial indexes it is compared with are still on this database — no
+`DROP INDEX` has been run — so retaking that row means dropping four live indexes first, and
+re-running the harness with them in place measures the 16-block "with" row twice instead. That
+table is the hot-window index's one like-for-like measurement, and the index exists in no migration,
+so a restore has to recreate it by hand — which is the reason to record here that the comparison
+behind the 63.25× cannot be retaken as the database stands.
+The Class A/B wall-clock re-run sweeps are a second exception: that harness overwrites a single
+output file on every run, so only the most recent survives as an artifact —
 the second sweep, 55.2, 25.6 and 29.6 ms with a 7.87× ratio for query 2. The main table's 49.0,
 26.8 and 26.7 ms with 7.00×, and the first re-run's 53.0, 28.2 and 30.0 ms with 7.19×, survive
 only as prose in this document. None of the gated block counts depend on the missing files —
@@ -40,10 +49,11 @@ nothing.
 
 Class C's target is not a speedup because there is no speedup to be had, and demanding one
 would push a builder into adding an index that is never chosen and reporting the difference as
-a result. Each Class C query instead carries four artifacts: the parallel plan the planner
-should pick and did, a candidate index built and measured and shown not to help, the row math,
-and — for 7, 9 and 10 — a byte ratio used as a **falsifiable prediction** rather than as a
-recorded number.
+a result. Each Class C query instead carries up to four artifacts: the parallel plan the planner
+should pick and did, a candidate index — for 4, 5, 7 and 8 — built and measured and shown not to
+help, the row math, and — for 7, 9 and 10 — a byte ratio used as a **falsifiable prediction**
+rather than as a recorded number. The plan and the row math are there for all six; the candidate
+index covers four of them and the byte ratio three, and they overlap only at query 7.
 
 ## Measurement conditions
 
@@ -63,11 +73,25 @@ an omission. Three things make it the right one:
   that does not spill; it is not a direct measurement of a spilling query's gated total holding
   steady.
 - `shared_buffers` moves the split between `hit` and `read` and never their sum, which is the
-  property that makes these figures portable to RDS.
-- Raising `work_mem` made a Class C shape measurably *slower* on this host — 29.8 s at 4 MB
-  against 46.9 s at 256 MB, one run each, with 64 MB between them at 43.7 s — because the leader
-  and its two workers — three processes, each claiming 256 MB — against a 128 MB
-  `shared_buffers` displaces the page cache the query depends on.
+  property that makes these figures portable to RDS. **The setting itself was not varied here,
+  because it cannot be without restarting the server** — it has `postmaster` context, and no run
+  behind any figure in this document restarted one. The deployed RDS instance supplies the second
+  value instead: it reports `shared_buffers` at **23,081 pages** against this database's **16,384**,
+  which is the 128 MB above. Across six endpoint-form cells measured on both, execution blocks
+  differ by **at most 2** while planning collapses **16.3×** on the statements that plan every
+  partition. That is an endpoint-form comparison and not a `shared_buffers` experiment — the two
+  instances differ in more than this one setting — but the quantity it agrees on to two blocks is
+  the sum this document gates, and the quantity that moves is planning, which this document
+  attributes to the partition count rather than to buffers.
+- Raising `work_mem` bought a Class C shape no speed on this host, and the mechanism is the reason
+  to expect that: the leader and its two workers are three processes, each free to claim the full
+  `work_mem` per sort, against a 128 MB `shared_buffers` — private memory at 256 MB apiece
+  displaces the page cache the query depends on. The readings point the same way — 29.8 s at 4 MB,
+  43.7 s at 64 MB and 46.9 s at 256 MB, one run each — but 46.9 against 29.8 is **1.57×**, inside
+  the greater-than-2× run-to-run spread this working set shows and below the 2.4× measured on one
+  query further down, so they illustrate the mechanism rather than measure it. Neither the query
+  nor its bound parameters was recorded beside them, which is a second reason not to read the three
+  as a series.
 
 **Three Class C queries spill, and that is not a defect.** At 4 MB, measured on the queries as
 they ship, each spill is three concurrent per-worker external merges rather than one, and the
@@ -108,18 +132,25 @@ fetches — but a session that expects 0% and measures 89.7% has not run the wro
 
 **Which figures here are repeated, and which are one observation.** Every block count, node type,
 worker count, spill size and byte ratio in the Class A, B and C tables below is a **property of the
-plan** and was identical every time it was measured — including on a full re-capture taken from
-scratch after the first set was lost. Those are the numbers the gate rests on. The two
-endpoint-forms subsections under Class A are the exception: there a statement's first run on a
-connection can read more blocks than its later runs. Neither publishes every first run the same way
-as its medians, and neither is purely inside or outside one. The `/bars`-and-`/daily` subsection
-shows some first runs inside the five-run series it publishes — W-COLD's cap page reads `404, 401,
-401, 401, 401` and W-WIDE's planning at `fetch = 101` reads `1242, 852, 852, 852, 852` (that is the
-smallest of the three measured page sizes, not the default, which is `fetch = 1,001` and is flat at
-852), both medians published as the steady value — and its worst first runs, on a connection that
-has planned nothing at all, are reported separately rather than inside a five-run series: a
-brand-new connection's 6,348 planning blocks, `/daily`'s 5,729, `REQUIRE_SYMBOL_SQL`'s 70. All three
-are repeated readings, identical on every one: 6,348 and 70 over five fresh connections each, with
+plan** and was identical every time it was measured on one side of migration 005 — including on a
+full re-capture taken from scratch after the first set was lost. **Migration 005 is where one of
+these counts moves, and it moves by 40 blocks.** Item 1's figures were taken before it added
+`bars_ts_symbol_idx` and every table after Item 1 was captured afterwards, so query 5 reads 25,009
+there against 25,049 in Item 2 — up 40 — and query 7 reads 514,262 there against the 514,222 Items 2
+and 4 read — down 40 — with each side stable over repeated runs and queries 9 and 10 identical on
+both. Query 7's forced block ratio carries the same boundary at 0.01%, 1.9021 against 1.9019. That
+is a real boundary rather than noise, and Item 1's own caveat and query 7's re-derivation each state
+it where they appear. Those are the numbers the gate rests on. **The two endpoint-forms subsections
+under Class A are the other exception**: there a statement's first run on a connection can read more
+blocks than its later runs. Neither publishes every first run the same way as its medians, and
+neither is purely inside or outside one. The `/bars`-and-`/daily` subsection shows some first runs
+inside the five-run series it publishes — W-COLD's cap page reads `404, 401, 401, 401, 401` and
+W-WIDE's planning at `fetch = 101` reads `1242, 852, 852, 852, 852` (that is the smallest of the
+three measured page sizes, not the default, which is `fetch = 1,001` and is flat at 852), both
+medians published as the steady value — and its worst first runs, on a connection that has planned
+nothing at all, are reported separately rather than inside a five-run series: a brand-new
+connection's 6,348 planning blocks, `/daily`'s 5,729, `REQUIRE_SYMBOL_SQL`'s 70. All three are
+repeated readings, identical on every one: 6,348 and 70 over five fresh connections each, with
 6,348's milliseconds also carrying a published five-run median, and `/daily`'s 5,729 over three
 fresh connections, first statement on each. The analytics subsection's first runs are reported
 beside the median each excludes, in milliseconds and planning blocks; the execution blocks a first
@@ -127,9 +158,8 @@ run also reads are reported apart from any series for two of them, `/analytics/v
 `/analytics/gaps`' 428, in the prose beside that subsection's Class A table; `/daily`'s 420 is
 reported both ways in the `/bars`-and-`/daily` subsection before it: apart from any series where the
 planning figures are given, and inside its own five-run series where the wrapper is compared with
-the file. W-COLD's cap
-page above does publish its own first-run execution blocks, inside its five-run series, as the
-leading 404.
+the file. W-COLD's cap page above does publish its own first-run execution blocks, inside its
+five-run series, as the leading 404.
 
 **Wall-clock is not one of them.** This working set is one database at two sizes: summed over `bars`
 and its children, `pg_total_relation_size` read 5,547,909,120 bytes (5,291 MB) on 2026-08-27, when
@@ -154,15 +184,20 @@ inflation factor is plan-shape dependent, so it is not a constant that can be di
 Every count in the **Class A and Class B** tables below was **cross-checked two ways before it was
 recorded**: the root object of `EXPLAIN (…, FORMAT JSON)` and the first `Buffers: shared hit=…
 read=…` line of the same plan in text form. These are different output paths in Postgres, and the
-harness raises rather than warns if they disagree. **Three sets of figures here do not carry that
-check in full, and each is named where it appears.** The first is **Class C**, whose tables come
-from a harness that emits no JSON plan at all — there is no second output path for them to be
-checked against, so their agreement is unverified rather than verified. The second is the **`/bars`
-and `/daily` endpoint-forms subsection** under Class A, whose original run had no check and whose
+harness raises rather than warns if they disagree. **Five sets of figures here do not carry that
+check in full.** The first is **Class C**, whose tables come from a harness that emits no JSON plan
+at all — there is no second output path for them to be checked against, so their agreement is
+unverified rather than verified. The second is the **`/bars` and `/daily` endpoint-forms
+subsection** under Class A, whose original run had no check and whose
 correcting pass added one. (That added check compared execution blocks only when this sentence was
 first written; it compares execution **and planning** blocks now, and raises on either.) The third
 is the **analytics endpoint-forms subsection** after it, which checks execution blocks on the cells
-it names and no planning count at all.
+it names and no planning count at all. The second and third are each named again in the subsection
+they describe, and the `/bars` one names Class C's alongside its own. The fourth and fifth are the
+**hot-window partial index** and **BRIN** tables under "The other two index decisions": their
+harness wrote to a path that no longer exists, so each of those two tables is the record of its own
+measurement rather than a summary of one, and there is no second output path left to check it
+against. Those two are named here and not at their own tables.
 
 One limitation the check used to carry, stated because it bounds what "cross-checked" buys for
 the figures already recorded. It matched the first `Buffers: shared hit=…` line of the text plan,
@@ -175,31 +210,36 @@ no figure moves;
 the `hit=`-requiring form survives in the three harnesses that perform **no** cross-check at all,
 which is where the residual risk actually sits.
 
-**Every measurement here is also a fresh connection — with three exceptions.** Each
-harness spawns a new `docker compose exec` per query, which pays catalog and sort-operator
-lookups a warm backend already has cached — so the published counts are cold and self-consistent with each other. Running the ten
-committed query files five times inside one continuous `psql` session instead gives root-block
-counts a few blocks lower — `06_daily_rollup.sql` settles at 414 against the published 420, six
-blocks and 1.43%; `03_gaps.sql` at 418 against 431, thirteen blocks and 3.02%. Neither moves a
-target or a ratio in this document, and a verifier who re-runs them in one session and finds
+**Every measurement here is also a fresh connection — with three exceptions.** Each harness spawns a
+new `docker compose exec` per query, which pays catalog and sort-operator lookups a warm backend
+already has cached — so the published counts are cold and self-consistent with each other. Running
+the ten committed query files five times inside one continuous `psql` session instead gives
+root-block counts a few blocks lower — `06_daily_rollup.sql` settles at 414 against the published
+420, six blocks and 1.43%; `03_gaps.sql` at 418 against 431, thirteen blocks and 3.02%. Neither
+moves a target or a ratio in this document, and a verifier who re-runs them in one session and finds
 these numbers has not found a defect. **The `/bars`-and-`/daily` subsection is measured inside one
 continuous session per harness and is therefore already on the lower side of this pair.** The
 analytics subsection's SQL medians are measured the same way, but its HTTP figures are not — they
 ran through the compose `app` service's own connection pool, not a harness session — and it
-separately publishes fresh-connection first runs on the **upper** side of this pair (108.174,
-402.414 and 50.787 ms for the three Class A statements, with two more fresh rows in the First runs
-table). `/analytics/volatility`'s was measured again on 2026-09-15 and read **168.528 ms**, at the
-same 423 execution blocks and the same 4,875 planning blocks: the block counts reproduce exactly and
-only the timings moved, the execution by 1.56×, which puts that first run further above the 100 ms
-target than 108.174 is. Each of those two is one observation, and the paragraph on the Class A gate
-below carries the 108.174 alone. So only a subsection's SQL medians support a
-lower-side reading; a figure from either must not be compared against a published fresh-connection
-count without saying which kind of figure it is — one paragraph in the first of them did, and is
-corrected in place. **The third exception is "The bounds a request runs under" below**, which is
-measured against scratch Postgres containers rather than the loaded database, most of it through the
-application's own connection pool in a server started for the measurement, at one to three runs per
-figure rather than five; the connection state there is whatever the pool holds, and the subsection
-states its conditions where it opens.
+separately publishes fresh-connection first runs on the **upper** side of this pair — five rows in
+the First runs table. Three of them are **402.414 ms** for a W-HOT `/analytics/largest-moves` page
+at `min_move_pct = 1`, **108.174 ms** for `/analytics/volatility`, the only Class A statement of the
+five, and **50.787 ms** for a W-COLD `/analytics/largest-moves` page at the default limit; the other
+two are the 2026-06-25 cursor at **0.812 ms** on the statement as it stands and **162.381 ms** as
+first shipped. The Class A table's other two statements are not among the five: `/analytics/gaps`'
+own first run is 31.835 ms on a used connection, and the Class A `/analytics/largest-moves` cell's
+is 0.949 ms, also used. `/analytics/volatility`'s was measured again on 2026-09-15 and read
+**168.528 ms**, at the same 423 execution blocks and the same 4,875 planning blocks: the block
+counts reproduce exactly and only the timings moved, the execution by 1.56×, which puts that first
+run further above the 100 ms target than 108.174 is. Each of those two is one observation, and the
+paragraph on the Class A gate below carries the 108.174 alone. So only a subsection's SQL medians
+support a lower-side reading; a figure from either must not be compared against a published
+fresh-connection count without saying which kind of figure it is — one paragraph in the first of
+them did, and is corrected in place. **The third exception is "The bounds a request runs under"
+below**, which is measured against scratch Postgres containers rather than the loaded database, most
+of it through the application's own connection pool in a server started for the measurement, at one
+to three runs per figure rather than five; the connection state there is whatever the pool holds,
+and the subsection states its conditions where it opens.
 
 ## The heap the numbers rest on
 
@@ -333,7 +373,8 @@ needed this.
 Six queries read every row by definition. There is no index that improves them and no rewrite
 that avoids the scan, so a "10× faster" target is one a correct database fails — and demanding
 it pushes a builder into adding an index that is never chosen and reporting the difference as a
-result. Each carries four artifacts instead.
+result. Each carries three or four artifacts instead: the plan and the row math for all six, a
+candidate index for 4, 5, 7 and 8, and the byte math for 7, 9 and 10.
 
 ### Item 1 — the plan the planner should pick, actually picked
 
@@ -359,9 +400,11 @@ that Item 4 reasons from. This column is not a second measurement of it.
 | `10_missing_minutes.sql` | `Merge Left Join` | 133,978 ms | 514,220 | 2 | 71 |
 
 Query 5 scans 3 partitions rather than 71 because it is the only Class C file with a window —
-`:start`/`:end` bind a 90-day range, which spans 3 monthly partitions. Partition pruning is
-doing exactly what it should; the query is still Class C because ranking by magnitude must see
-every row *in that window* before it knows which N come out.
+`:start`/`:end` bind 2026-04-01 → 2026-06-30, and that range falls inside 3 monthly partitions.
+**The 3 is this window's alignment and not a property of a 90-day range** — a 90-day range can fall
+across as many as five monthly partitions, and does for one running from 31 January to 1 May of a
+non-leap year. Partition pruning is doing exactly what it should; the query is still Class C because
+ranking by magnitude must see every row *in that window* before it knows which N come out.
 
 ### Item 2 — the candidate index, built, measured, and not chosen
 
@@ -506,8 +549,8 @@ Roughly 420 blocks each — 3.28 MiB, since a block is 8 KiB and every figure co
 COUNT in this document is binary (the working-set sizes above are not among those; each is a
 `pg_total_relation_size` byte count and a binary megabyte rendering of it, which is what
 `pg_size_pretty` prints and what the documents carrying those figures label MB) — because partition
-pruning takes a 90-day window down to three monthly partitions and the PK then serves one symbol out
-of them.
+pruning takes this 90-day window down to three monthly partitions — a 90-day window can fall across
+as many as five — and the PK then serves one symbol out of them.
 
 **Against the same constructed before Class B uses** — `enable_indexscan`, `enable_bitmapscan`
 and `enable_indexonlyscan` all off, which is the only way to get an untuned state for a
@@ -1174,11 +1217,15 @@ measured — the replica is the evidence, and it was taken on a machine carrying
 
 **Read the threshold figures as what they are.** The slowest threshold **median** published anywhere
 in this document is **518.1 ms**, W-HOT at `min_move_pct = 100` over three runs. Three single
-readings are slower — W-HOT's first run at that threshold, 1,590.699 ms ("First runs" below), and
-W-COLD's two 1,737,160-block readings, 1,508.8 ms and 943.6 ms — and not one of the three is a
-median. Nor does the checkout bound follow from any of them: it is reached by concurrency rather
-than by one slow statement, when all `DB_POOL_MAX` connections are busy at once and a caller waits
-out the whole 5 s behind them. At the default maximum of ten connections, a burst of simultaneous
+readings against the loaded database are slower — W-HOT's first run at that threshold, 1,590.699 ms
+("First runs" below), and W-COLD's two 1,737,160-block readings, 1,508.8 ms and 943.6 ms — and not
+one of the three is a median. **The cold-cache readings in the paragraph above are slower again, and
+they are the scratch replica rather than the loaded database**: 4,862.7, 5,257.9 and 5,371.9 ms over
+SQL against 1,748.5, 3,311.3 and 1,732.1 ms warm, a 500 `internal` at 5.215 s through the service,
+and ten concurrent cold requests refused together at 5.07-5.19 s. Nor does the checkout bound follow
+from any threshold reading here: it is reached by concurrency rather than by one slow statement,
+when all `DB_POOL_MAX` connections are busy at once and a caller waits out the whole 5 s behind
+them. At the default maximum of ten connections, a burst of simultaneous
 callers each holding one for 1.5 s drains in waves of ten every 1.5 s, so the wait first passes 5 s
 at the forty-first caller; eleven such callers leave the eleventh waiting about 1.5 s, and it is
 served. Eleven simultaneous callers were measured, against a table locked for 8 s, which is longer
@@ -1518,9 +1565,10 @@ keyset-paginated, reading only `open` and `close`:
 | inherited `(ts, symbol)` | 1,012 | 0 | 4 |
 | with the partial index | **16** | **4** | 0 |
 
-**63.25× fewer blocks, and the planner chose it unprompted.** 128 MB (134,217,728 bytes) across
-four partitions, built in 8 s. That table measures the `.sql` form of the access path, taken before
-the endpoint existed.
+**63.25× fewer blocks, and the planner chose it unprompted.** **128 MB across four partitions**,
+built in 8 s — a rounded megabyte figure and not a byte reading, since 128 MB here is 2^27 bytes to
+the byte, which four real index sizes do not sum to. Read it as about 32 MB of index per partition.
+That table measures the `.sql` form of the access path, taken before the endpoint existed.
 
 **Kept, and the verdict is now read off the endpoint.** On `/analytics/largest-moves` the planner
 chose each child's `bars_2026_0N_hot_idx` as an `Index Only Scan` with 0 heap fetches, on page 1 at
@@ -1595,6 +1643,7 @@ worth knowing about rather than carrying.
 ### What is deliberately not indexed
 
 Nothing on `volume`, and the row math above is why: queries 4 and 8 are the only two that filter
-or rank on it, both read 100% of the universe, and both were measured with `(volume)` and
-`(ts, volume)` on disk and rejected the index. An index that is never chosen is not free — it is
-maintained on every one of 41.7M inserts.
+or rank on it, both read 100% of the universe, and each was measured with its own volume index on
+disk — `(volume)` for query 4, `(ts, volume)` for query 8 — and read the same blocks with it as
+without it. An index that is never chosen is not free — it is maintained on every one of 41.7M
+inserts.

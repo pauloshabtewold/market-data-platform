@@ -51,6 +51,25 @@ reported gross or net of credits. A net-of-credits alarm is a bound on nothing f
 balance lasts, and the budgets above are the bound that does not depend on the answer. Record it
 here once the first charge lands; this is the only place the distinction gets written down.
 
+What has been measured so far does not settle it. Read at 2026-10-06T21:39Z, with the database
+running and billable since 2026-10-06T03:25Z:
+
+- Both alarms have left `INSUFFICIENT_DATA` for `OK`, at 2026-10-06T01:17:38Z and 01:17:42Z.
+- `EstimatedCharges` on the `Currency=USD` dimension has published five datapoints and every one
+  of them reads **0.0**.
+- Both budgets read `ActualSpend` **0.0**.
+- Cost Explorer returns no data for this account yet.
+
+**So no bound in this account has yet been observed to move.** An alarm sitting in `OK` on a 0.0
+datapoint is consistent with the net-of-credits reading — the case above, where the alarms bound
+nothing for as long as the balance lasts — and it is equally consistent with a reporting lag: those
+five datapoints are hours apart and unevenly spaced, so the metric is updated a few times a day and
+not continuously. Two explanations and no way yet to choose between them is not an answer, so the
+figures above are recorded as readings and not as a verdict. It becomes decidable a day or two after
+the account's first full billing period, which is when a gross metric would have to show the hours
+the database has already run. Until then the budgets' `IncludeCredit false` is the bound that is
+known to be live.
+
 ## Names
 
 Every identifier below is derived from one stem. None is a secret. The account id is deliberately
@@ -76,6 +95,7 @@ ALARM_20=$PROJECT-billing-20
 BUDGET_5=$PROJECT-5
 BUDGET_20=$PROJECT-20
 EXEC_ROLE=$PROJECT-task-execution
+ADMIN_USER=$PROJECT-admin
 PORT=8000
 
 ACCOUNT=                  # not recorded here; supply it before the teardown's budget commands
@@ -181,13 +201,25 @@ help and the remedy becomes a bastion host or a VPN, which are more billable res
 balance. It also cannot be flipped later without a modify-and-reboot.
 
 **The safety property is the security group, not privacy.** The database's group allows 5432 from
-the service's group and from nothing else; it holds exactly one rule. A laptop `/32` is added for
-one narrow window, used, and removed, and both timestamps are recorded above. A publicly
-addressable database with an open-to-the-world 5432 rule is the actual mistake, and it is a
-different mistake from this one.
+the service's group and from nothing else, and between windows that one rule is the whole group.
+The exception is governed by a rule and not by a quota: a laptop `/32` is opened only for a step that
+needs `psql` from the laptop, used, and revoked inside that same step, with the time it was opened
+and the time it was closed both recorded above. Every window adds its own pair of timestamps, so
+the record is the list above rather than a total that goes stale the next time a step needs one. A
+publicly addressable database carrying a standing open-to-the-world 5432 rule is the actual
+mistake, and it is a different mistake from this one.
 
 The service's group allows 8000 from `0.0.0.0/0` and carries **no rule for any single
 address** — nothing ever connects to the task directly.
+
+**That open rule is the whole exposure of the service, and what sits behind it should be read
+plainly.** The endpoint takes no authentication and applies no rate limit, and its analytics
+endpoints run SQL whose cost is bounded only by a 5 s `statement_timeout` set on every pooled
+connection. The page caps bound the rows one request returns and that timeout bounds how long one
+request runs; nothing bounds how many requests arrive. So anyone who finds the address can spend
+this instance's I/O on expensive queries against a database funded from a finite credit balance.
+That is accepted for a time-boxed demonstration, and what it is traded against is the teardown date
+and the two bounds at the top of this file rather than an authentication layer.
 
 ### One address is allocated that no step asked for
 
@@ -210,6 +242,12 @@ cost. The health check is omitted because without a load balancer the public add
 the task's own network interface and **changes every time the task is replaced** — so a
 health-check-driven replacement would quietly invalidate any address written down. The task's
 address is auto-assigned and is not an elastic address, which is why it survives nothing.
+
+Ruling out the load balancer also rules out TLS, and the address above says so: the service speaks
+plain HTTP on port 8000 and nothing listens on 443. Terminating TLS means either the load balancer
+that is ruled out on cost or a certificate on an address that changes with the task. It is
+acceptable here because the payload is read-only public market data — there is no authentication,
+no credential and no personal data in any request or response for transport encryption to protect.
 
 `assignPublicIp` is `ENABLED`. That single setting is what lets a task in a public subnet pull
 its image with no NAT gateway; without it the task dies before the application runs. The subnets
@@ -256,20 +294,31 @@ not.
 
 ### The arithmetic, and why the window is a choice rather than a limit
 
-The copy is **584,507,392 bytes**, which is 557 MB:
+The four copied partitions hold **658,350,080 bytes**, which is **627.852 MiB**, measured on the
+deployed instance:
 
 | | bytes |
 | --- | --- |
-| `bars_2026_03` | 152,854,528 |
-| `bars_2026_04` | 142,417,920 |
-| `bars_2026_05` | 139,345,920 |
-| `bars_2026_06` | 149,512,192 |
-| `market_days` | 303,104 |
-| `symbols` | 73,728 |
-| sum | **584,507,392** |
+| `bars_2026_03` | 172,081,152 |
+| `bars_2026_04` | 161,480,704 |
+| `bars_2026_05` | 157,286,400 |
+| `bars_2026_06` | 167,501,824 |
+| sum | **658,350,080** |
 
-Against a 10 GB ceiling — half the 20 GB the instance is provisioned with — that is **18.4× under,
-5.44% of the ceiling**. The depth floor runs the other way: the deep-pagination claim needs
+Those are total relation sizes — the heap plus the three indexes each child carries. The heap alone
+is 276,185,088 bytes, so 58.05% of the figure is index.
+
+**Take this figure from the deployed instance and from nowhere else.** The same four partitions on
+the development database sum to 584,130,560 bytes, 12.63% smaller, with identical row counts either
+side: a copy builds its own heap and its own indexes rather than reproducing the source's page
+layout, and the fill factor the copy arrives at is its own. A size measured locally is a measurement
+of the source, and publishing it as the size of the copy understates the copy.
+
+`symbols` and `market_days` are left out of the sum. At 100 and 1,484 rows they add a fraction of a
+megabyte, and the four partitions alone decide the comparison below.
+
+Against a 10 GiB ceiling — half the 20 GiB the instance is provisioned with — that is **16.310×
+under, 6.13% of the ceiling**. The depth floor runs the other way: the deep-pagination claim needs
 1,000,000 + 1,000 + 1 = **1,001,001** rows inside the window a request can actually ask for, and
 the window the deep page requests holds **2,009,487** session rows, clearing it by **2.007×**. The
 widest window the cap permits inside these months holds 2,028,716, clearing by 2.027×. The two
@@ -277,7 +326,7 @@ bounds do not cross and neither is close, so the deep-page depth is not reduced.
 
 **The whole development database is 6.52 GiB and would itself fit under that ceiling.** So the hot
 window is a design choice, not a storage constraint: batch ingestion runs where disk is cheap and
-the deployed service serves a recent window. A reader who divides 557 MB by 20 GB will ask, which
+the deployed service serves a recent window. A reader who divides 628 MiB by 20 GiB will ask, which
 is why the margin is written down rather than left to look like a padded guess.
 
 ### Three ways this copy fails silently, all three checked
@@ -374,11 +423,13 @@ number of blocks read.
 Run this on the teardown date, in this order, and only after the demo capture has been played back
 and confirmed usable — the capture is what outlives the URL, and nothing below is reversible.
 
-The order carries two dependencies that are not obvious. A service must go before its cluster, or
+The order carries two dependencies that are not obvious, and two rules that are not dependencies at
+all. A service must go before its cluster, or
 the cluster delete fails. The RDS instance must go before the security groups, because a group still
-referenced by the instance or its network interface cannot be deleted. And the billing alarms come
-last, after the $0 confirmation: deleting the alarm before the bill is confirmed zero removes the
-only thing that would say it is not.
+referenced by the instance or its network interface cannot be deleted. The billing alarms come after
+the $0 confirmation: deleting the alarm before the bill is confirmed zero removes the only thing that
+would say it is not. And the admin access key comes after all of it, because deleting it is what
+stops every command on this list from working.
 
 - [ ] 1. ECS service
 
@@ -456,7 +507,7 @@ aws iam detach-role-policy --role-name "$EXEC_ROLE" \
 aws iam delete-role --role-name "$EXEC_ROLE"
 aws rds delete-db-parameter-group --db-parameter-group-name "$PG_GROUP"
 # check
-aws ssm get-parameter --name "$SSM_DSN"                                         # -> ParameterNotFound, exit 255
+aws ssm get-parameter --name "$SSM_DSN"                                         # -> ParameterNotFound, exit 254
 aws iam get-role --role-name "$EXEC_ROLE"                                       # -> NoSuchEntity, exit 254
 aws rds describe-db-parameter-groups --db-parameter-group-name "$PG_GROUP"      # -> exit 254
 aws sts get-caller-identity --query Account                                     # -> the account id, the control
@@ -478,7 +529,16 @@ populate. Run the same query over a day while the service was up as a control �
 non-zero figure, because "$0" is also what an unenabled Cost Explorer and a mistyped time period
 both print.
 
-- [ ] 9. Last, after the $0 confirmation: the SNS topic and subscription, the two alarms, the two budgets
+**That control has never returned a non-zero figure, so this check is unexercised.** Tried on
+2026-10-06 over a day the service was up, the query answers `DataUnavailableException`: there is no
+Cost Explorer data for this account yet, which makes the control as unrunnable today as the check it
+guards. Both of the states it exists to separate — a genuine $0 and a Cost Explorer that never
+populated — print the same thing right now. **Run the control before the teardown date rather than
+on it.** A non-zero reading over a service-up day is the whole thing that turns item 8's $0 into
+evidence, and finding out on the teardown date that no such reading can be had leaves no day left to
+take one on. Each Cost Explorer API request is itself billable, so run it once and do not poll it.
+
+- [ ] 9. After the $0 confirmation: the SNS topic and subscription, the two alarms, the two budgets
 
 ```
 aws cloudwatch delete-alarms --alarm-names "$ALARM_5" "$ALARM_20" --region us-east-1
@@ -493,4 +553,37 @@ aws sns list-topics --query 'length(Topics)'                          # -> 0
 aws sts get-caller-identity --query Account                           # -> the account id, the control
 ```
 
-A resource left behind is the most common way a finished project keeps costing money.
+- [ ] 10. Last of all: the administrator access key — after this, none of the above can run
+
+The IAM user `market-data-admin` holds one `Active` access key, and it is the credential every
+command on this list runs as. Items 1 to 9 delete every resource that bills, and item 9 deletes both
+alarms and both budgets — so an account left finished at item 9 has a working administrator
+credential on it and no spend bound of any kind watching what that credential could create. **That
+is the state this item exists to prevent**, and it is the one item on the list whose subject is not a
+resource.
+
+It comes last because it is self-disabling: the moment the key is gone, every command above stops
+working.
+
+```
+# read the id while there is still a credential to read it with
+aws iam list-access-keys --user-name "$ADMIN_USER" \
+  --query 'AccessKeyMetadata[].{Id:AccessKeyId,Status:Status}'
+KEY_ID=                    # the id printed above
+# optional, and free either way: a task definition bills nothing at any revision count
+aws ecs deregister-task-definition --task-definition "$TASK_FAMILY":1
+# terminal. Delete rather than deactivate -- deactivating this key is itself what would
+# stop the delete, and a deleted key needs no second step
+aws iam delete-access-key --user-name "$ADMIN_USER" --access-key-id "$KEY_ID"
+# check -- this call must FAIL, and the failure is the pass
+aws sts get-caller-identity
+#   -> an authentication error. A call that succeeds here means the key is still live.
+```
+
+Confirm the key count is zero from the console rather than the CLI; there is no longer a credential
+to ask with. The IAM user itself costs nothing and can be left. So can the task definition: the
+`deregister` above is tidiness and not thrift, since `market-data-api:1` bills nothing, and it is
+the one thing items 1 to 9 leave standing precisely because leaving it costs nothing.
+
+A resource left behind is the most common way a finished project keeps costing money. A credential
+left behind is the most expensive.

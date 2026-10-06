@@ -1,8 +1,10 @@
 # Methodology
 
 Sizing, feed behaviour, partitioning, provenance and survivorship. Split out of the
-README so that file stays short; every figure here is measured, and earlier projections
-are kept rather than deleted so the size of each error stays visible.
+README so that file stays short. Every figure stated here as a result is measured; the
+projections and the derived bounds are labelled as such where they appear, and the
+projections that measurement has overtaken are kept rather than deleted so the size of
+each error stays visible.
 
 ## Sizing
 
@@ -16,8 +18,12 @@ are kept rather than deleted so the size of each error stays visible.
 The right-hand column is measured on the loaded universe, not projected onto it. The byte row is
 dated because it is `pg_total_relation_size` and therefore counts indexes: migration 005's
 `bars_ts_symbol_idx` and the four hot-window indexes landed after it, and the same sum reads
-6,998,122,496 (6,674 MB) today, of which 4,211,064,832 (4,016 MB) is heap. The projections below
-are compared against the 2026-08-27 figure, which is the like-for-like one. Two earlier
+6,998,122,496 (6,674 MB) today, of which 4,211,064,832 (4,016 MB) is heap. Those two additions
+account for the whole difference, to the byte: 5,547,909,120 + 1,315,995,648 for
+`bars_ts_symbol_idx` summed over the 71 children + 134,217,728 for the four hot-window indexes
+= 6,998,122,496. So the two readings differ by exactly those indexes and by nothing in the data,
+which is what the date on the row is for. The projections below are compared against the
+2026-08-27 figure, which is the like-for-like one. Two earlier
 projections stood here and both are recorded rather than deleted, because the size of the error is
 the useful part. The first multiplied the five-ticker sample by 1,420 and gave 59,246,660 bars and
 ≈7.4 GiB — **42% above** what the universe actually holds, because the sample month sits near this
@@ -48,8 +54,9 @@ idempotency path and is reported under it in `INGEST_LOG.md` rather than here. E
 would publish a rate no load of new data can reach.
 
 The figure still moves with the network and with what else the host is doing. The rate-limit floor
-— 7,100 requests at 200 requests per minute — is ≈36 minutes, so the wall clock binds rather than
-the throttle, though no longer by much.
+— 7,100 requests at 200 requests per minute — is ≈36 minutes. That one is a bound computed from
+the configured limit rather than a timed run, which is enough for the comparison it is used for:
+the wall clock binds rather than the throttle, though no longer by much.
 
 ## Measured constants
 
@@ -65,7 +72,7 @@ universe may be cut, and a stale `N` overstates reachable page depth.
 | `BARS_PER_TICKER_DAY` | 387.36 | 40,673 regular-session bars ÷ (5 tickers × 21 trading days) |
 | `DEEP_PAGE_DEPTH` | 1,000,000 | `min(1e6, floor(0.8 × N × (40,673 ÷ 105) × TD))`, `TD` = 58, unclamped 1,797,359 |
 | `HEAP_INDEX_BYTE_RATIO` | 3.1656441717791411 | 4,227,072 heap bytes ÷ 1,335,296 primary-key index bytes |
-| `HEAP_INDEX_COVERING_RATIO` | 1.8924 | 4,211,064,832 heap bytes ÷ 2,225,233,920 covering-index bytes |
+| `HEAP_INDEX_COVERING_RATIO` | 1.8924 | 4,211,064,832 heap bytes ÷ 2,225,233,920 covering-index bytes — the divisor measures an index that no longer exists, see below |
 
 The Value column above uses thousands separators for readability; both `.env` and `.env.example`
 take plain digits, so wherever the key is given a real value it reads `DEEP_PAGE_DEPTH=1000000` —
@@ -99,6 +106,18 @@ produce that order, and neither does a restore.
 carries four of nine columns, close to a second heap, so it is worth 1.89× where the primary key is
 worth 3.16× — the two are 67% apart on identical data. It is measured only inside the runs that
 build that index for a negative result and drop it again.
+
+**Only one side of that division can be checked against this database, and it is worth knowing
+which.** The numerator, 4,211,064,832, is the live heap of `bars` summed over its 71 children and
+re-reads from the catalog at any time. The divisor is the size of an index that exists nowhere: it
+was built on the full table, measured, and dropped once the negative result was recorded. No
+migration and no line of `db/schema.sql` declares it — between them they put exactly two indexes on
+`bars`, the `(symbol, ts)` primary key and `bars_ts_symbol_idx`, and neither is this one — and its
+shape, `(symbol, ts) INCLUDE (vwap, volume)`, survives only as a comment in
+`db/queries/07_vwap_check.sql`. Reproducing it would mean building that index again over 41.7M
+rows, which is a write this figure does not justify. The constant is therefore published with its
+divisor as a recorded measurement rather than as a reproducible one, and it is used as a yardstick
+for exactly one query's index and for nothing else.
 
 ## Feed
 
@@ -138,6 +157,27 @@ which is the clearest measure of how unrepresentative they are — June 2022 to 
 symbols pool to **72.16%**, replacing the 77.62% this page carried while only the first half was
 loaded. The extremes of the 2022 and 2025 ranges are unchanged because both belong to symbols in
 the first fifty; it is the pooled figures that moved.
+
+Each of those three ranges is a floor over one month. **The floor over the whole window is
+3.02%: BKNG in September 2025, 247 regular-session bars against 8,190 minutes** — 21 full
+390-minute sessions, so the denominator is 21 × 390 exactly. That is the minimum over all 7,100
+symbol-months, 100 symbols × 71 months, measured on the same `[open_ts, close_ts)` membership and
+the same `SUM(session_minutes)` denominator as every figure above, broken down one cell per symbol
+per month instead of per symbol. It is the lowest coverage figure this project publishes, and
+`README.md` quotes it. **Nineteen other symbol-months read below the 7.59% June-2025 figure
+above, and four read below 5%.**
+
+Those extremes belong to one symbol rather than to the universe, which is why a single headline gap
+would be the wrong summary. The five lowest cells of the 7,100 are all BKNG, as are thirteen of the
+lowest twenty, and all four below 5% are BKNG. Across the whole window BKNG pools to **22.28%** —
+128,487 bars against 576,600 minutes, the full 1,484-session calendar — against the universe's
+72.16%. None of that makes BKNG an ingest failure, and the distinction is checkable rather than
+asserted: it has a complete `first_bar_ts`, it leaves no missing unit, and it returns bars in all
+71 of its months — no cell among the 7,100 is zero, which is what the 3.02% minimum establishes.
+The thinness is in what this feed printed, not in what the load collected. Why it is this symbol
+and not another is not something this data answers, and nothing here guesses at it; the point it
+does settle is that a universe-wide figure averages over a symbol-level spread of 3.02% to 100%,
+which is why coverage is reported per symbol and per period and never as one number.
 
 The finding this project reports is *where* the missing minutes fall rather than a headline gap,
 and on this sample they are concentrated rather than spread: 277 minutes are missing in total and
