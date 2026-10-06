@@ -203,6 +203,15 @@ def test_every_document_a_committed_file_points_an_operator_at_is_tracked_and_ca
         named |= set(re.findall(r"docs/[A-Za-z0-9_]+\.md", (repo_root / source).read_text()))
     assert named, "no committed file names a docs/ path, so this test would pass vacuously"
 
+    # the pattern above reaches docs/ and nothing else, so a document at the repository root that
+    # README links is unguarded by it. Take README's markdown link targets too, which is how a
+    # reader reaches them: a relative target, no anchor and no scheme, so #section and https: are
+    # both skipped. This is what covers LICENSE, which carries no extension to match on
+    readme = (repo_root / "README.md").read_text()
+    linked = set(re.findall(r"\]\(([^)#:]+)\)", readme))
+    assert len(linked) > 1, "README links at most one document, so this half would be near-vacuous"
+    named |= linked
+
     tracked = set(
         subprocess.run(
             ["git", "ls-files", "-z"], cwd=repo_root, capture_output=True, text=True, check=True
