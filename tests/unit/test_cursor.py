@@ -221,22 +221,29 @@ def _raw_cursor(text: str) -> str:
 
 
 def test_json_loads_failures_besides_jsondecodeerror_are_also_not_json():
-    # a plain ValueError past CPython's int-to-str digit limit, and a RecursionError from deeply
-    # nested brackets -- neither is a JSONDecodeError, and both used to reach no except clause and
-    # answer 500 before any connection was acquired
+    # a plain ValueError past CPython's int-to-str digit limit is not a JSONDecodeError, and used to
+    # reach no except clause and answer 500 before any connection was acquired
     huge_int = _raw_cursor('{"ts":' + "1" * 4301 + ',"symbol":"AAA"}')
-    deep_universe = _raw_cursor("[" * 9999 + "]" * 9999)
-    deep_symbols = _raw_cursor("[" * 9999 + "]" * 9999)
-    for shape, cursor in (
-        (UNIVERSE_CURSOR, huge_int),
-        (UNIVERSE_CURSOR, deep_universe),
-        (SYMBOLS_CURSOR, deep_symbols),
-    ):
+    for shape in (UNIVERSE_CURSOR, SYMBOLS_CURSOR):
         with pytest.raises(ApiError) as excinfo:
-            decode_cursor(shape, cursor)
+            decode_cursor(shape, huge_int)
         assert excinfo.value.status == 400
         assert excinfo.value.code == "invalid_cursor"
         assert excinfo.value.detail["reason"] == "not_json"
+
+    # deeply nested brackets are refused too, but which reason they carry is a property of the
+    # interpreter rather than of this decoder: through 3.13 json.loads recurses and raises
+    # RecursionError, so the payload never parses and the reason is not_json; 3.14's parser is
+    # iterative, returns a list, and the field check refuses it as wrong_fields. The refusal is the
+    # contract the wire publishes -- 400 invalid_cursor either way -- so that is what is pinned,
+    # and pinning one of the two reasons here would fail on half the interpreters this supports
+    deep = _raw_cursor("[" * 9999 + "]" * 9999)
+    for shape in (UNIVERSE_CURSOR, SYMBOLS_CURSOR):
+        with pytest.raises(ApiError) as excinfo:
+            decode_cursor(shape, deep)
+        assert excinfo.value.status == 400
+        assert excinfo.value.code == "invalid_cursor"
+        assert excinfo.value.detail["reason"] in ("not_json", "wrong_fields")
 
 
 def test_a_timestamp_that_overflows_converting_to_utc_is_unparsable():
