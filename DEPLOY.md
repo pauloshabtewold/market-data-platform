@@ -154,6 +154,10 @@ RDS /32 opened: 2026-10-06T03:29:42Z
 RDS /32 closed: 2026-10-06T03:30:47Z
 RDS /32 opened: 2026-10-06T06:11:04Z
 RDS /32 closed: 2026-10-06T06:18:28Z
+RDS /32 opened: 2026-10-06T21:21:37Z
+RDS /32 closed: 2026-10-06T21:21:49Z
+RDS /32 opened: 2026-10-06T21:24:34Z
+RDS /32 closed: 2026-10-06T21:24:51Z
 ```
 
 The SSM parameter above is a **name**, not a value. The connection string it holds is a
