@@ -48,29 +48,44 @@ setting, which is the reason for having both. The `IncludeCredit` flag is not op
 applied, a default budget measures net spend, reads $0 for the whole credit period, and never fires
 while every resource bills against the balance.
 
-One thing is not yet known and belongs here when it is: whether the `EstimatedCharges` metric is
-reported gross or net of credits. A net-of-credits alarm is a bound on nothing for as long as the
-balance lasts, and the budgets above are the bound that does not depend on the answer. Record it
-here once the first charge lands; this is the only place the distinction gets written down.
+**`EstimatedCharges` is reported NET of credits. Settled by measurement 2026-10-07.** A
+net-of-credits alarm is a bound on nothing for as long as the balance lasts, so the two alarms on
+this account bound nothing today, and the budgets above — with `IncludeCredit` `false` — are the
+bound that actually holds. That is the case this section was written against, and it is the one
+that obtained.
 
-What has been measured so far does not settle it. Read at 2026-10-06T21:39Z, with the database
-running and billable since 2026-10-06T03:25Z:
+What settles it is Cost Explorer grouped on `RECORD_TYPE`, which separates usage from the credits
+applied against it. For 2026-10-07:
 
-- Both alarms have left `INSUFFICIENT_DATA` for `OK`, at 2026-10-06T01:17:38Z and 01:17:42Z.
-- `EstimatedCharges` on the `Currency=USD` dimension has published five datapoints and every one
-  of them reads **0.0**.
-- Both budgets read `ActualSpend` **0.0**.
-- Cost Explorer returns no data for this account yet.
+| record type | unblended |
+| --- | ---: |
+| `Usage` | **+0.1368083634** USD |
+| `Credit` | **−0.1368083654** USD |
+| net | **0** |
 
-**So no bound in this account has yet been observed to move.** An alarm sitting in `OK` on a 0.0
-datapoint is consistent with the net-of-credits reading — the case above, where the alarms bound
-nothing for as long as the balance lasts — and it is equally consistent with a reporting lag: those
-five datapoints are hours apart and unevenly spaced, so the metric is updated a few times a day and
-not continuously. Two explanations and no way yet to choose between them is not an answer, so the
-figures above are recorded as readings and not as a verdict. It becomes decidable a day or two after
-the account's first full billing period, which is when a gross metric would have to show the hours
-the database has already run. Until then the budgets' `IncludeCredit false` is the bound that is
-known to be live.
+So real usage is accruing and credits are cancelling it to zero, which is why an ungrouped Cost
+Explorer query answers `0` and why `EstimatedCharges` has published nothing but **0.0** across
+every datapoint since the account opened. Neither zero means the account is free; both mean the
+credits are doing their job and the metric is reporting after they are applied.
+
+**The budgets see through it, which is the whole reason they exist.** Read 2026-10-07 against
+limits of $5 and $20, `IncludeCredit` `false`:
+
+```
+market-data-5    ActualSpend 0.948    limit 5.0
+market-data-20   ActualSpend 0.948    limit 20.0
+```
+
+$0.948 of gross spend over the 38.7 hours since the database came up is about **$0.59 a day**, or
+**$18 a month** — against the $25–30 estimated above, so the estimate is modestly high rather than
+wrong. Twelve days from that reading to the teardown date is roughly **$7**, about 3.5% of a $200
+balance.
+
+**Two things follow for anyone reading the alarms.** An alarm in `OK` on this account is not
+evidence of no spend, and it will stay in `OK` until the credits are exhausted, at which point it
+starts behaving as intended — so it is a bound for the period after the credits and not during it.
+And the single-figure check worth running is the budget's `ActualSpend`, not the alarm state or an
+ungrouped cost query, both of which read zero while money is being spent.
 
 ## Names
 
