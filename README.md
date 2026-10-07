@@ -8,13 +8,15 @@ over 2020-08-01 to 2026-06-30, from Alpaca's IEX feed.
 ## Status
 
 - Live: http://100.58.98.13:8000/docs (until 2026-10-19)
+- OpenAPI document: http://100.58.98.13:8000/openapi.json
 
 The address above is the task's own, with no load balancer in front of it, so it changes
 if the task is replaced and it stops answering on the date given — the deployment is a
 demonstration on a finite credit balance, not a service. It is plain HTTP with no
 authentication and no rate limit, which is acceptable only because every endpoint is a
-read over public market data. There is no route at `/`, so the interactive page is the
-link above.
+read over public market data. There is no route at `/`, so the interactive page is the first
+link above — and that page is a 1,019-byte shell that loads Swagger UI from a third-party CDN,
+so the second link is the one that answers with no CDN in the path.
 
 **The deployed database holds four months, 2026-03-01 to 2026-06-30, not the full span
 below.** It is the hot window: 2,732,236 bars over four monthly partitions, copied from
@@ -59,8 +61,8 @@ the 405, and `/symbols`'s catch-all entry is the only place the document covers 
 
 **One wire detail worth knowing before you hand-write a client.** Prices are stored as unqualified
 `numeric`, so the scale is whatever the insert produced, and a whole-dollar price serialises as a
-JSON **integer** — `"close": 255`, not `255.0`. It is rare and it does occur: 46 of 8,200 price
-values across a sample of real pages, 0.56%. The published document types these fields as `number`,
+JSON **integer** — `"close": 255`, not `255.0`. It is rare and it does occur: 46 of 7,191 price
+values across a sample of real pages, 0.64%. The published document types these fields as `number`,
 which in JSON Schema admits integers, so a generated client handles both; code that tests
 `isinstance(x, float)` or its equivalent does not.
 
@@ -69,8 +71,9 @@ on the loaded data, not projected onto it.
 
 ## Quickstart
 
-Needs Docker, and Python 3.11 or later. The database publishes 5432 and the end-to-end service
-publishes 8000, so both ports must be free.
+Needs Docker, and Python 3.11 or later; CI tests 3.11, 3.13 and 3.14, so 3.12 is permitted and
+unexercised. The database publishes 5432 and the end-to-end service publishes 8000, so both ports
+must be free.
 
 ```bash
 cp -n .env.example .env                   # runs as copied; see below before editing it

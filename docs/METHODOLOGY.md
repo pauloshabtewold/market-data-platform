@@ -94,7 +94,7 @@ above — recomputing with the rounded figure gives 1,797,350, nine short. The r
 `.env` carries, since that is the number config consumes; the depth is taken before the rounding.
 
 The `0.8` is headroom rather than a measured quantity. Coverage varies by symbol and by year — this
-page reports a per-symbol spread of 3.02% to 100% below — so the rows a deep cursor can actually
+page reports a per-symbol spread of 22.28% to 98.99% below — so the rows a deep cursor can actually
 reach fall short of what one flat per-ticker-day rate projects over `N` tickers and `TD` days, and
 the factor keeps the target depth inside what the data holds. The `min` is the other half of the
 same bound and holds the number down if the feed turns out dense. Here the clamp is what binds:
@@ -133,25 +133,41 @@ for exactly one query's index and for nothing else.
 ## Recorded rather than reproducible
 
 Three figures across this page and [Query performance](QUERY_PERFORMANCE.md) are records of a
-measurement rather than reproductions of one. Each becomes a measurement again on a **fresh copy** of
-the data rather than on this database, and the procedure is short enough to write down.
+measurement rather than reproductions of one. A **fresh copy** of the data is where each comes
+closest to being a measurement again rather than this database, but only one of the three comes
+back as the same number — so the procedure below says, for each, what following it actually yields.
 
 - **The covering index's 2,225,233,920 bytes**, the divisor above. On the copy: build
   `(symbol, ts) INCLUDE (vwap, volume)`, read the size out of the catalog, drop it. On this database
-  those three steps are a write over 41.7M rows for a number that is already recorded.
+  those three steps are a write over 41.7M rows for a number that is already recorded. **The copy
+  has to carry the whole universe, and the numerator has to come off that same copy.** A B-tree
+  built by `CREATE INDEX` is sorted and bulk-loaded, so its size follows row count and index-tuple
+  width rather than heap order — which is why this is the one figure on the list that a full copy
+  reproduces closely, and why building it over the four-month hot window instead returns something
+  an order of magnitude smaller. Divide this database's heap by that copy's index and the ratio
+  reads an order of magnitude high.
 - **The hot-window index's 1,012-block "before" row.** Take it on a copy that carries the plain
   `(ts, symbol)` index the children inherit and not the four partial ones. Here all four are live, so
   the state that row describes is not a state this database is in, and reading it would mean dropping
-  them first.
+  them first. What a copy yields is a new before/after pair in its own blocks rather than a second
+  reading of this one: the harness that produced the row wrote its output and its parameters to a
+  path that no longer exists, so there is nothing left to compare like for like against. The durable
+  claim is the **ratio**, 1,012 ÷ 16 = **63.25**, which survives a retake because layout moves both
+  rows at once.
 - **The pre-vacuum 89.7053% all-visible.** Read `relallvisible / relpages` over the children on the
   next copy **before** `VACUUM (ANALYZE)` runs on them. That reading exists only in the window
-  between the copy landing and the vacuum, and the vacuum closes it for good.
+  between the copy landing and the vacuum, and the vacuum closes it for good. **The procedure
+  yields a pre-vacuum reading and never this one**, because the cause is time rather than layout:
+  89.7053% samples an autovacuum part-way through 71 freshly-written children some hours after a
+  42-minute load, and a four-month copy is swept in well under a minute. `DEPLOY.md` records the one
+  real execution of this procedure — read 27 seconds after the copy landed, its four partitions were
+  already at 99.42% to 99.94%.
 
-One caveat, which is why the copy is the right place rather than a perfect one: a copy reproduces
-every row count exactly and its byte and block figures are its own. Both follow physical layout, so a
-copy written in a different order from the one this pipeline writes answers a slightly different
-question — the same reason `HEAP_INDEX_BYTE_RATIO` is comparable only across partitions written in
-primary-key order.
+One caveat, and it reaches the block row above and nothing else on this list: a copy reproduces
+every row count exactly and its block figures are its own, because block counts follow physical
+layout, so a copy written in a different order from the one this pipeline writes answers a slightly
+different question — the same reason `HEAP_INDEX_BYTE_RATIO` is comparable only across partitions
+written in primary-key order.
 
 ## Feed
 
@@ -198,8 +214,9 @@ Each of those three ranges is a floor over one month. **The floor over the whole
 symbol-months, 100 symbols × 71 months, measured on the same `[open_ts, close_ts)` membership and
 the same `SUM(session_minutes)` denominator as every figure above, broken down one cell per symbol
 per month instead of per symbol. It is the lowest coverage figure this project publishes, and
-`README.md` quotes it. **Nineteen other symbol-months read below the 7.59% June-2025 figure
-above, and four read below 5%.**
+`README.md` quotes it. **Nineteen symbol-months read below the 7.59% June-2025 figure above,
+this one among them, and four read below 5%** — the twentieth-lowest reads exactly 7.59% and is
+not below it.
 
 Those extremes belong to one symbol rather than to the universe, which is why a single headline gap
 would be the wrong summary. The five lowest cells of the 7,100 are all BKNG, as are thirteen of the
@@ -210,7 +227,7 @@ asserted: it has a complete `first_bar_ts`, it leaves no missing unit, and it re
 71 of its months — no cell among the 7,100 is zero, which is what the 3.02% minimum establishes.
 The thinness is in what this feed printed, not in what the load collected. Why it is this symbol
 and not another is not something this data answers, and nothing here guesses at it; the point it
-does settle is that a universe-wide figure averages over a symbol-level spread of 3.02% to 100%,
+does settle is that a universe-wide figure averages over a per-symbol spread of 22.28% to 98.99%,
 which is why coverage is reported per symbol and per period and never as one number.
 
 The finding this project reports is *where* the missing minutes fall rather than a headline gap,
