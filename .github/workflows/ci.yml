@@ -9,6 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
+      # Every interpreter reports its own verdict. With the default fail-fast, the first job to
+      # fail cancels the others and they report `cancelled` rather than pass or fail -- and this
+      # project's convention is to read this workflow by job name.
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.13", "3.14"]
     env:
