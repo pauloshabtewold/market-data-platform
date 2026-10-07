@@ -186,6 +186,8 @@ RDS /32 opened: 2026-10-06T21:21:37Z
 RDS /32 closed: 2026-10-06T21:21:49Z
 RDS /32 opened: 2026-10-06T21:24:34Z
 RDS /32 closed: 2026-10-06T21:24:51Z
+RDS /32 opened: 2026-10-07T23:46:52Z
+RDS /32 closed: 2026-10-07T23:46:58Z
 ```
 
 The SSM parameter above is a **name**, not a value. The connection string it holds is a
@@ -348,19 +350,33 @@ deployed instance:
 | `bars_2026_06` | 167,501,824 |
 | sum | **658,350,080** |
 
-Those are total relation sizes — the heap plus the three indexes each child carries. **The split
-between heap and index was not read on the deployed instance**, because reading it needs a `psql`
-session and therefore one of the temporary ingress windows recorded above, and no step needed one
-for this. On the development database the same four partitions' heap is 276,185,088 of
-584,130,560 bytes, so 52.72% of the local figure is index — and by the paragraph below, the copy's
-own split is its own and will differ.
+Those are total relation sizes — the heap plus the three indexes each child carries. Read on the
+deployed instance, the heap is **276,185,088 bytes** and the indexes **381,943,808**, so **58.02%
+of the figure is index**. The 221,184-byte remainder is the free-space and visibility-map forks,
+which `pg_total_relation_size` counts and the other two do not; computing the index share as
+`1 − heap/total` instead attributes those forks to the indexes and reads 58.05%.
 
-**Take the size figure from the deployed instance and from nowhere else.** The same four partitions
-on the development database sum to 584,130,560 bytes, **11.27% smaller** — equivalently the copy is
-12.71% larger — with identical row counts either side: a copy builds its own heap and its own
-indexes rather than reproducing the source's page layout, and the fill factor the copy arrives at
-is its own. A size measured locally is a measurement of the source, and publishing it as the size of
-the copy understates the copy.
+**The heap copied byte-for-byte and the indexes did not, which is the useful fact here.** The same
+four partitions on the development database:
+
+| | heap | indexes | total |
+| --- | ---: | ---: | ---: |
+| deployed | 276,185,088 | 381,943,808 | **658,350,080** |
+| development | 276,185,088 | 307,724,288 | **584,130,560** |
+
+**The heap is identical on both sides, to the byte and partition by partition** — `COPY` wrote the
+rows in the order it read them, so the copy's page layout reproduces the source's exactly. The
+indexes are **24.12% larger** on the copy, because those were rebuilt by `CREATE INDEX` rather than
+copied, and a bulk build packs pages differently from the incremental inserts that produced the
+originals. **That accounts for the whole of the size difference**: the copy's total is 12.71%
+larger, equivalently the development figure is **11.27% smaller**, and the row counts are identical
+either side.
+
+So a size measured locally understates the copy, but only through the indexes. Take the total from
+the deployed instance; the heap is the one component where either side answers.
+
+The split above cost a fifth temporary `/32`, opened and revoked inside the step that needed it and
+recorded with the pair above like the four before it.
 
 `symbols` and `market_days` are left out of the sum. At 100 and 1,484 rows they add a fraction of a
 megabyte, and the four partitions alone decide the comparison below.
