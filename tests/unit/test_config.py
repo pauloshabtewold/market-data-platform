@@ -53,7 +53,7 @@ MEASURED_PHRASES = {
     "DEEP_PAGE_DEPTH": "the sample ingest run against the loaded calendar",
     "HEAP_INDEX_BYTE_RATIO": "the loaded partition's heap and index sizes",
     "HEAP_INDEX_COVERING_RATIO": (
-        "the loaded partition's heap against the covering index"
+        "the whole table's heap against the covering index"
         " (symbol, ts) INCLUDE (vwap, volume)"
     ),
 }

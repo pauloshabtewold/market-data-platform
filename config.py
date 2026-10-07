@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_RPM: int = 200
     HTTP_MAX_ATTEMPTS: int = 5
     AGG_MAX_WINDOW_DAYS: int = 90
-    # the hot-window partial index's predicate AND the month list Feature 10 copies to RDS -- one
+    # the hot-window partial index's predicate AND the month list the deployment copies to RDS -- one
     # value doing both jobs, so the local index and the deployed copy cannot drift apart. Counted
     # back from INGEST_END's month, it has to reach AGG_MAX_WINDOW_DAYS before INGEST_END, the widest
     # window the AGGREGATING endpoints accept -- /bars passes no window cap and takes the whole
@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     # vocabulary below is checked against the stripped value
     LOG_LEVEL: NonBlankStr = "INFO"
     # the end-to-end suite's target, defaulted because CI starts no service and exports none of
-    # them. The window is exactly AGG_MAX_WINDOW_DAYS and sits inside the hot window Feature 10
+    # them. The window is exactly AGG_MAX_WINDOW_DAYS and sits inside the hot window the deploy
     # copies to RDS, so the identical suite runs against the deployed database unchanged. Plain
     # str, not NonBlankStr: e2e_configuration_problems reports an empty value by name before the
     # suite's first request, and the API and the ingest, which never read it, keep starting
@@ -85,9 +85,12 @@ class Settings(BaseSettings):
     DEEP_PAGE_DEPTH: int | None = None
     HEAP_INDEX_BYTE_RATIO: float | None = None
     # query 7's ceiling, and a different index from the one above: 9 and 10 scan the PK, while 7
-    # needs vwap and volume too and can only be served by the covering index. two keys rather than
-    # one because on identical data they measure far apart, and a single key invites query 7 being
-    # judged against the PK's number -- which is flattering and cites an index it cannot use
+    # needs vwap and volume too and can only be served by the covering index. its numerator is the
+    # whole table's heap summed over every child, where the key above divides one partition's heap by
+    # that partition's PK -- so what this figure compares with is the pooled whole-table ratio and not
+    # the key above. two keys rather than one because on the same basis they measure far apart, and a
+    # single key invites query 7 being judged against the PK's number -- which is flattering and cites
+    # an index it cannot use
     HEAP_INDEX_COVERING_RATIO: float | None = None
 
     @field_validator(
@@ -237,7 +240,7 @@ _MEASURED_BY = {
     "BARS_PER_TICKER_DAY": "the sample ingest run",
     "DEEP_PAGE_DEPTH": "the sample ingest run against the loaded calendar",
     "HEAP_INDEX_BYTE_RATIO": "the loaded partition's heap and index sizes",
-    "HEAP_INDEX_COVERING_RATIO": "the loaded partition's heap against the covering index (symbol, ts) INCLUDE (vwap, volume)",
+    "HEAP_INDEX_COVERING_RATIO": "the whole table's heap against the covering index (symbol, ts) INCLUDE (vwap, volume)",
 }
 
 # a key added to Settings without a matching entry above would otherwise raise KeyError instead of this function's contract
