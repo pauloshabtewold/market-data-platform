@@ -20,7 +20,10 @@ inherited index, and the four partial indexes it is compared with are still on t
 re-running the harness with them in place measures the 16-block "with" row twice instead. That
 table is the hot-window index's one like-for-like measurement, and the index exists in no migration,
 so a restore has to recreate it by hand — which is the reason to record here that the comparison
-behind the 63.25× cannot be retaken as the database stands.
+behind the 63.25× cannot be retaken as the database stands. What does survive a retake is the
+ratio — 1,012 ÷ 16 is 63.25 exactly, and the ratio is what this document argues from — so
+`docs/METHODOLOGY.md` carries the procedure for reading that row again on a fresh copy, which
+yields a new before/after pair in that copy's own blocks rather than a second reading of this one.
 The Class A/B wall-clock re-run sweeps are a second exception: that harness overwrites a single
 output file on every run, so only the most recent survives as an artifact —
 the second sweep, 55.2, 25.6 and 29.6 ms with a 7.87× ratio for query 2. The main table's 49.0,
@@ -75,24 +78,34 @@ an omission. Three things make it the right one:
   not cells of any table below and appear in no other passage, so there is no matching figure
   further down to look for.
 - `shared_buffers` moves the split between `hit` and `read` and never their sum, which is the
-  property that makes these figures portable to RDS. **The setting itself was not varied here,
-  because it cannot be without restarting the server** — it has `postmaster` context, and no run
-  behind any figure in this document restarted one. The deployed RDS instance supplies the second
-  value instead: it reports `shared_buffers` at **23,081 pages** against this database's **16,384**,
-  which is the 128 MB above. Across six endpoint-form cells measured on both, execution blocks
-  differ by **at most 2** while planning collapses **16.3×** on the statements that plan every
-  partition. That is an endpoint-form comparison and not a `shared_buffers` experiment — the two
-  instances differ in more than this one setting — but the quantity it agrees on to two blocks is
+  property that makes these figures portable to RDS. **The two halves of that sentence rest on
+  different kinds of support.** The split half is definitional rather than observed: `Shared Hit +
+  Shared Read` is the count of blocks the executor touched, and buffer residency decides only which
+  of the two counters each one increments — no `hit`/`read` split is published anywhere in this
+  document, so nothing here measures it. The sum half is measured, below. **The setting itself was
+  not varied here, because it cannot be without restarting the server** — it has `postmaster`
+  context, and no run behind any figure in this document restarted one. The deployed RDS instance
+  supplies the second value instead: it reports `shared_buffers` at **23,081 pages** against this
+  database's **16,384**, which is the 128 MB above. Six endpoint-form cells were measured there and
+  **five** of them have a published endpoint-form figure on this side to compare against — `/symbols`
+  page 1 has none — and across those five, execution blocks differ by **at most 2** while planning
+  collapses by **up to 16.3×** on the three statements that plan every partition: 16.3× for `/daily`
+  and for `/analytics/volatility`, 15.1× for `/analytics/gaps`. That is an endpoint-form comparison
+  and not a `shared_buffers` experiment — the two instances differ in partition count and in
+  instance RAM as well as in this one setting — but the quantity it agrees on to two blocks is
   the sum this document gates, and the quantity that moves is planning, which this document
-  attributes to the partition count rather than to buffers.
-- Raising `work_mem` bought a Class C shape no speed on this host, and the mechanism is the reason
-  to expect that: the leader and its two workers are three processes, each free to claim the full
-  `work_mem` per sort, against a 128 MB `shared_buffers` — private memory at 256 MB apiece
-  displaces the page cache the query depends on. The readings point the same way — 29.8 s at 4 MB,
-  43.7 s at 64 MB and 46.9 s at 256 MB, one run each — but 46.9 against 29.8 is **1.57×**, inside
-  the greater-than-2× run-to-run spread this working set shows and below the 2.4× measured on one
-  query further down, so they illustrate the mechanism rather than measure it. Neither the query
-  nor its bound parameters was recorded beside them, which is a second reason not to read the three
+  attributes to the partition count rather than to buffers. **Those two figures stand on their own
+  as well**: the at-most-2 and the 16.3× are cells of no table below and appear in no other passage,
+  so there is no matching figure further down to look for.
+- Raising `work_mem` bought a Class C shape no speed on this host that anything measured here can
+  show, and that is the whole of the claim. The readings are one run each — 29.8 s at 4 MB, 43.7 s
+  at 64 MB and 46.9 s at 256 MB — and 46.9 against 29.8 is **1.57×**, inside the greater-than-2×
+  run-to-run spread this working set shows and below the 2.4× measured on one query further down, so
+  they separate no one of the three settings from another and no mechanism is offered for the order
+  they came out in. The memory was not claimed in any case: all twelve sorts in that probe are the
+  2,466 kB and 37 kB quicksorts above, and Postgres allocates sort memory lazily up to `work_mem`,
+  so a 37 kB sort never holds the 256 MB it is allowed. Neither the query nor its bound parameters
+  was recorded beside the timings, which is a second reason not to read the three
   as a series. **They come from a one-off memory probe too**: 29.8, 43.7 and 46.9 are cells of no
   table below and appear in no other passage, so nothing further down restates them.
 
@@ -136,11 +149,13 @@ fetches — but a session that expects 0% and measures 89.7% has not run the wro
 **Which figures here are repeated, and which are one observation.** Every block count, node type,
 worker count, spill size and byte ratio in the Class A, B and C tables below is a **property of the
 plan** and was identical every time it was measured on one side of migration 005 — including on a
-full re-capture taken from scratch after the first set was lost. **Migration 005 is where one of
-these counts moves, and it moves by 40 blocks.** Item 1's figures were taken before it added
-`bars_ts_symbol_idx` and every table after Item 1 was captured afterwards, so query 5 reads 25,009
-there against 25,049 in Item 2 — up 40 — and query 7 reads 514,262 there against the 514,222 Items 2
-and 4 read — down 40 — with each side stable over repeated runs and queries 9 and 10 identical on
+full re-capture taken from scratch after the first set was lost. **Migration 005 is where four of
+these counts move, and none of them moves by more than 40 blocks.** Item 1's figures were taken
+before it added `bars_ts_symbol_idx` and every table after Item 1 was captured afterwards, so all
+four of the Class C queries Item 2 re-measures read differently on the two sides: query 4 reads
+514,300 there against 514,264 in Item 2 — down 36 — query 5 reads 25,009 against 25,049 — up 40 —
+query 7 reads 514,262 against the 514,222 Items 2 and 4 read — down 40 — and query 8 reads 514,280
+against 514,242 — down 38. Each side is stable over repeats, and queries 9 and 10 are identical on
 both. Query 7's forced block ratio carries the same boundary at 0.01%, 1.9021 against 1.9019. That
 is a real boundary rather than noise, and Item 1's own caveat and query 7's re-derivation each state
 it where they appear. Those are the numbers the gate rests on. **The two endpoint-forms subsections
@@ -227,8 +242,9 @@ ran through the compose `app` service's own connection pool, not a harness sessi
 separately publishes fresh-connection first runs on the **upper** side of this pair — five rows in
 the First runs table. Three of them are **402.414 ms** for a W-HOT `/analytics/largest-moves` page
 at `min_move_pct = 1`, **108.174 ms** for `/analytics/volatility`, the only Class A statement of the
-five, and **50.787 ms** for a W-COLD `/analytics/largest-moves` page at the default limit; the other
-two are the 2026-06-25 cursor at **0.812 ms** on the statement as it stands and **162.381 ms** as
+five, and **50.787 ms** for a W-COLD `/analytics/largest-moves` page at the default limit and
+`min_move_pct = 0`; the other two are the 2026-06-25 cursor at **0.812 ms** on the statement as it
+stands and **162.381 ms** as
 first shipped. The Class A table's other two statements are not among the five: `/analytics/gaps`'
 own first run is 31.835 ms on a used connection, and the Class A `/analytics/largest-moves` cell's
 is 0.949 ms, also used. `/analytics/volatility`'s was measured again on 2026-09-15 and read
@@ -1307,11 +1323,14 @@ The change trades index probes for an in-memory filter. The equality let the loo
 `market_days_pkey` once per bar — 519 of the first-shipped page 1's 524 blocks were those probes.
 Without it the loop filters each bar against the 62 materialised sessions, and the plan reports
 **10,564 rows removed by the join filter** on page 1. **That counts rejected (bar, session)
-comparisons, not bars read.** 172 bars against 62 sessions is 10,664 comparisons, of which the page
-keeps 101, leaving 10,563 — one short of the reported figure. The bars-read reading is impossible
-beside the same page's 9 blocks, and the first-shipped page puts the bar count in the same place
-from the other side: 519 probe blocks at three blocks per primary-key descent is about 173 bars. So
-blocks fall in every row of the table, while the `EXPLAIN ANALYZE` times in the first and third rows
+comparisons, not bars read.** The bars-read reading is impossible beside the same page's 9 blocks.
+The comparison reading is the arithmetic that nearly closes and does not quite: the page keeps 101
+rows, so it implies `(10,564 + 101) / 62` bars, which is 172.016 — no whole number of bars produces
+the reported figure if every bar is compared against all 62 materialised sessions. The per-session
+figure is therefore approximate and the one-unit residual is not explained here. The first-shipped
+page puts the count near the same place from the other side: 519 probe blocks at three blocks per
+primary-key descent is about 173 bars. So blocks fall in every row of the table, while the
+`EXPLAIN ANALYZE` times in the first and third rows
 rise. Timed from the client, without `EXPLAIN`, the rise is smaller: page 1's median runs 1.20 ms
 where it ran 1.12, and the deep page's median 1.14 ms where it ran 0.95. Over HTTP the p50s were
 4.80 ms before and 3.33 ms after for page 1, and 4.18 and 3.74 ms for the deep page. Every one of
@@ -1583,9 +1602,11 @@ keyset-paginated, reading only `open` and `close`:
 | inherited `(ts, symbol)` | 1,012 | 0 | 4 |
 | with the partial index | **16** | **4** | 0 |
 
-**63.25× fewer blocks, and the planner chose it unprompted.** **128 MB across four partitions**,
-built in 8 s — a rounded megabyte figure and not a byte reading, since 128 MB here is 2^27 bytes to
-the byte, which four real index sizes do not sum to. Read it as about 32 MB of index per partition.
+**63.25× fewer blocks, and the planner chose it unprompted.** **134,217,728 bytes across four
+partitions**, built in 8 s — the sum of the four children's index sizes as the catalog reports them,
+which is exactly 128 MiB over exactly 16,384 pages, so the per-partition mean is exactly 32.0 MiB.
+The four are not equal: they run from 32,022,528 bytes on `bars_2026_05` to 35,119,104 bytes on
+`bars_2026_03`, and the mean is the only round number among them.
 That table measures the `.sql` form of the access path, taken before the endpoint existed.
 
 **Kept, and the verdict is now read off the endpoint.** On `/analytics/largest-moves` the planner
