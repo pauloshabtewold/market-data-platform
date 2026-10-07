@@ -1,3 +1,4 @@
+import posixpath
 import re
 import shutil
 import subprocess
@@ -188,6 +189,37 @@ def test_the_installed_distribution_migrates_a_database_from_zero(built, install
     assert {"bars", "symbols", "market_days", "ingest_progress"} <= tables
 
 
+# Reachable from the README by decision rather than by accident. Asserted by name because the
+# link-target sweep below cannot tell a deleted link from a document that was never linked.
+_REQUIRED_README_LINKS = ("DEPLOY.md", "LICENSE")
+
+
+def _readme_link_targets(readme: str) -> set[str]:
+    # Every spelling a reader can follow: inline, reference definition and raw HTML. Fenced blocks
+    # go first -- a fenced example documents link syntax rather than linking, so a target inside
+    # one points at nothing and must not be required to exist.
+    prose = re.sub(r"```.*?```", "", readme, flags=re.S)
+    raw = set(re.findall(r"\]\(\s*([^)\s]+)(?:\s+\"[^\"]*\")?\s*\)", prose))
+    raw |= set(re.findall(r"^\s*\[[^\]]+\]:\s*(\S+)", prose, flags=re.M))
+    raw |= set(re.findall(r"<a\s[^>]*?href\s*=\s*[\"']([^\"']+)[\"']", prose, flags=re.I))
+    local = set()
+    for target in raw:
+        # DEPLOY.md#teardown names DEPLOY.md; a bare #section names this page and drops out here
+        target = target.split("#", 1)[0]
+        # protocol-relative carries no scheme colon, so a colon test alone reads it as local
+        if not target or target.startswith("//"):
+            continue
+        if re.match(r"[A-Za-z][A-Za-z0-9+.-]*:", target):
+            continue
+        # ./DEPLOY.md and docs/../LICENSE both name a file at the root
+        target = posixpath.normpath(target)
+        # above the repository root: real if it happens, and not this guard's to resolve
+        if target.startswith(".."):
+            continue
+        local.add(target)
+    return local
+
+
 def test_every_document_a_committed_file_points_an_operator_at_is_tracked_and_carries_text(
     repo_root,
 ):
@@ -204,12 +236,17 @@ def test_every_document_a_committed_file_points_an_operator_at_is_tracked_and_ca
     assert named, "no committed file names a docs/ path, so this test would pass vacuously"
 
     # the pattern above reaches docs/ and nothing else, so a document at the repository root that
-    # README links is unguarded by it. Take README's markdown link targets too, which is how a
-    # reader reaches them: a relative target, no anchor and no scheme, so #section and https: are
-    # both skipped. This is what covers LICENSE, which carries no extension to match on
+    # README links is unguarded by it. Take README's link targets too, which is how a reader
+    # reaches them. This is what covers LICENSE, which carries no extension to match on
     readme = (repo_root / "README.md").read_text()
-    linked = set(re.findall(r"\]\(([^)#:]+)\)", readme))
+    linked = _readme_link_targets(readme)
     assert len(linked) > 1, "README links at most one document, so this half would be near-vacuous"
+    # the link set asserts link -> tracked-and-substantial and never document -> linked, so
+    # DELETING a link silently un-guards the document it pointed at. These two are reachable from
+    # the README by decision; dropping one is a decision and has to be made here rather than by
+    # removing a line somewhere else.
+    for required in _REQUIRED_README_LINKS:
+        assert required in linked, f"README no longer links {required}, which this guard covers"
     named |= linked
 
     tracked = set(
@@ -222,3 +259,17 @@ def test_every_document_a_committed_file_points_an_operator_at_is_tracked_and_ca
         # non-empty and not a stub: the smallest of the two is 14 kB, and a pointer at a file
         # holding a heading and nothing else is the failure this is aimed at
         assert len((repo_root / path).read_text().split()) > 100, path
+
+
+def test_the_built_distribution_publishes_the_readme_as_its_long_description(built):
+    # pyproject declares `readme`, and a declaration pointing at a missing or emptied file still
+    # builds at exit 0 -- the wheel keeps its Description-Content-Type header and carries a
+    # zero-length body, so a published distribution renders a blank page and nothing says so.
+    wheel, _, _ = built
+    archive = zipfile.ZipFile(wheel)
+    metadata = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+    assert len(metadata) == 1, f"expected one METADATA in the wheel, found {metadata}"
+    header, _, body = archive.read(metadata[0]).decode().partition("\n\n")
+    assert "Description-Content-Type: text/markdown" in header, header
+    # the committed README is ~2,500 words; the failure this is aimed at is a body of zero
+    assert len(body.split()) > 100, "the distribution's long description is absent or a stub"
