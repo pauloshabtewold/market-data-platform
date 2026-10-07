@@ -71,7 +71,9 @@ an omission. Three things make it the right one:
   that probe are `Sort Method: quicksort` at 2,466 kB and 37 kB, so neither shape spills at any
   of the three settings. The probe demonstrates work_mem-invariance of the gated total on a query
   that does not spill; it is not a direct measurement of a spilling query's gated total holding
-  steady.
+  steady. **It is a one-off memory probe and its readings stand on their own**: 417 and 514,152 are
+  not cells of any table below and appear in no other passage, so there is no matching figure
+  further down to look for.
 - `shared_buffers` moves the split between `hit` and `read` and never their sum, which is the
   property that makes these figures portable to RDS. **The setting itself was not varied here,
   because it cannot be without restarting the server** — it has `postmaster` context, and no run
@@ -91,7 +93,8 @@ an omission. Three things make it the right one:
   the greater-than-2× run-to-run spread this working set shows and below the 2.4× measured on one
   query further down, so they illustrate the mechanism rather than measure it. Neither the query
   nor its bound parameters was recorded beside them, which is a second reason not to read the three
-  as a series.
+  as a series. **They come from a one-off memory probe too**: 29.8, 43.7 and 46.9 are cells of no
+  table below and appear in no other passage, so nothing further down restates them.
 
 **Three Class C queries spill, and that is not a defect.** At 4 MB, measured on the queries as
 they ship, each spill is three concurrent per-worker external merges rather than one, and the
@@ -446,11 +449,15 @@ the 90 days its parameters bind. There is no selectivity for an index to exploit
 The crossover follows from the cost constants rather than from taste. At `seq_page_cost` 1 and
 `random_page_cost` 4, an index scan visiting a fraction *f* of the heap pays about `4f` per page
 against a sequential scan's `1`, so it can only win below **f ≈ 25%** on a perfectly correlated
-heap, and far below that on an uncorrelated one. Query 5 is the useful check on that reasoning:
-its window puts it at **25,049 root-node blocks against the 514,264 the whole-universe queries
-read — 4.87%**, both post-005 and both from Item 2's table — and the planner *still* chose a
-parallel sequential scan over any index. That is a measured point on the curve rather than a
-derived one. The other five sit at f = 1.0, where no index can win by construction.
+heap, and far below that on an uncorrelated one. Query 5 is the only one of the six that sits off
+f = 1.0: its window puts it at **25,049 root-node blocks against the 514,264 the whole-universe
+queries read — 4.87%**, both post-005 and both from Item 2's table — and the planner *still* chose
+a parallel sequential scan over any index. **4.87% is nowhere near 25%, so this is not a
+measurement of where the crossover lies** — it is a candidate index rejected far below the fraction
+at which the cost constants alone would still let one win. What it bounds is the planner's own
+crossover on this heap, which sits under 4.87%, and that is the uncorrelated half of the sentence
+above rather than its 25% ceiling. The other five sit at f = 1.0, where no index can win by
+construction.
 
 ### Item 4 — the byte math, as a prediction that could have failed
 
@@ -545,8 +552,8 @@ computed from the unrounded values to one decimal. That is why `03_gaps.sql`'s p
 (27 29 28 26 27) likewise print a median of 27 against the reported 26.7 — a verifier
 recomputing the median from the printed column has not found a defect.
 
-Roughly 420 blocks each — 3.28 MiB, since a block is 8 KiB and every figure converted FROM A BLOCK
-COUNT in this document is binary (the working-set sizes above are not among those; each is a
+Roughly 420 blocks each — 3.28 MiB, since a block is 8 KiB and every figure converted from a block
+count in this document is binary (the working-set sizes above are not among those; each is a
 `pg_total_relation_size` byte count and a binary megabyte rendering of it, which is what
 `pg_size_pretty` prints and what the documents carrying those figures label MB) — because partition
 pruning takes this 90-day window down to three monthly partitions — a 90-day window can fall across
@@ -645,7 +652,7 @@ measures a deep page; `DEEP_PAGE_DEPTH` exists because that is a separate questi
 `BARS_PAGE_DEFAULT` and 10,001 is `BARS_PAGE_MAX`. Planning does not vary with `fetch` and is
 therefore reported once per window rather than per cell.
 
-**One EXECUTION cell is not invariant across its five runs, and it is the cell the cap is set
+**One execution cell is not invariant across its five runs, and it is the cell the cap is set
 from.** W-COLD at fetch = 10,001 read `404, 401, 401, 401, 401` — the first run's cold cache
 moved the *blocks*, not only the milliseconds. Every other execution cell in this subsection is
 identical to the block across all five runs. The published 401 is the median and the
@@ -654,7 +661,7 @@ single observation is 404.
 
 **The planning column is not invariant either, but only in three of the nine cells, and the
 reason is not the one you would guess.** The elevated runs are the three `fetch = 101` cells —
-the first time each WINDOW was planned on the connection, not the first time the statement was:
+the first time each **window** was planned on the connection, not the first time the statement was:
 
     W-HOT  fetch=101   68, 36, 36, 36, 36        W-WIDE fetch=101   1242, 852, 852, 852, 852
     W-COLD fetch=101   54, 36, 36, 36, 36
@@ -671,7 +678,7 @@ printed `5729, 571, …` as a `/daily` row; that array is the first statement of
 and is the subject of the `/daily` paragraph further down, not a cell of this table.
 
 The published planning figures are the steady-state medians. **Before quoting one as flat, ask
-whether the connection has planned that WINDOW before — not merely that statement.**
+whether the connection has planned that window before — not merely that statement.**
 
 **A request is two statements, and only one of them is in the table.** Every `/bars` and
 `/daily` request also runs `SELECT 1 FROM symbols WHERE symbol = …` for the 404 tier. Measured
@@ -1298,12 +1305,20 @@ it (table below).
 
 The change trades index probes for an in-memory filter. The equality let the loop probe
 `market_days_pkey` once per bar — 519 of the first-shipped page 1's 524 blocks were those probes.
-Without it the loop filters each bar against the 62 materialised sessions: 10,564 rows removed by
-the join filter on page 1. So blocks fall in every row of the table, while the `EXPLAIN ANALYZE`
-times in the first and third rows rise. Timed from the client, without `EXPLAIN`, the rise is
-smaller: page 1's median runs 1.20 ms where it ran 1.12, and the deep page's median 1.14 ms where
-it ran 0.95. Over HTTP the p50s were 4.80 ms before and 3.33 ms after for page 1, and 4.18 and
-3.74 ms for the deep page. Every one of those times is far inside the Class A target.
+Without it the loop filters each bar against the 62 materialised sessions, and the plan reports
+**10,564 rows removed by the join filter** on page 1. **That counts rejected (bar, session)
+comparisons, not bars read.** 172 bars against 62 sessions is 10,664 comparisons, of which the page
+keeps 101, leaving 10,563 — one short of the reported figure. The bars-read reading is impossible
+beside the same page's 9 blocks, and the first-shipped page puts the bar count in the same place
+from the other side: 519 probe blocks at three blocks per primary-key descent is about 173 bars. So
+blocks fall in every row of the table, while the `EXPLAIN ANALYZE` times in the first and third rows
+rise. Timed from the client, without `EXPLAIN`, the rise is smaller: page 1's median runs 1.20 ms
+where it ran 1.12, and the deep page's median 1.14 ms where it ran 0.95. Over HTTP the p50s were
+4.80 ms before and 3.33 ms after for page 1, and 4.18 and 3.74 ms for the deep page. Every one of
+those times is far inside the Class A target. **The 4.80 and the 4.18 are medians taken in a single
+session whose individual runs this document does not publish**, where 3.33 and 3.74 each carry an
+eleven-run series in the deep-page table below — so only the after side of that pair can be read
+run by run.
 
 **The fix is not universal, and the exception found is a window's own last session, when that
 session also ends a partition without the hot index.** Such a cursor leaves the ordered plan
@@ -1450,9 +1465,11 @@ child's primary key under a plain `Append`. The deepest page's **custom** plan �
 lightly used connection serves — is a bitmap scan of the one surviving child's primary key and a
 small sort. Planning is the axis that moves, and in the deep page's favour: page 1 plans all 71
 children in 852 blocks and the deepest page plans 1 in 8. Most of each HTTP figure is spent outside
-the statement: page 1's execution and planning come to 2.11 ms of its 22.12. Re-measured
-2026-09-15 over seven interleaved rounds again: page 1's HTTP p50 is **19.913 ms**, the deepest
-page's is **18.427 ms**, a ratio of **0.925×** — consistent with the figures above.
+the statement: page 1's execution and planning come to 2.11 ms of its 22.12. **The planning time in
+that 2.11 is not in the table** — the table gives page 1's planning in blocks only, so the 0.366 ms
+execution is the one half of the sum a reader can check against it. Re-measured 2026-09-15 over
+seven interleaved rounds again: page 1's HTTP p50 is **19.913 ms**, the deepest page's is
+**18.427 ms**, a ratio of **0.925×** — consistent with the figures above.
 
 **On a connection shaped like the pool's, the deepest page's plan changes — because `api/deps.py`
 sets no `prepare_threshold` and psycopg's default is 5.** The custom plan above is what the statement runs
@@ -1498,11 +1515,12 @@ settled below, on `/analytics/largest-moves` itself. That endpoint's window cap 
 small: a legal window opens at most five children, and five only for a window running from 31
 January to 1 May of a non-leap year.
 
-To Feature 10 it hands three things. First, plans on RDS can differ, so condition (d) has to be
-re-established there by the relative comparison: the statement as written against the same statement
-with the redundant bound deleted. A child count under 71 is not the test, because a statement
-missing the bound also passes it on any window ending before 2026-06. Second, the hot-window index
-has to be recreated by hand. Third, the session join stays on the bounds alone.
+It hands three things to the step that copies the hot window to the deployed database. First, plans
+on RDS can differ, so condition (d) has to be re-established there by the relative comparison: the
+statement as written against the same statement with the redundant bound deleted. A child count
+under 71 is not the test, because a statement missing the bound also passes it on any window ending
+before 2026-06. Second, the hot-window index has to be recreated by hand. Third, the session join
+stays on the bounds alone.
 
 ## Class B — query 2, the one query with a selective filter
 
@@ -1548,8 +1566,8 @@ Created on the four recent **child** partitions directly, never on the parent. T
 `date_trunc('month', INGEST_END − (HOT_WINDOW_MONTHS − 1) months)` with `HOT_WINDOW_MONTHS = 4`
 — the four most recent **whole** months, 2026-03 through 2026-06. The naive reading,
 `INGEST_END` − 4 months with no truncation to month start, gives `2026-02-28` and would pull
-`bars_2026_02` into the set instead; Feature 10 has to re-derive this cutoff by hand for the RDS
-copy and needs the whole-month rule, not the naive one, to land on the same four partitions:
+`bars_2026_02` into the set instead; the RDS copy has to re-derive this cutoff by hand and needs
+the whole-month rule, not the naive one, to land on the same four partitions:
 
 ```sql
 CREATE INDEX bars_2026_0N_hot_idx ON bars_2026_0N (ts, symbol) INCLUDE (open, close)
@@ -1606,8 +1624,8 @@ partial index no row can satisfy — real catalog entries, real maintenance, zer
 propagated copies then **cannot be dropped individually** (`SQLSTATE 2BP01`; a partition index
 attached to a partitioned index is a dependent object). The parent mistake is all-or-nothing,
 not prune-later. It also has a consequence at `v2`: because the index lives on children,
-`CREATE TABLE ... (LIKE bars INCLUDING ALL)` on RDS copies **no** partial index, and Feature 10
-recreates it by hand over the same `HOT_WINDOW_MONTHS`.
+`CREATE TABLE ... (LIKE bars INCLUDING ALL)` on RDS copies **no** partial index, so the step that
+copies the hot window onto RDS recreates it by hand over the same `HOT_WINDOW_MONTHS`.
 
 The predicate is an explicit `timestamptz` and not `DATE '2026-03-01'`. Comparing a
 `timestamptz` to a `date` coerces through the session zone, which is not `IMMUTABLE`, and

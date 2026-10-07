@@ -21,9 +21,11 @@ Teardown is 14 days after opening, well inside the window on either reading.
 
 A new AWS account carries up to $200 of signup credits valid for up to six months, and there is no
 longer a perpetual free tier to fall back on. This deployment costs roughly $25–30 a month while it
-runs, so it burns about 15% of the balance every month, and credits reaching their expiry closes the
-account rather than warning about it — which is why the teardown date is chosen before any billable
-resource exists and is recorded here rather than remembered.
+runs, so it burns **12.5% to 15%** of the balance a month — a range rather than a figure, because
+the cost is one. At that rate the balance carries 6.7 to 8.0 months of running, against credits
+valid for up to six: **what ends this deployment is the expiry and not the spend**, and credits
+reaching their expiry closes the account rather than warning about it — which is why the teardown
+date is chosen before any billable resource exists and is recorded here rather than remembered.
 
 ## The bound
 
@@ -366,6 +368,12 @@ the explicit vacuum did real work: it took all four to **100.0000%** and truncat
 trailing pages, bringing the page counts to exactly the development database's. **The map does not
 stay empty; it fills part-way, on its own, fast enough to look finished.** Read it immediately or
 the reading argues for skipping the step that produced it.
+
+Those two percentages are a record and not a reproduction, and the reason is the sentence above:
+the window they describe closes within seconds of the copy landing and the vacuum closes it for
+good. Nothing on a finished database can be made to show them again. The only place they become a
+measurement is the **next** copy, read before its vacuum — which is why the step is written as
+read-then-vacuum rather than the other way round.
 
 ### Do not move a partition with a table-level dump
 

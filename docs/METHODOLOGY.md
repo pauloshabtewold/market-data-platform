@@ -92,7 +92,13 @@ flip and two builders following the same instruction write configs 10% apart.
 `DEEP_PAGE_DEPTH` is derived from the unrounded 40,673 ÷ 105 rather than from the 387.36 in the row
 above — recomputing with the rounded figure gives 1,797,350, nine short. The rounded value is what
 `.env` carries, since that is the number config consumes; the depth is taken before the rounding.
-The clamp binds: without it the depth would be 1,797,359.
+
+The `0.8` is headroom rather than a measured quantity. Coverage varies by symbol and by year — this
+page reports a per-symbol spread of 3.02% to 100% below — so the rows a deep cursor can actually
+reach fall short of what one flat per-ticker-day rate projects over `N` tickers and `TD` days, and
+the factor keeps the target depth inside what the data holds. The `min` is the other half of the
+same bound and holds the number down if the feed turns out dense. Here the clamp is what binds:
+without it the depth would be 1,797,359.
 
 `HEAP_INDEX_BYTE_RATIO` is the yardstick for the two coverage queries that scan the primary key,
 and for nothing else. It was measured on a 5-ticker, one-month partition and has since been
@@ -104,8 +110,13 @@ produce that order, and neither does a restore.
 
 `HEAP_INDEX_COVERING_RATIO` is a different index and a different number. Query 7's covering index
 carries four of nine columns, close to a second heap, so it is worth 1.89× where the primary key is
-worth 3.16× — the two are 67% apart on identical data. It is measured only inside the runs that
-build that index for a negative result and drop it again.
+worth 3.16×. The comparison that holds is between the two whole-table figures — the pooled
+**3.1584** from the paragraph above and this key's **1.8924** — because both divide the same
+numerator, `bars`'s heap summed over all 71 children, by one index measured over that same table,
+and they are **67% apart**. The single-partition figure in the table is the wrong partner for it:
+that numerator is one month's heap, so setting it against 1.8924 compares one partition with 71.
+The covering figure is measured only inside the runs that build that index for a negative result and
+drop it again.
 
 **Only one side of that division can be checked against this database, and it is worth knowing
 which.** The numerator, 4,211,064,832, is the live heap of `bars` summed over its 71 children and
@@ -118,6 +129,29 @@ shape, `(symbol, ts) INCLUDE (vwap, volume)`, survives only as a comment in
 rows, which is a write this figure does not justify. The constant is therefore published with its
 divisor as a recorded measurement rather than as a reproducible one, and it is used as a yardstick
 for exactly one query's index and for nothing else.
+
+## Recorded rather than reproducible
+
+Three figures across this page and [Query performance](QUERY_PERFORMANCE.md) are records of a
+measurement rather than reproductions of one. Each becomes a measurement again on a **fresh copy** of
+the data rather than on this database, and the procedure is short enough to write down.
+
+- **The covering index's 2,225,233,920 bytes**, the divisor above. On the copy: build
+  `(symbol, ts) INCLUDE (vwap, volume)`, read the size out of the catalog, drop it. On this database
+  those three steps are a write over 41.7M rows for a number that is already recorded.
+- **The hot-window index's 1,012-block "before" row.** Take it on a copy that carries the plain
+  `(ts, symbol)` index the children inherit and not the four partial ones. Here all four are live, so
+  the state that row describes is not a state this database is in, and reading it would mean dropping
+  them first.
+- **The pre-vacuum 89.7053% all-visible.** Read `relallvisible / relpages` over the children on the
+  next copy **before** `VACUUM (ANALYZE)` runs on them. That reading exists only in the window
+  between the copy landing and the vacuum, and the vacuum closes it for good.
+
+One caveat, which is why the copy is the right place rather than a perfect one: a copy reproduces
+every row count exactly and its byte and block figures are its own. Both follow physical layout, so a
+copy written in a different order from the one this pipeline writes answers a slightly different
+question — the same reason `HEAP_INDEX_BYTE_RATIO` is comparable only across partitions written in
+primary-key order.
 
 ## Feed
 

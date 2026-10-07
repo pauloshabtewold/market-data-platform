@@ -39,7 +39,9 @@ percentage has no answer for, which `docs/QUERY_PERFORMANCE.md` states exactly a
 the loaded data is). All three refuse a window longer than 90 days with a 422;
 the first two take no `limit` or `cursor` and answer with `next_cursor` always null. The
 OpenAPI document is generated from the routes and served at `/openapi.json`, with an
-interactive page at `/docs`.
+interactive page at `/docs`. That page brings one more path with it, `/docs/oauth2-redirect`, which
+the framework mounts beside it and nothing here calls — so the paths named above are the ones this
+project declares, not every path that answers.
 
 **Every refusal has one shape**, whatever the status: an `error` object carrying `code`, `message`
 and `detail`. All three keys are present on every error body, `detail` being nullable rather than
@@ -107,7 +109,10 @@ docker compose up -d --wait db app
 
 The end-to-end suite needs the `app` service running against the loaded database. The `app`
 service loads the code once, at startup, so after changing code run `docker compose restart app`
-before running the end-to-end suite again.
+before running the end-to-end suite again. That service installs the project with `pip install -e .`
+on every start, so its dependency versions are whatever resolve at that moment, while the deployed
+image installs from `requirements.lock` and is pinned: local and deployed behaviour can differ on a
+dependency, and the local side is the one that moves.
 
 ## What's interesting here
 
@@ -152,39 +157,40 @@ already recorded. Widening the window and re-running is the supported path.
 
 ## Hardest bug
 
-A keyset page stopped being a keyset page, and every test said it was fine.
+An endpoint that pages by keyset never once served a keyset page, and every test said it was fine.
 
-`GET /analytics/largest-moves` pages the whole universe on `(ts, symbol)`. Its statement joined
-the minute bars to the trading calendar the way the daily rollup does — a day equality plus the
-half-open session bounds — because that is where the join was copied from. In the rollup the
-equality is right, and its own comment says why: it is what gives the planner a hash, which is
-what a query aggregating a whole window wants. A keyset page wants the opposite. It needs an
-ordered walk that stops after one page.
+`GET /analytics/largest-moves` pages the whole universe on `(ts, symbol)`. As first shipped, its
+statement joined the minute bars to the trading calendar the way the daily rollup does — a day
+equality plus the half-open session bounds — because that is where the join was copied from. In the
+rollup the equality is right, and its own comment says why: it is what gives the planner a hash,
+which is what a query aggregating a whole window wants. A keyset page wants the opposite. It needs
+an ordered walk that stops after one page.
 
 The planner had no statistics for that expression. At page 1 and a 1,001-row fetch it put the
-join at **1,280 rows per process** where the three processes returned **669,829** each. Having
-decided the join was nearly free, it concluded that returning a hundred rows meant reading most
-of the window anyway — so it dropped the ordered nested loop for a **hash join that read every
-remaining row in the window and sorted them to return one page**. Page 1 at the cap read
+join at **1,280 rows per process** where the three processes returned **669,829** each on average.
+Having decided the join was nearly free, it concluded that returning a hundred rows meant reading
+most of the window anyway — so it gave up the ordered nested loop for a **hash join that read
+every remaining row in the window and sorted them to return one page**. Page 1 at the cap read
 **25,035 blocks and 840 ms**, which is the same 25,035 the million-row `OFFSET` query read at
 that point — not a coincidence, since both were running the same hashed join over the same three
-children. Keyset pagination had stopped buying anything. With the join fixed the `OFFSET` form
-reads 5,996 blocks, so the gap it exists to open is against that number, not against 25,035.
+children. Keyset pagination was buying nothing. With the join fixed the `OFFSET` form reads
+5,996 blocks, so the gap it exists to open is against that number, not against 25,035.
 
 What made it survive review is that the threshold moved with the cursor's *position*, and every
 acceptance check pinned one cursor's *depth*. The deep-page test, which exists precisely to catch
 a page that degrades with distance, sat on the safe side: page 1 at **4.80 ms**, the millionth-row
-page at **4.18 ms**, a ratio of 0.87, passing comfortably. Meanwhile a cursor five days from the
-window's end answered in **139 ms, 29× page 1**, on the default limit — a plan that probed 136,357
-rows against a hash and sorted the 136,038 it kept, to return 101.
+page at **4.18 ms** — both medians of a single measurement pass — a ratio of 0.87, passing
+comfortably. Meanwhile a cursor five days from the window's end answered in **139 ms, 29× page 1**,
+on the default limit — a plan that probed 136,357 rows against a hash and sorted the 136,038 it
+kept, to return 101.
 
 The fix was to **delete** a join condition. Joining on the half-open session pair alone removes
 the planner's only hashable predicate, so neither a hash nor a merge join remains available and
-the ordered index-only walk is the only plan left. Deleting a predicate to make a query ninety
-times cheaper is the wrong shape for an optimisation, which is why it took measurement rather than
-reading to find. It is safe because the equality is implied by the bounds: all **1,484** sessions
-open and close inside their own New York date, checked rather than assumed. Page 1 at the cap went
-**25,035 → 14 blocks**, the 139 ms page **822 → 9 blocks** and **3.02 ms** over HTTP.
+the ordered index-only walk is the only plan left. Deleting a predicate so that page 1 at the cap
+reads **14 blocks** where it read **25,035** is the wrong shape for an optimisation, which is why it
+took measurement rather than reading to find. It is safe because the equality is implied by the
+bounds: all **1,484** sessions open and close inside their own New York date, checked rather than
+assumed. The 139 ms page fell the same way, **822 → 9 blocks** and **3.02 milliseconds** over HTTP.
 
 Two things are worth more than the fix. The first is that a guard which reads a SQL constant by
 name does not pin the statement a request actually sends — pointing the route at a second constant
