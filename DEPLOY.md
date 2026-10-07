@@ -22,10 +22,11 @@ Teardown is 14 days after opening, well inside the window on either reading.
 A new AWS account carries up to $200 of signup credits valid for up to six months, and there is no
 longer a perpetual free tier to fall back on. This deployment costs roughly $25–30 a month while it
 runs, so it burns **12.5% to 15%** of the balance a month — a range rather than a figure, because
-the cost is one. At that rate the balance carries 6.7 to 8.0 months of running, against credits
-valid for up to six: **what ends this deployment is the expiry and not the spend**, and credits
-reaching their expiry closes the account rather than warning about it — which is why the teardown
-date is chosen before any billable resource exists and is recorded here rather than remembered.
+the cost is one. At that rate the balance carries 8.0 months of running at $25 and 6.7 at $30,
+against credits valid for up to six: **what ends this deployment is the expiry and not the
+spend**, and credits reaching their expiry closes the account rather than warning about it —
+which is why the teardown date is chosen before any billable resource exists and is recorded here
+rather than remembered.
 
 ## The bound
 
@@ -54,19 +55,26 @@ this account bound nothing today, and the budgets above — with `IncludeCredit`
 bound that actually holds. That is the case this section was written against, and it is the one
 that obtained.
 
-What settles it is Cost Explorer grouped on `RECORD_TYPE`, which separates usage from the credits
-applied against it. For 2026-10-07:
+**What discriminates is the pair of readings taken at the same moment**, below: gross spend of
+$0.948 against `EstimatedCharges` publishing **0.0** on every one of **seven** datapoints spanning
+37 hours. A metric that were gross but merely lagging would have moved by the third of those; one
+that reads zero against known spend is reporting after credits are applied. That pair is the
+evidence, and it is what replaces the two-explanations standoff this section used to record.
+
+Cost Explorer grouped on `RECORD_TYPE` shows the same thing from the other side, and is
+corroboration rather than the warrant — it is a fact about Cost Explorer's netting, not about the
+CloudWatch metric. For 2026-10-07:
 
 | record type | unblended |
 | --- | ---: |
 | `Usage` | **+0.1368083634** USD |
 | `Credit` | **−0.1368083654** USD |
-| net | **0** |
+| net | **−0.000000002** |
 
-So real usage is accruing and credits are cancelling it to zero, which is why an ungrouped Cost
-Explorer query answers `0` and why `EstimatedCharges` has published nothing but **0.0** across
-every datapoint since the account opened. Neither zero means the account is free; both mean the
-credits are doing their job and the metric is reporting after they are applied.
+The residual is AWS's own rounding in applying the credit; the two figures cancel to nine decimal
+places. So real usage is accruing and credits are cancelling it, which is why an ungrouped Cost
+Explorer query answers `0` as well. Neither zero means the account is free; both mean the credits
+are doing their job.
 
 **The budgets see through it, which is the whole reason they exist.** Read 2026-10-07 against
 limits of $5 and $20, `IncludeCredit` `false`:
@@ -76,10 +84,13 @@ market-data-5    ActualSpend 0.948    limit 5.0
 market-data-20   ActualSpend 0.948    limit 20.0
 ```
 
-$0.948 of gross spend over the 38.7 hours since the database came up is about **$0.59 a day**, or
-**$18 a month** — against the $25–30 estimated above, so the estimate is modestly high rather than
-wrong. Twelve days from that reading to the teardown date is roughly **$7**, about 3.5% of a $200
-balance.
+**$0.948 is month-to-date**, and the budget period opens 2026-10-01 while the account's first
+billable resource — the image repository — exists from 2026-10-06T01:41Z, so the figure covers
+**40.4 billable hours**, of which the database accounts for 38.7. That is about **$0.56 a day** or
+**$17 a month** against the $25–30 estimated above, so the estimate is modestly high rather than
+wrong. Twelve days of it to the teardown date is roughly **$7**, about 3.4% of a $200 balance.
+Dividing by the database's 38.7 hours alone gives $0.59 a day and $18 a month; the difference is
+pennies of repository storage and the lower figure is the one the readings support.
 
 **Two things follow for anyone reading the alarms.** An alarm in `OK` on this account is not
 evidence of no spend, and it will stay in `OK` until the credits are exhausted, at which point it
@@ -166,7 +177,7 @@ Log group: /ecs/market-data-api
 SSM parameter: /market-data/DATABASE_URL
 Service SG: sg-0836f2ca88ccf54ee
 RDS SG: sg-0e7293540c59bf35c
-Public address: http://100.58.98.13:8000
+Public address: http://100.58.98.13:8000/docs   (the bare address has no route and answers 404)
 RDS /32 opened: 2026-10-06T03:29:42Z
 RDS /32 closed: 2026-10-06T03:30:47Z
 RDS /32 opened: 2026-10-06T06:11:04Z
@@ -210,8 +221,11 @@ not active, and any figure taken in that state is measured on the defaults inste
 **Two differences cannot be pinned, and both are recorded rather than worked around.**
 `shared_buffers` has `postmaster` context, so it is fixed at instance start: it reads **23081
 pages (≈180 MB)** here against **16384 pages (128 MB)** on the development database. That one is
-benign for block counts — `shared_buffers` moves the hit/read split and not the sum — which is
-why the pinned three are the ones that enter the cost model. The second is total instance RAM:
+benign for block counts, and the reason is definitional rather than measured: `Shared Hit +
+Shared Read` is the number of blocks the executor touched, and residency decides only which of the
+two counters increments. No hit/read split is published on either side here, so the claim rests on
+what the counters mean and not on a reading. Which is why the pinned three are the ones that enter
+the cost model. The second is total instance RAM:
 `db.t4g.micro` is 1 GiB against the development host's 8 GiB. `TimeZone` is `UTC` on both.
 
 ### Why the database is publicly accessible
@@ -270,6 +284,14 @@ that is ruled out on cost or a certificate on an address that changes with the t
 acceptable here because the payload is read-only public market data — there is no authentication,
 no credential and no personal data in any request or response for transport encryption to protect.
 
+**Storage is not encrypted at rest.** `StorageEncrypted` is `false` and no KMS key is attached.
+The argument is the same one that rules out TLS above — the payload is read-only public market
+data, with no credential and no personal data in it — but unlike TLS this one costs nothing:
+`--storage-encrypted` at create time uses the AWS-managed key at no charge. It is recorded here
+because it is a choice rather than an oversight, and because like `PubliclyAccessible` it cannot
+be turned on for a live instance without a snapshot and restore. A deployment holding anything
+private would set it.
+
 `assignPublicIp` is `ENABLED`. That single setting is what lets a task in a public subnet pull
 its image with no NAT gateway; without it the task dies before the application runs. The subnets
 are public by route, not merely by flag — the route table carries a default route to an internet
@@ -326,14 +348,19 @@ deployed instance:
 | `bars_2026_06` | 167,501,824 |
 | sum | **658,350,080** |
 
-Those are total relation sizes — the heap plus the three indexes each child carries. The heap alone
-is 276,185,088 bytes, so 58.05% of the figure is index.
+Those are total relation sizes — the heap plus the three indexes each child carries. **The split
+between heap and index was not read on the deployed instance**, because reading it needs a `psql`
+session and therefore one of the temporary ingress windows recorded above, and no step needed one
+for this. On the development database the same four partitions' heap is 276,185,088 of
+584,130,560 bytes, so 52.72% of the local figure is index — and by the paragraph below, the copy's
+own split is its own and will differ.
 
-**Take this figure from the deployed instance and from nowhere else.** The same four partitions on
-the development database sum to 584,130,560 bytes, 12.63% smaller, with identical row counts either
-side: a copy builds its own heap and its own indexes rather than reproducing the source's page
-layout, and the fill factor the copy arrives at is its own. A size measured locally is a measurement
-of the source, and publishing it as the size of the copy understates the copy.
+**Take the size figure from the deployed instance and from nowhere else.** The same four partitions
+on the development database sum to 584,130,560 bytes, **11.27% smaller** — equivalently the copy is
+12.71% larger — with identical row counts either side: a copy builds its own heap and its own
+indexes rather than reproducing the source's page layout, and the fill factor the copy arrives at
+is its own. A size measured locally is a measurement of the source, and publishing it as the size of
+the copy understates the copy.
 
 `symbols` and `market_days` are left out of the sum. At 100 and 1,484 rows they add a fraction of a
 megabyte, and the four partitions alone decide the comparison below.
@@ -442,8 +469,9 @@ and the structured plan's root cross-checked against the text plan's.
 Two conditions of that comparison are recorded beside every figure taken from it. The pinned
 settings are `work_mem` 4096 kB, `effective_cache_size` 524288 pages and
 `max_parallel_workers_per_gather` 2. The unpinnable difference is `shared_buffers`, 23081 pages
-here against 16384 locally, which moves the proportion of a read that comes from cache and not the
-number of blocks read.
+here against 16384 locally. That moves which counter a touched block lands in and not how many
+blocks are touched — `Shared Hit + Shared Read` is the total either way — which is a property of
+what the counters count rather than something measured on these two instances.
 
 ## Teardown
 
@@ -556,14 +584,15 @@ populate. Run the same query over a day while the service was up as a control �
 non-zero figure, because "$0" is also what an unenabled Cost Explorer and a mistyped time period
 both print.
 
-**That control has never returned a non-zero figure, so this check is unexercised.** Tried on
-2026-10-06 over a day the service was up, the query answers `DataUnavailableException`: there is no
-Cost Explorer data for this account yet, which makes the control as unrunnable today as the check it
-guards. Both of the states it exists to separate — a genuine $0 and a Cost Explorer that never
-populated — print the same thing right now. **Run the control before the teardown date rather than
-on it.** A non-zero reading over a service-up day is the whole thing that turns item 8's $0 into
-evidence, and finding out on the teardown date that no such reading can be had leaves no day left to
-take one on. Each Cost Explorer API request is itself billable, so run it once and do not poll it.
+**The control has now returned a non-zero figure, so this check is exercised.** Tried on
+2026-10-06 the query answered `DataUnavailableException` — the account was 22 hours old against Cost
+Explorer's roughly 24-hour first ingest, so the control was as unrunnable as the check it guards,
+and both of the states it exists to separate printed the same thing. Run again on 2026-10-07 over a
+day the service was up, the `RECORD_TYPE`-filtered query returns **`Usage` +0.1368083634 USD**. That
+is the reading that turns item 8's $0 into evidence: a genuine $0 after teardown is now
+distinguishable from a Cost Explorer that never populated. **Do not re-run it to confirm** — each
+Cost Explorer API request is billable, three have been spent reaching this figure, and the one
+remaining use for the API is item 8's own post-teardown query.
 
 - [ ] 9. After the $0 confirmation: the SNS topic and subscription, the two alarms, the two budgets
 
