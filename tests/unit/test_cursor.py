@@ -231,19 +231,44 @@ def test_json_loads_failures_besides_jsondecodeerror_are_also_not_json():
         assert excinfo.value.code == "invalid_cursor"
         assert excinfo.value.detail["reason"] == "not_json"
 
-    # deeply nested brackets are refused too, but which reason they carry is a property of the
+    # deeply nested brackets are refused too, and which reason they carry is a property of the
     # interpreter rather than of this decoder: through 3.13 json.loads recurses and raises
     # RecursionError, so the payload never parses and the reason is not_json; 3.14's parser is
-    # iterative, returns a list, and the field check refuses it as wrong_fields. The refusal is the
-    # contract the wire publishes -- 400 invalid_cursor either way -- so that is what is pinned,
-    # and pinning one of the two reasons here would fail on half the interpreters this supports
-    deep = _raw_cursor("[" * 9999 + "]" * 9999)
+    # iterative, returns a list, and the field check refuses it as wrong_fields.
+    #
+    # Which one applies is decided by ASKING the interpreter rather than by accepting either.
+    # Accepting either leaves the reason unpinned on both: a decoder that answered wrong_fields
+    # for a RecursionError would satisfy a two-value assertion on every interpreter, and that is
+    # the one thing this case exists to catch.
+    nested = "[" * 9999 + "]" * 9999
+    try:
+        json.loads(nested)
+    except RecursionError:
+        expected = "not_json"      # the parser never produced a value
+    else:
+        expected = "wrong_fields"  # it produced a list, and the field check is what refuses it
+    deep = _raw_cursor(nested)
     for shape in (UNIVERSE_CURSOR, SYMBOLS_CURSOR):
         with pytest.raises(ApiError) as excinfo:
             decode_cursor(shape, deep)
         assert excinfo.value.status == 400
         assert excinfo.value.code == "invalid_cursor"
-        assert excinfo.value.detail["reason"] in ("not_json", "wrong_fields")
+        assert excinfo.value.detail["reason"] == expected
+
+
+def test_a_payload_that_parses_to_something_other_than_an_object_is_wrong_fields():
+    # set(payload) over a non-dict either raises or compares a set of characters, so the
+    # isinstance half of the field check is what turns these into a refusal rather than a
+    # TypeError escaping decode_cursor as a 500 before any connection is acquired. Every other
+    # cursor case in this suite supplies an object, so nothing else reaches that half -- and on
+    # 3.14 it carries the deeply-nested case above as well, where the parser now returns a list.
+    for literal in ("5", "null", "true", '"AAA"', "[1,2]", "[]", "1.5"):
+        for shape in (UNIVERSE_CURSOR, SYMBOLS_CURSOR):
+            with pytest.raises(ApiError) as excinfo:
+                decode_cursor(shape, _raw_cursor(literal))
+            assert excinfo.value.status == 400
+            assert excinfo.value.code == "invalid_cursor"
+            assert excinfo.value.detail["reason"] == "wrong_fields", literal
 
 
 def test_a_timestamp_that_overflows_converting_to_utc_is_unparsable():
