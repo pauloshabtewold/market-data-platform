@@ -1,14 +1,8 @@
--- query 4: volume profile by hour of the session, across the whole universe.
+-- query 4: volume profile by hour of the session, universe-wide. class C, judged on optimality.
 -- parameters: none
--- Universe-wide, whole window: the parameter table binds nothing here. Class C -- every row is
--- read by definition, so it is judged on evidence of optimality, not a speedup. NO scalar bound
--- on bars.ts: nothing to bind, and a predicate true of every row is not free to the planner.
--- Session definition is 06_daily_rollup.sql's.
---
--- Bucketed on ts - open_ts like query 1: under the mandated TimeZone=UTC, date_trunc('hour', ts)
--- bins one 09:30 ET open into hour 14 in EST months and 13 in EDT, smearing every hour into its
--- neighbour across the third of the sample in the other offset. Minutes-since-open is DST-immune
--- and half-day-correct -- a 13:00 ET close adds no late hours.
+
+-- bucketed on ts - open_ts like query 1: date_trunc('hour', ts) bins a 09:30 ET open into hour 14
+-- in EST and 13 in EDT. Minutes-since-open is DST-immune and half-day-correct
 
 WITH session_bars AS (
     SELECT
@@ -21,9 +15,8 @@ WITH session_bars AS (
 )
 SELECT
     session_hour,
-    -- the bucket start in wall-clock ET, since "hour 0" is not what a reader wants and every
-    -- session opens at 09:30 ET. not a range: the close truncates the last bucket, by 30 minutes
-    -- on a normal day and entirely on a half day, so "15:30-16:30" would be wrong on every row
+    -- the bucket start in wall-clock ET, not a range: the close truncates the last bucket, so
+    -- "15:30-16:30" would be wrong on every row
     to_char(TIME '09:30' + (session_hour || ' hours')::interval, 'HH24:MI') AS et_from,
     count(*)                                        AS bars,
     count(DISTINCT symbol)                          AS symbols,

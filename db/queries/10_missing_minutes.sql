@@ -1,31 +1,17 @@
--- query 10: missing-minute share per symbol per month, over the window.
+-- query 10: missing-minute share per symbol per month. class C, 09_coverage.sql's complement.
 -- parameters: :start :end
--- class C: reads every row of the universe. Judged on evidence of optimality, not a speedup.
---
--- NO scalar bound on bars.ts, the exception 09_coverage.sql takes and for the same reason: this
--- file is judged on a byte-ratio-versus-block-ratio agreement measured on the UNBOUNDED form, and
--- a range predicate true of every row is not free -- it can flip the planner's free choice between
--- a seq scan and an index-only scan and corrupt the number being measured.
---
--- MISSING minutes, not zero-volume minutes, and that difference is the whole metric. The feed
--- emits no bar when a minute has no print, and emits one only if no field is 0 -- so a stored bar
--- with volume = 0 essentially cannot exist and the zero-volume form of this query returns 0.00%
--- for every symbol in every month: implemented-looking, fast, and measuring nothing. The iex
--- liquidity signal lives in the minutes that produced no bar, so the metric is absence.
---
--- Worth saying out loud because a reviewer spots it in ten seconds and it is not a defect: over
--- the same slice this is 100 - query 9's coverage. Kept as its own file because the roles differ
--- -- 9 is one number per symbol over the whole window and gates the pipeline; 10 is per symbol
--- per MONTH so seven years of drift is visible, and never gates. They do NOT complement on a
--- symbol's first partial month: 9's denominator is floored at first_bar_ts and this one's is not,
--- because a month a symbol had not yet listed for really did have session minutes with no bar.
 
--- bounded is NOT MATERIALIZED for 09_coverage.sql's reason: referenced twice, so Postgres
--- materialises it by default, and a materialised CTE carries no statistics for the planner to cost
--- a hash join against. Without it this plans as a merge join that sorts every bar in the database.
--- One observation per variant, not a median: 131.1 s serial with a 1.2 GB spill against 42.6 s
--- with 71 parallel scans, 2 workers and no spill. The structural half is a plan property and
--- holds; treat the timings as indicative, not a ratio.
+-- no scalar bound on bars.ts, for 09_coverage.sql's reason: it would flip the planner's free
+-- choice and corrupt the byte ratio being measured.
+
+-- MISSING minutes, not zero-volume minutes, and that is the whole metric: the feed emits no bar
+-- at all for a printless minute, so the zero-volume form returns 0.00% for every symbol.
+
+-- not a duplicate of 9 despite being its complement: 9 is per symbol and gates the pipeline, 10
+-- is per MONTH and never gates, and they differ on a symbol's first partial month
+
+-- bounded is NOT MATERIALIZED for 09_coverage.sql's reason. One observation per variant, not a
+-- median: 131.1 s serial with a 1.2 GB spill against 42.6 s parallel with no spill
 WITH bounded AS NOT MATERIALIZED (
     SELECT day, open_ts, close_ts, session_minutes
     FROM market_days

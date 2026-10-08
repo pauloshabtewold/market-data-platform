@@ -68,9 +68,8 @@ def mask_secrets(text, dsn) -> str:
         return "***"
 
 
-# module-level so a test can monkeypatch either down: the wait for a pool slot before PoolTimeout,
-# and how long a statement runs before Postgres cancels it, so one slow client or stuck query
-# cannot starve the pool
+# module-level so a test can monkeypatch either down: the wait for a pool slot, and how long a
+# statement runs before Postgres cancels it
 POOL_CHECKOUT_TIMEOUT_SECONDS = 5.0
 STATEMENT_TIMEOUT_SECONDS = 5.0
 # how long a checked-out connection has to answer its empty query: the wait above ends at handover,
@@ -171,8 +170,7 @@ def build_pool(
         open=False,
         kwargs={
             # paginate indexes rows by cursor field name, so psycopg's default tuples 500 on the
-            # first page with a successor -- never earlier, since paginate returns early when rows
-            # fit the limit. here, not in configure, so replacing that callback cannot drop it
+            # first page with a successor. Here, not in configure, so replacing that cannot drop it
             "row_factory": dict_row,
             # psycopg's default is 130 s, and a worker stuck that long on a host dropping packets
             # cannot replace a discarded connection once it is back

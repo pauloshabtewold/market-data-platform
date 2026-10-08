@@ -12,19 +12,15 @@ from api.errors import INTERNAL_MESSAGE, RESPONSE_500, ApiError, install_error_h
 from api.routes import router
 from config import hot_window_configuration_problems, settings
 
-# well under an ALB's 5 s default health-check timeout, with room for the probe. The check runs on
-# the loop on its own connection, off the pool and the 40-thread limiter every sync def route
-# shares, so a burst elsewhere cannot delay it; only an async ApiError handler holds the bound while
-# building its 500
+# well under an ALB's 5 s default health-check timeout. The check runs on its own connection, off
+# the pool and the thread limiter, so a burst elsewhere cannot delay it
 HEALTH_TIMEOUT_SECONDS = 2.0
 
 log = logging.getLogger(__name__)
 
 
-# The healthy 200's shape, via the route's `responses` and never response_model, as for the page
-# models. A comment, not a docstring: a docstring on a published model becomes that schema's
-# `description`, which every generated client carries as class documentation and the page renders as
-# one run-on line. The client-facing wording is in the route's own 200 entry.
+# via the route's `responses`, never response_model. A comment and not a docstring: a docstring on
+# a published model becomes that schema's `description` in every generated client
 class HealthResponse(BaseModel):
     status: str
     version: str
@@ -84,9 +80,8 @@ async def _select_one(pgconn: pq.abc.PGconn) -> None:
         if result.status == pq.ExecStatus.TUPLES_OK and result.ntuples == 1:
             answers.append(result.get_value(0, 0))
         else:
-            # the status beside libpq's message, as the pool's check reports one: a result carrying
-            # no error gets the non-empty placeholder "no error details available" -- COMMAND_OK, an
-            # empty query and a two-row answer all do -- so the message alone names nothing
+            # the status beside libpq's message: a result carrying no error still gets the non-empty
+            # placeholder "no error details available", so the message alone names nothing
             answers.append((pq.ExecStatus(result.status).name, result.get_error_message()))
     # a refused query answers with an error result rather than raising
     if answers != [b"1"]:
@@ -122,9 +117,8 @@ def _failed_check_logger(dsn: str):
         if task.cancelled() or task.exception() is None:
             return
         exc = task.exception()
-        # once per check, however many probes shared it: class plus libpq's message tells an auth
-        # failure, a full server, a DNS failure and a timeout apart. libpq echoes an unparseable
-        # connection string, password included, so the line is masked against this app's own dsn
+        # once per check, however many probes shared it. libpq echoes an unparseable connection
+        # string, password included, so the line is masked against this app's own dsn
         log.warning(
             "database check failed: %s: %s",
             type(exc).__name__,
@@ -168,15 +162,13 @@ def create_app(dsn: str | None = None) -> FastAPI:
         # /health's own version: FastAPI defaults to a literal 0.1.0, stale at the first release
         title="Market Data Platform",
         version=build_version(),
-        # generated from the routes, so the page cannot describe an unserved endpoint. docs_url is
-        # honoured only while openapi_url is set, so that line publishes or withdraws the surface;
-        # ReDoc is off because the surface is one generated page, not two renderings of it
+        # docs_url is honoured only while openapi_url is set, so that line publishes or withdraws
+        # the whole surface
         docs_url="/docs",
         redoc_url=None,
         openapi_url="/openapi.json",
-        # a 307 to the unslashed path has no body, the one response escaping the single error shape;
-        # off, an unrouted /health/ is the 404 the handler builds. Governs this app's own router,
-        # which every include_router route joins -- an app.mount()ed sub-app keeps its own 307.
+        # a 307 to the unslashed path has no body, escaping the single error shape. Governs this
+        # app's own router only -- an app.mount()ed sub-app keeps its own
         redirect_slashes=False,
     )
     install_error_handlers(app)

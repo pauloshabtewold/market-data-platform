@@ -1,24 +1,13 @@
--- query 7: VWAP per symbol per day, checked against the feed's own per-bar vwap column.
+-- query 7: VWAP per symbol per day against the feed's own vwap column. class C.
 -- parameters: none
--- Universe-wide, whole window: the parameter table binds nothing here. Class C -- no index
--- improves it and no rewrite avoids the scan, so it is judged on evidence of optimality, not a
--- speedup. Session definition is 06_daily_rollup.sql's.
---
--- NO scalar bound on bars.ts, deliberately: a range predicate true of every row is still
--- evaluated on every row, and pushing one into an Index Cond makes the covering-index path
--- cheaper -- flipping the planner's free choice from Seq Scan to Index Only Scan and corrupting
--- the very ratio HEAP_INDEX_COVERING_RATIO is measured against. Measure the file, not a variant.
---
--- The index it would scan is the covering one, (symbol, ts) INCLUDE (vwap, volume) -- never the
--- PK, which carries neither vwap nor volume and can never serve it index-only. So reading
--- symbol, ts, vwap and volume and NOTHING ELSE is a constraint, not a coincidence, and adding a
--- column is not free: reconstructing a typical price from high, low and close reads well and
--- quietly makes an index-only scan impossible -- measured, the forced scan then reported 0
--- index-only scans and 682,813 root blocks against the seq scan's 514,260, a ratio of 0.75x,
--- with the byte-ratio prediction missing by 60%.
---
--- Everything stays numeric and exact: no corr, sqrt, ln or percentile_cont here to cross into
--- double precision.
+
+-- NO scalar bound on bars.ts: pushing one into an Index Cond flips the planner's free choice to
+-- an index-only scan and corrupts the ratio HEAP_INDEX_COVERING_RATIO is measured against.
+
+-- the index is the covering (symbol, ts) INCLUDE (vwap, volume), so reading those four columns and
+-- NOTHING ELSE is a constraint: adding one read 682,813 root blocks against the seq scan's 514,260
+
+-- everything stays numeric and exact: nothing here crosses into double precision
 
 WITH stamped AS (
     -- every bar, extended hours included: that delta is what this query exists to explain

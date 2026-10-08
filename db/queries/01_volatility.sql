@@ -1,13 +1,8 @@
--- query 1: realized volatility by time-of-day bucket, per symbol.
+-- query 1: realized volatility by time-of-day bucket, per symbol. class A, target <100 ms.
 -- parameters: :symbol :start :end
--- class A, target <100 ms. bind :end = INGEST_END and :start = :end - AGG_MAX_WINDOW_DAYS.
---
--- Buckets on ts - open_ts, which a daily rollup cannot express, so it reads bars. Session
--- definition is 06_daily_rollup.sql's.
---
--- Multi-minute returns are KEPT and NOT SCALED: a printless iex minute yields no row, and
--- 1/sqrt(minutes) would assume iid diffusion increments where gaps track thin liquidity,
--- inflating quiet periods. avg_minutes_per_return exposes the sparsity instead.
+
+-- multi-minute returns are kept and NOT scaled: 1/sqrt(minutes) would assume iid increments
+-- where iex gaps track thin liquidity. avg_minutes_per_return exposes the sparsity instead
 
 WITH session_bars AS (
     SELECT m.day, m.open_ts, b.ts, b.close
@@ -23,15 +18,12 @@ WITH session_bars AS (
 ),
 returns AS (
     SELECT
-        -- minutes since the day's own open, never a UTC hour: date_trunc('hour', ts) bins one
-        -- 09:30 ET open into hour 14 under EST, 13 under EDT -- opening burst split, every bucket
-        -- contaminated for a third of the sample. minutes-since-open is DST- and half-day-proof
+        -- minutes since the day's own open, never a UTC hour: date_trunc bins a 09:30 ET open
+        -- into hour 14 under EST and 13 under EDT, contaminating every bucket
         ((EXTRACT(epoch FROM ts - open_ts) / 60)::int / 30) * 30 AS bucket_minute,
         close,
-        -- one named window, so the two lags cannot disagree on which row is previous. without its
-        -- ORDER BY rows come in physical order and every return is garbage with a plausible
-        -- stddev. PARTITION BY day keeps the opening bar off the prior session's close -- the
-        -- overnight gap, which query 3 measures
+        -- one named window so the two lags cannot disagree, and without its ORDER BY every return
+        -- is garbage with a plausible stddev. PARTITION BY day keeps the overnight gap out
         lag(close) OVER w AS prev_close,
         EXTRACT(epoch FROM ts - lag(ts) OVER w) / 60 AS span_minutes
     FROM session_bars

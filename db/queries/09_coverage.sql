@@ -1,16 +1,11 @@
 -- query 9: per-symbol coverage, and the pipeline's gate query. one file, never a second copy.
 -- parameters: :start :end
--- they bound the market_days day range and nothing else. no scalar bound on bars.ts: Class C,
--- judged on a byte ratio measured on the unbounded form, which a 100%-true range predicate flips
--- by changing the planner's free choice.
 
--- bounded is NOT MATERIALIZED deliberately: referenced three times it would be materialised by
--- default, and a materialised CTE carries no statistics, so the planner cannot cost a hash join
--- against it, falls back to a merge join and sorts every bar in the database. Inlining restores
--- market_days' statistics and the plan becomes a parallel hash join. Measured on the full
--- universe, medians of three interleaved runs: 179.4 s serial, merge join and a spill, against
--- 58.3 s with 71 parallel scans, 2 workers and no spill. docs/QUERY_PERFORMANCE.md carries the
--- four-variant table and the run spread.
+-- no scalar bound on bars.ts: class C, judged on a byte ratio measured on the unbounded form,
+-- which a 100%-true range predicate flips by changing the planner's free choice
+
+-- bounded is NOT MATERIALIZED: materialised it carries no statistics, so the planner falls back
+-- to a merge join and sorts every bar. Measured, 179.4 s serial against 58.3 s parallel
 WITH bounded AS NOT MATERIALIZED (
     SELECT m.day, m.open_ts, m.close_ts, m.session_minutes
     FROM market_days m
@@ -32,11 +27,7 @@ expected AS (
 ),
 actual AS (
     -- joined to the 1,484-row calendar, not the 148,400-row session set: a symbol equality key
-    -- makes the sides 148k against 41.7M, which the planner serves with a merge join and a
-    -- 5,264 kB spill. dropping it costs nothing -- first_bar_ts is MIN(ts), so no bar precedes
-    -- its own symbol's floor, and the LEFT JOIN below already discards any symbol not in
-    -- expected. the 1.2 GB also filed against this query in docs/QUERY_PERFORMANCE.md belongs to
-    -- a variant that drops the key but still materialises bounded, and ships nowhere
+    -- costs a merge join and a 5,264 kB spill, and first_bar_ts being MIN(ts) makes it redundant
     SELECT b.symbol, count(*)::numeric AS bars
     FROM bounded d
     JOIN bars b
@@ -56,11 +47,8 @@ per_symbol AS (
     LEFT JOIN actual a ON a.symbol = e.symbol
 ),
 expected_units AS (
-    -- every trading month of the window for every ingested symbol, NOT floored at first_bar_ts:
-    -- a late-listed symbol still gets a progress row per pre-listing month, an empty vendor
-    -- payload being a completed unit, while a FAILED month leaves none. flooring would drop
-    -- exactly those failed leading months from the expected set and report zero missing on a run
-    -- that lost them
+    -- NOT floored at first_bar_ts: an empty payload is a completed unit and a FAILED month leaves
+    -- no row, so flooring would drop the failed leading months and report zero missing
     SELECT i.symbol, m.month
     FROM ingested i
     CROSS JOIN (SELECT DISTINCT date_trunc('month', day)::date AS month FROM bounded) m

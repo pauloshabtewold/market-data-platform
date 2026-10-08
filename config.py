@@ -45,20 +45,16 @@ class Settings(BaseSettings):
     RATE_LIMIT_RPM: int = 200
     HTTP_MAX_ATTEMPTS: int = 5
     AGG_MAX_WINDOW_DAYS: int = 90
-    # one value for both the hot-window index predicate and the month list the deploy copies to RDS,
-    # so index and copy cannot drift. Counted back from INGEST_END's month, it must reach
-    # AGG_MAX_WINDOW_DAYS before INGEST_END -- the widest window the AGGREGATING endpoints accept;
-    # /bars has no cap. hot_window_configuration_problems holds the rule, create_app enforces it
+    # one value for both the hot-window index predicate and the month list the deploy copies, so the
+    # two cannot drift. It must reach AGG_MAX_WINDOW_DAYS before INGEST_END, which create_app checks
     HOT_WINDOW_MONTHS: int = 4
 
     # measured on the loaded database: 19 root blocks for a default page, 401 at the cap, on the
     # worst of three windows. docs/QUERY_PERFORMANCE.md has the windows and the index behind each
     BARS_PAGE_DEFAULT: int = 1000
     BARS_PAGE_MAX: int = 10000
-    # measured on /analytics/largest-moves, the only endpoint reading these that fills a default
-    # page: at min_move_pct = 0, page 1's worst over two windows is 121 root blocks and 1,024 at the
-    # cap, and a cursor inside a session reads more. docs/QUERY_PERFORMANCE.md has both, what a
-    # threshold costs, and the bounds a request runs under
+    # measured: at min_move_pct = 0 a default page costs 121 root blocks and the cap 1,024.
+    # docs/QUERY_PERFORMANCE.md has the windows and the bounds a request runs under
     AGG_PAGE_DEFAULT: int = 100
     AGG_PAGE_MAX: int = 1000
     DB_POOL_MIN: int = 1
@@ -66,10 +62,8 @@ class Settings(BaseSettings):
     # NonBlankStr like the other six string keys, and the closed vocabulary below is checked against
     # the stripped value
     LOG_LEVEL: NonBlankStr = "INFO"
-    # the e2e suite's target, defaulted because CI starts no service. The window is exactly
-    # AGG_MAX_WINDOW_DAYS and sits inside the hot window the deploy copies, so the same suite runs
-    # against either database. Plain str, not NonBlankStr: e2e_configuration_problems reports an
-    # empty value by name before the first request, and the API and ingest keep starting
+    # the e2e suite's target, defaulted because CI starts no service. Plain str, not NonBlankStr:
+    # e2e_configuration_problems names an empty value, and the API and ingest keep starting
     E2E_BASE_URL: str = "http://127.0.0.1:8000"
     E2E_START: date = date(2026, 4, 1)
     E2E_END: date = date(2026, 6, 30)
@@ -78,11 +72,8 @@ class Settings(BaseSettings):
     BARS_PER_TICKER_DAY: float | None = None
     DEEP_PAGE_DEPTH: int | None = None
     HEAP_INDEX_BYTE_RATIO: float | None = None
-    # query 7's ceiling, and a different index: 9 and 10 scan the PK, 7 needs vwap
-    # and volume and can only be served by the covering index. Its numerator is the whole table's
-    # heap over every child, where the key above divides one partition's heap by that partition's PK
-    # -- so its partner is the pooled whole-table ratio, not the key above. Two keys because on the
-    # same basis they measure far apart, and one invites judging 7 against the PK's number
+    # query 7's ceiling, against the covering index rather than the PK. Its numerator is the whole
+    # table's heap, so its partner is the pooled whole-table ratio and not the key above
     HEAP_INDEX_COVERING_RATIO: float | None = None
 
     @field_validator(
@@ -95,9 +86,7 @@ class Settings(BaseSettings):
     @classmethod
     def _an_empty_measured_key_is_unset(cls, value):
         # .env.example ships these four as `KEY=` until measured, and unset is what makes require()
-        # name the key at use rather than a parse error killing every import. Blank, not only empty:
-        # dotenv trims an unquoted value, so `KEY=` and `KEY=   ` arrive as "" while `KEY="  "` keep
-        # its spaces -- one intent written three ways, and a rule against "" alone misreads two
+        # name the key at use rather than a parse error killing every import. Blank, not only empty
         return None if isinstance(value, str) and not value.strip() else value
 
     @model_validator(mode="after")
@@ -144,10 +133,8 @@ def hot_window_configuration_problems(settings: Settings) -> list[str]:
             f"HOT_WINDOW_MONTHS={months} reaches back before year 1 from"
             f" INGEST_END={settings.INGEST_END}"
         ]
-    # here, beside the rule it protects: a missing floor does not merely accept a
-    # bad value, it switches this check off, since the span below is never negative and so can only
-    # clear a cap of zero or less. AGG_MAX_WINDOW_DAYS is read by api/routes.py alone, and a floor
-    # Settings would stop db.migrate and the ingest importing over a key neither reads
+    # here, beside the rule it protects: a missing floor would switch this check off, not merely
+    # accept a bad value. In Settings it would stop db.migrate and the ingest over a key they skip
     if settings.AGG_MAX_WINDOW_DAYS < 1:
         return [
             f"AGG_MAX_WINDOW_DAYS={settings.AGG_MAX_WINDOW_DAYS} is below the minimum window of"
@@ -165,9 +152,8 @@ def hot_window_configuration_problems(settings: Settings) -> list[str]:
 
 
 def e2e_configuration_problems(settings: Settings) -> list[str]:
-    # apart from Settings on purpose: as a model validator, advancing INGEST_END without editing the
-    # E2E_* keys would stop api.main, db.migrate and ingest starting, not just the suite that reads
-    # them -- tests/e2e/conftest.py checks them before its first request instead
+    # apart from Settings on purpose: as a validator, advancing INGEST_END would stop api.main,
+    # db.migrate and ingest starting, not just the suite. tests/e2e/conftest.py checks these
     problems: list[str] = []
     # a one-day window has no first session distinct from its last; how many a longer one holds
     # depends on the data, which the suite reads from the service

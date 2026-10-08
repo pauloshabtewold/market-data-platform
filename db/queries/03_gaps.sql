@@ -1,12 +1,8 @@
--- query 3: overnight gap distribution, prior close to next open, per symbol.
+-- query 3: overnight gap distribution, prior close to next open, per symbol. class A, <100 ms.
 -- parameters: :symbol :start :end
--- class A, target <100 ms. bind :end = INGEST_END and :start = :end - AGG_MAX_WINDOW_DAYS.
---
--- The rollup CTE is 06_daily_rollup.sql inlined, a .sql file having no import; that file is the
--- definition of record for the session and the open/close pair. Change both.
---
--- "Next" means the next market_days row, never the next calendar day: Friday's close pairs with
--- Monday's open, a pre-holiday close with the session after it.
+
+-- the rollup CTE is 06_daily_rollup.sql inlined and that file is the definition of record; change
+-- both. "Next" is the next market_days row, never the next calendar day
 
 WITH session_bars AS (
     SELECT m.day, b.ts, b.open, b.close
@@ -28,9 +24,8 @@ rollup AS (
     GROUP BY day
 ),
 calendar AS (
-    -- the trading-day ordinal, which makes "next session" the next market_days row, not the
-    -- next date. a symbol that printed nothing has no rollup row, so its gap spans more than one
-    -- session and says so below
+    -- the trading-day ordinal, so "next session" is the next market_days row. A symbol that
+    -- printed nothing has no rollup row, so its gap spans more than one session and says so
     SELECT day, row_number() OVER (ORDER BY day) AS session_no
     FROM market_days
     WHERE day >= :'start'::date AND day <= :'end'::date
@@ -54,9 +49,8 @@ SELECT
     round(avg(gap_pct), 4)                                            AS mean_pct,
     round(stddev_samp(gap_pct), 4)                                    AS stddev_pct,
     round(min(gap_pct), 4)                                            AS min_pct,
-    -- percentile_disc, not percentile_cont: cont has no numeric variant and returns double
-    -- precision, whose last digits miss a hand-computed expectation. disc also returns a gap
-    -- actually observed rather than an interpolation between two
+    -- percentile_disc, not cont: cont has no numeric variant and returns double precision, and
+    -- disc returns a gap actually observed rather than an interpolation
     round(percentile_disc(0.25) WITHIN GROUP (ORDER BY gap_pct), 4)   AS p25_pct,
     round(percentile_disc(0.50) WITHIN GROUP (ORDER BY gap_pct), 4)   AS median_pct,
     round(percentile_disc(0.75) WITHIN GROUP (ORDER BY gap_pct), 4)   AS p75_pct,

@@ -1,13 +1,8 @@
--- query 8: the highest-volume minutes market-wide, per year.
+-- query 8: the highest-volume minutes market-wide, per year. class C.
 -- parameters: none
--- Universe-wide, whole window: the parameter table binds nothing here. Class C -- it must read
--- every row to know which minutes are the largest, so it is judged on evidence of optimality,
--- not a speedup. NO scalar bound on bars.ts: nothing to bind. Session definition is
--- 06_daily_rollup.sql's.
---
--- "Market-wide" sums the minute across every symbol that printed in it, never the single largest
--- bar: a per-symbol maximum would only rank the busiest symbol's opening minutes and say nothing
--- about the market.
+
+-- "market-wide" sums the minute across every symbol that printed in it: a per-symbol maximum
+-- would rank only the busiest symbol's opening minutes
 
 WITH session_bars AS (
     SELECT b.ts, b.symbol, b.volume, b.trade_count, m.day

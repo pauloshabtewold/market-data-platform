@@ -13,9 +13,8 @@ def render(name: str) -> str:
     # Dockerfile -- an empty file renders "" and fails later naming neither file nor cause
     if not text.strip():
         raise ValueError(f"{name}: file is empty")
-    # percents double BEFORE the rewrite: psycopg reads a bare % as a placeholder, so "100%" in a
-    # comment fails the bind naming neither comments nor file; doubling after turns %(name)s into
-    # %%(name)s, an escaped literal binding nothing
+    # percents double BEFORE the rewrite: psycopg reads a bare % as a placeholder, and doubling
+    # after would turn %(name)s into an escaped literal binding nothing
     rendered = PLACEHOLDER.sub(r"%(\1)s", text.replace("%", "%%"))
     # an uppercase or digit-bearing name escapes the pattern, reaching psycopg as a syntax error
     # naming neither file nor cause

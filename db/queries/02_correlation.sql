@@ -1,12 +1,8 @@
--- query 2: rolling 30-day correlation between two symbols' daily returns.
+-- query 2: rolling 30-day correlation between two symbols' daily returns. class B.
 -- parameters: :symbol_a :symbol_b :start :end
--- class B: the one query with a selective filter, 2 of 100 symbols.
---
--- The rollup CTE is 06_daily_rollup.sql inlined, a .sql file having no import; that file is the
--- definition of record for the session and the close. Change both.
---
--- "30-day" means 30 TRADING days, which the pivot to one row per day makes 30 rows -- not
--- presentation: the frame counts rows, so unpivoted, 30 rows would be 15 days.
+
+-- the rollup CTE is 06_daily_rollup.sql inlined and that file is the definition of record; change
+-- both. The pivot to one row per day is what makes the frame's 30 rows 30 TRADING days
 
 WITH session_bars AS (
     SELECT b.symbol, m.day, b.ts, b.close
@@ -42,9 +38,8 @@ pivoted AS (
 )
 SELECT
     day,
-    -- the frame is pinned: the default RANGE UNBOUNDED PRECEDING AND CURRENT ROW silently
-    -- computes an EXPANDING correlation, a plausible number that is not 30-day, and corr(v,v) = 1
-    -- holds under both frames, so no property assertion catches it
+    -- the frame is pinned: the default silently computes an EXPANDING correlation, and corr(v,v)
+    -- = 1 under both, so no property assertion catches it
     round(corr(ret_a, ret_b) OVER w ::numeric, 4) AS corr_30d,
     count(*) OVER w                               AS rows_in_window
 FROM pivoted

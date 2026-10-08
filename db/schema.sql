@@ -19,9 +19,8 @@ CREATE TABLE bars (
     PRIMARY KEY (symbol, ts)
 ) PARTITION BY RANGE (ts);
 
--- the universe-wide endpoints sort by (ts, symbol), which the PK cannot serve. On the parent, so
--- every child inherits it; the hot-window partial index is created on recent children directly and
--- is deliberately not here
+-- the universe-wide endpoints sort by (ts, symbol), which the PK cannot serve. On the parent so
+-- every child inherits it; the hot-window partial index is on recent children and not here
 CREATE INDEX bars_ts_symbol_idx ON bars (ts, symbol);
 
 CREATE TABLE symbols (
