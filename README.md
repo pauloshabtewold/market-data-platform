@@ -63,16 +63,23 @@ the four that take a symbol, 422 on the five that take a window: `/symbols` take
 cannot answer a 422, and documents a catch-all entry in place of one. `/health` takes no parameter
 and documents 500 alone. A wrong method answers 405 with code `invalid_params` in the same shape,
 except for `HEAD`, which carries the status and no body because HTTP forbids one; no route documents
-the 405, and `/symbols`'s catch-all entry is the only place the document covers it. A
-500 is the service refusing to complete the request, not the client's fault, and the bounds in
+the 405, and `/symbols`'s catch-all entry is the only place the document covers it. **One refusal
+escapes the shape and it sits below the application**: a request malformed at the HTTP level never
+reaches the app, and the server answers `400 Bad Request` as `text/plain` reading `Invalid HTTP
+request received.` Everything the application itself refuses carries the shape above. A 500 is the
+service refusing to complete the request, not the client's fault, and the bounds in
 [Query performance](docs/QUERY_PERFORMANCE.md) say when one is a timeout.
 
 **One wire detail worth knowing before you hand-write a client.** Prices are stored as unqualified
 `numeric`, so the scale is whatever the insert produced, and a whole-dollar price serialises as a
-JSON **integer** — `"close": 255`, not `255.0`. It is rare and it does occur: 46 of 7,191 price
-values across a sample of real pages, 0.64%. The published document types these fields as `number`,
-which in JSON Schema admits integers, so a generated client handles both; code that tests
-`isinstance(x, float)` or its equivalent does not.
+JSON **integer** — `"close": 255`, not `255.0`. It is rare and it does occur: **489 of 33,600
+price values, 1.46%** — every `open`, `high`, `low` and `close` the deployed `/daily` endpoint
+serves, all 100 symbols across the whole four-month window, so it is a population a reader can
+re-count rather than a sample. An earlier reading of 46 of 7,191 values across an unnamed sample
+of pages gave 0.64%, and it is kept here because the size of the error is the useful part: the
+rate runs from 0.000% to 4.167% by symbol, so a sample that size lands anywhere. The published
+document types these fields as `number`, which in JSON Schema admits integers, so a generated
+client handles both; code that tests `isinstance(x, float)` or its equivalent does not.
 
 Loaded: **41,668,537 bars** across the full universe, in **42.4 minutes**. That is measured
 on the loaded data, not projected onto it.
