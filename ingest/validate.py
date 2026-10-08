@@ -10,7 +10,7 @@ log = logging.getLogger(__name__)
 def window_bounds(month: date) -> tuple[datetime, datetime]:
     first = month.replace(day=1)
     nxt = next_month(first)
-    # built from the same half-open month the partition bounds use, or a bar that passes here routes to a partition the unit never created
+    # the same half-open month as the partition bounds, or a bar lands in an uncreated partition
     return (
         datetime(first.year, first.month, 1, tzinfo=UTC),
         datetime(nxt.year, nxt.month, 1, tzinfo=UTC),
@@ -18,7 +18,7 @@ def window_bounds(month: date) -> tuple[datetime, datetime]:
 
 
 def reject_reason(bar: Bar, lo: datetime, hi: datetime) -> str | None:
-    # vwap is a vendor-computed average rather than a price, so it is deliberately excluded from this check
+    # vwap is a vendor-computed average, not a price, so it is deliberately excluded
     if bar.open <= 0 or bar.high <= 0 or bar.low <= 0 or bar.close <= 0:
         return "non-positive price"
     if bar.high < bar.low:
@@ -52,7 +52,8 @@ def check_bars(bars: list[Bar], month: date) -> CheckedBars:
             continue
         key = (bar.symbol, bar.ts)
         if key in seen:
-            # ON CONFLICT (symbol, ts) DO NOTHING stores one row per key, so counting both here would break the row_count reconciliation against count(*) FROM bars
+            # DO NOTHING on (symbol, ts) stores one row per key, so counting both breaks
+            # row_count against count(*) FROM bars
             log.info("%s %s duplicate, collapsing to first occurrence", bar.symbol, bar.ts)
             continue
         seen.add(key)

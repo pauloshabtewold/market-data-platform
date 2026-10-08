@@ -1,14 +1,12 @@
 -- query 2: rolling 30-day correlation between two symbols' daily returns.
 -- parameters: :symbol_a :symbol_b :start :end
--- class B, the one query with a genuinely selective filter: it touches 2 of 100 symbols.
+-- class B: the one query with a selective filter, 2 of 100 symbols.
 --
--- Consumes the daily rollup. 06_daily_rollup.sql is the definition of record for the session
--- and for the close; the CTE below is that query, inlined because a .sql file cannot import
--- another. Change one and change both.
+-- The rollup CTE is 06_daily_rollup.sql inlined, a .sql file having no import; that file is the
+-- definition of record for the session and the close. Change both.
 --
--- "30-day" means 30 TRADING days, which after pivoting to one row per day is 30 rows. The
--- pivot is not presentation: the frame counts rows, so on an unpivoted two-symbol series
--- 30 rows would be 15 days.
+-- "30-day" means 30 TRADING days, which the pivot to one row per day makes 30 rows -- not
+-- presentation: the frame counts rows, so unpivoted, 30 rows would be 15 days.
 
 WITH session_bars AS (
     SELECT b.symbol, m.day, b.ts, b.close
@@ -18,7 +16,7 @@ WITH session_bars AS (
      AND b.ts >= m.open_ts AND b.ts < m.close_ts
     WHERE b.symbol IN (:'symbol_a', :'symbol_b')
       AND m.day >= :'start'::date AND m.day <= :'end'::date
-      -- redundant by logic and required for partition pruning; the + 1 day keeps the final session
+      -- redundant by logic and required for partition pruning; + 1 day keeps the final session
       AND b.ts >= :'start'::date
       AND b.ts <  :'end'::date + INTERVAL '1 day'
 ),
@@ -33,8 +31,7 @@ returns AS (
     FROM rollup
 ),
 pivoted AS (
-    -- one row per day with both symbols' returns as columns, so the row-counting frame below
-    -- counts trading days
+    -- both returns as columns on one row, so the row-counting frame below counts trading days
     SELECT day,
            max(ret) FILTER (WHERE symbol = :'symbol_a') AS ret_a,
            max(ret) FILTER (WHERE symbol = :'symbol_b') AS ret_b
@@ -45,10 +42,9 @@ pivoted AS (
 )
 SELECT
     day,
-    -- the frame is pinned explicitly. the default is RANGE UNBOUNDED PRECEDING AND CURRENT ROW,
-    -- which silently computes an EXPANDING-window correlation instead of a rolling one: it
-    -- returns a plausible number that is not a 30-day correlation, and corr(v,v) = 1 holds
-    -- under both frames, so no property assertion catches it
+    -- the frame is pinned: the default RANGE UNBOUNDED PRECEDING AND CURRENT ROW silently
+    -- computes an EXPANDING correlation, a plausible number that is not 30-day, and corr(v,v) = 1
+    -- holds under both frames, so no property assertion catches it
     round(corr(ret_a, ret_b) OVER w ::numeric, 4) AS corr_30d,
     count(*) OVER w                               AS rows_in_window
 FROM pivoted

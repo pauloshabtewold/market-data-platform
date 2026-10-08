@@ -6,7 +6,7 @@ from config import settings
 
 CALENDAR_PATH = "/v2/calendar"
 
-# an explicit AT TIME ZONE cast ignores the session setting, which is why the calendar uses one and the partition DDL cannot.
+# AT TIME ZONE ignores the session setting: the calendar uses it, the partition DDL cannot
 INSERT_DAY = """
 WITH d AS (
     SELECT %(day)s::date AS day,
@@ -35,7 +35,7 @@ def _checked(row: dict) -> dict:
     if not day or not opening or not closing:
         raise RuntimeError(f"{CALENDAR_PATH} returned a day with no session times: {row!r}")
     if closing <= opening:
-        # a zero or negative session_minutes drops the day out of the expected-minute total and reads as full coverage
+        # zero or negative session_minutes drops a day from expected minutes, reading full coverage
         raise RuntimeError(f"{CALENDAR_PATH} returned {day} closing at {closing}, on or before its {opening} open")
     return {"day": day, "open": opening, "close": closing}
 
@@ -52,7 +52,7 @@ def load_calendar(conn: psycopg.Connection, client) -> CalendarSummary:
     if not rows:
         raise RuntimeError(f"{CALENDAR_PATH} returned no trading days for {start}..{end}")
 
-    # open and close are the regular session; session_open and session_close are the extended session and would give a 960-minute day.
+    # open/close are the regular session; session_open/session_close are extended, a 960-minute day
     params = [_checked(row) for row in rows]
     with conn.cursor() as cur:
         cur.executemany(INSERT_DAY, params)

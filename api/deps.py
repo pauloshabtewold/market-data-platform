@@ -16,12 +16,12 @@ from config import settings
 
 log = logging.getLogger(__name__)
 
-# read in the positions libpq itself accepts one: after the userinfo of a URI, and as a keyword
-# value anywhere in a connection string or a URI query, with or without spaces and quotes
+# every position libpq takes one: after a URI's userinfo, and as a keyword value anywhere in a
+# connection string or URI query, spaces and quotes either way
 _URI_PASSWORD = re.compile(r"://[^/?#@\s]*:([^@/?#\s]+)@")
 _KEYWORD_PASSWORD = re.compile(r"(?:^|[\s?&])(?:ssl)?password\s*=\s*('(?:[^'\\]|\\.)*'|[^\s&]+)")
 _TOKEN_EDGE = re.compile(r"[0-9A-Za-z_]")
-# below this length a password cannot be told from a port number or an address octet
+# shorter than this a password reads as a port number or an address octet
 _STANDALONE_UNDER = 4
 
 
@@ -30,33 +30,30 @@ def _secrets_in(dsn: str) -> list[str]:
     try:
         parsed = conninfo_to_dict(dsn)
     except Exception:
-        # libpq refuses some strings outright and quotes the whole string back rather than one
-        # field, so the patterns below read the raw text as well
+        # libpq refuses some strings and quotes the whole one back, so the patterns read raw text
         parsed = {}
     for key, value in parsed.items():
         if key.endswith("password") and isinstance(value, str):
             secrets.add(value)
     for match in _URI_PASSWORD.finditer(dsn):
-        # both forms: libpq connects with the decoded password and quotes the undecoded one
+        # libpq connects with the decoded password and quotes the undecoded one
         secrets.update({match.group(1), unquote(match.group(1))})
     for match in _KEYWORD_PASSWORD.finditer(dsn):
         value = match.group(1)
         if len(value) > 1 and value.startswith("'") and value.endswith("'"):
             value = re.sub(r"\\(.)", r"\1", value[1:-1])
         secrets.add(value)
-    # longest first, so a password that contains another of these values is masked whole
+    # longest first, so a password containing another value is masked whole
     return sorted({secret for secret in secrets if secret}, key=len, reverse=True)
 
 
 def _mask(text: str, secrets: list[str]) -> str:
     for secret in secrets:
         if len(secret) < _STANDALONE_UNDER:
-            # a password this short occurs inside the addresses and identifiers a diagnostic is
-            # made of, so it is masked only where it stands on its own
+            # this short it occurs inside diagnostic addresses and identifiers: masked only alone
             before, after = r"(?<![^\s\"'=])", r"(?![^\s\"',)])"
         else:
-            # bounded to whole tokens, so a dictionary-word password does not blank out the words
-            # of the diagnostic around it
+            # whole tokens, so a dictionary-word password does not blank the diagnostic around it
             before = r"(?<![0-9A-Za-z_])" if _TOKEN_EDGE.match(secret[0]) else ""
             after = r"(?![0-9A-Za-z_])" if _TOKEN_EDGE.match(secret[-1]) else ""
         text = re.sub(before + re.escape(secret) + after, "***", text)
@@ -64,31 +61,27 @@ def _mask(text: str, secrets: list[str]) -> str:
 
 
 def mask_secrets(text, dsn) -> str:
-    # masks rather than raises on anything it is handed: this runs on a connection's failure path,
-    # where a second exception would replace the cause an operator is reading
+    # never raises: on a connection's failure path a second exception replaces the real cause
     try:
         return _mask(str(text), _secrets_in(str(dsn)))
     except Exception:
         return "***"
 
 
-# module-level rather than inlined, so a test can monkeypatch either down to something fast:
-# how long a request waits for a pool slot before PoolTimeout, and how long a statement may run
-# on a pooled connection before Postgres cancels it, so one slow client or one stuck query cannot
-# starve every other request of the pool
+# module-level so a test can monkeypatch either down: the wait for a pool slot before PoolTimeout,
+# and how long a statement runs before Postgres cancels it, so one slow client or stuck query
+# cannot starve the pool
 POOL_CHECKOUT_TIMEOUT_SECONDS = 5.0
 STATEMENT_TIMEOUT_SECONDS = 5.0
-# how long a pooled connection has to answer the empty query it is checked with at checkout: the
-# checkout wait above ends when a connection is handed over, so a connection whose peer has gone
-# silent would otherwise hold its request for as long as TCP takes to notice
+# how long a checked-out connection has to answer its empty query: the wait above ends at handover,
+# so a silent peer would hold its request as long as TCP takes to notice
 POOL_CHECK_TIMEOUT_SECONDS = 1.0
 
 
 def _statement_timeout_ms() -> int:
     milliseconds = round(STATEMENT_TIMEOUT_SECONDS * 1000)
-    # Postgres reads 0 as no timeout at all and refuses a negative one on every connection. Raising
-    # here moves the symptom rather than removing it -- the pool then hands out no connection at all
-    # and the line in _pin_utc reports why
+    # Postgres reads 0 as no timeout and refuses a negative one. Raising here moves the symptom:
+    # the pool hands out no connection and the line in _pin_utc reports why
     if milliseconds < 1:
         raise ValueError(
             f"STATEMENT_TIMEOUT_SECONDS={STATEMENT_TIMEOUT_SECONDS!r} is under one millisecond"
@@ -98,16 +91,16 @@ def _statement_timeout_ms() -> int:
 
 def _pin_utc(conn, dsn: str):
     try:
-        # the pool makes its own connections and never calls db.session.connect, so the zone that file pins per connection has to be pinned again here
+        # the pool never calls db.session.connect, so the zone that file pins per connection is
+        # pinned again here
         conn.execute("SET TIME ZONE 'UTC'")
-        # read by name rather than captured as a default argument, so a monkeypatch of the module
-        # attribute reaches every connection this callback configures from here on
+        # read by name, not a default argument, so a monkeypatch of the attribute reaches every
+        # connection configured after it
         conn.execute(f"SET statement_timeout = {_statement_timeout_ms()}")
         conn.commit()
     except Exception as exc:
-        # a connection the pool cannot configure is discarded, and the pool retries with a widening
-        # gap until its reconnect_timeout gives up, while /health runs off the pool and keeps
-        # answering 200: this line is where an operator reads why every request is failing
+        # the pool discards an unconfigurable connection, widening its retry gap until
+        # reconnect_timeout gives up while /health, off the pool, answers 200: here is why all fail
         log.error(
             "pooled connection could not be configured: %s: %s",
             type(exc).__name__,
@@ -126,14 +119,14 @@ def _wait_for_socket(selector: selectors.BaseSelector, deadline: float) -> None:
 
 def _check_within_deadline(conn: psycopg.Connection) -> None:
     pgconn = conn.pgconn
-    # the refusal ConnectionPool.check_connection makes too: it cannot switch autocommit on for a
-    # connection that is closed or inside a transaction
+    # ConnectionPool.check_connection refuses the same: no autocommit on a closed or in-transaction
+    # connection
     if conn.closed or pgconn.transaction_status != pq.TransactionStatus.IDLE:
         raise psycopg.OperationalError("the connection is not idle and cannot be checked")
     deadline = time.monotonic() + POOL_CHECK_TIMEOUT_SECONDS
     try:
-        # sent and read at the libpq level: psycopg's own execute waits on the socket with no
-        # deadline, and an empty simple query opens no transaction, so autocommit is left as found
+        # libpq level: psycopg's execute waits on the socket with no deadline; an empty simple query
+        # opens no transaction, leaving autocommit as found
         pgconn.send_query(b"")
         with selectors.DefaultSelector() as selector:
             selector.register(pgconn.socket, selectors.EVENT_WRITE)
@@ -145,22 +138,21 @@ def _check_within_deadline(conn: psycopg.Connection) -> None:
                 _wait_for_socket(selector, deadline)
                 pgconn.consume_input()
         answers = []
-        # read to the end before judging, so an error answer leaves no result unread behind it
+        # drained first, so an error answer leaves no result unread behind it
         while (result := pgconn.get_result()) is not None:
             answers.append((pq.ExecStatus(result.status).name, result.get_error_message()))
         if [status for status, _ in answers] != ["EMPTY_QUERY"]:
             raise psycopg.OperationalError(f"the connection answered its check with {answers!r}")
     except Exception:
-        # closed here: a connection that answered with an error is idle again, and psycopg_pool
-        # hands an idle connection straight back out, where it discards a closed one and replaces it
+        # closed here: an errored connection is idle again and psycopg_pool hands idle ones back
+        # out, where it discards and replaces a closed one
         conn.close()
         raise
 
 
 def _configure_for(dsn: str):
     def configure(conn) -> None:
-        # the dsn this pool was built with rather than the configured one, so an app given an
-        # explicit dsn masks the password its own connections carry
+        # this pool's own dsn, not the configured one, so an explicit dsn masks its own password
         _pin_utc(conn, dsn)
 
     return configure
@@ -169,7 +161,7 @@ def _configure_for(dsn: str):
 def build_pool(
     dsn: str, min_size: int | None = None, max_size: int | None = None
 ) -> ConnectionPool:
-    # resolved here rather than defaulted in the signature -- a default argument is evaluated once at import, so monkeypatching settings afterwards would not change it
+    # not a signature default: that is evaluated once at import, past any later settings monkeypatch
     min_size = settings.DB_POOL_MIN if min_size is None else min_size
     max_size = settings.DB_POOL_MAX if max_size is None else max_size
     return ConnectionPool(
@@ -178,31 +170,29 @@ def build_pool(
         max_size=max_size,
         open=False,
         kwargs={
-            # paginate indexes a row by the cursor's field names, so a pooled connection yielding
-            # psycopg's default tuples 500s on the first page that has a successor -- and never
-            # before, since paginate returns early whenever the rows fit inside the limit.
-            # declared here rather than inside the configure callback so it survives a later
-            # feature replacing that callback
+            # paginate indexes rows by cursor field name, so psycopg's default tuples 500 on the
+            # first page with a successor -- never earlier, since paginate returns early when rows
+            # fit the limit. here, not in configure, so replacing that callback cannot drop it
             "row_factory": dict_row,
-            # psycopg's default is 130 s, and a pool worker stuck that long connecting to a host
-            # that drops packets cannot replace a discarded connection once the host is back
+            # psycopg's default is 130 s, and a worker stuck that long on a host dropping packets
+            # cannot replace a discarded connection once it is back
             "connect_timeout": 5,
-            # an idle pooled connection whose peer vanished (a failover, an expired NAT or load
-            # balancer entry) is otherwise noticed only by the kernel's two-hour keepalive default
+            # a vanished peer (failover, expired NAT or load balancer entry) is otherwise noticed
+            # only by the kernel's two-hour keepalive default
             "keepalives": 1,
-            # probing after 10 s idle also keeps an idle connection's NAT entry from expiring
+            # probing at 10 s idle also keeps the NAT entry from expiring
             "keepalives_idle": 10,
-            # three unanswered probes 5 s apart: a vanished peer is dropped 25 s into its silence
+            # three unanswered probes 5 s apart: a vanished peer drops 25 s into its silence
             "keepalives_interval": 5,
             "keepalives_count": 3,
-            # Linux only (libpq ignores it elsewhere): a statement or probe left unacknowledged
-            # 25 s drops the connection, where retransmission alone takes about fifteen minutes
+            # Linux only (libpq ignores it elsewhere): 25 s unacknowledged drops the connection,
+            # where retransmission alone takes about fifteen minutes
             "tcp_user_timeout": 25000,
         },
         configure=_configure_for(dsn),
         check=_check_within_deadline,
-        # psycopg_pool's own default is 30.0 s, long enough for a burst of slow requests to hold
-        # every later checkout past the patience of whatever client is waiting on it
+        # psycopg_pool's default is 30.0 s, long enough for a burst of slow requests to hold later
+        # checkouts past any waiting client's patience
         timeout=POOL_CHECKOUT_TIMEOUT_SECONDS,
     )
 

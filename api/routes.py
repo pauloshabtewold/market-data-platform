@@ -42,31 +42,29 @@ from config import settings
 
 router = APIRouter()
 
-# page 1's lower bound, below every ingestible bar, so one text serves both pages rather than two
-# branching on whether a cursor was supplied
+# page 1's lower bound, below every ingestible bar, so one text serves both pages
 _BEFORE_ANY_BAR = datetime(1970, 1, 1, tzinfo=timezone.utc)
-# the same trick on the symbol key: symbol is the primary key and therefore NOT NULL, so every
-# real row sorts above the empty string
+# same trick on the symbol key: it is the primary key, so NOT NULL, and every row sorts above ''
 _BEFORE_ANY_SYMBOL = ""
 
-# one named pair per endpoint, read from settings at import: spec line 508 puts /symbols and /bars
-# in the raw-row class and /daily in the aggregating one, and a pair handed to the wrong call site
-# is invisible in a response -- 1000 and 100 are both above every fixture this suite has
+# one named pair per endpoint, from settings at import: spec line 508 puts /symbols and /bars in the
+# raw-row class and /daily in the aggregating one, and a pair at the wrong call site is invisible in
+# a response -- 1000 and 100 are both above every fixture this suite has
 _SYMBOLS_CAPS = (settings.BARS_PAGE_DEFAULT, settings.BARS_PAGE_MAX)
 _BARS_CAPS = (settings.BARS_PAGE_DEFAULT, settings.BARS_PAGE_MAX)
 _DAILY_CAPS = (settings.AGG_PAGE_DEFAULT, settings.AGG_PAGE_MAX)
-# one per analytics endpoint rather than one shared tuple: three byte-identical pairs cannot be
-# told apart by value, so only a named constant makes the one a handler READS observable
+# one per analytics endpoint, not one shared tuple: three byte-identical pairs cannot be told apart
+# by value, so only a named constant makes the one a handler READS observable
 _VOLATILITY_CAPS = (settings.AGG_PAGE_DEFAULT, settings.AGG_PAGE_MAX)
 _GAPS_CAPS = (settings.AGG_PAGE_DEFAULT, settings.AGG_PAGE_MAX)
 _MOVES_CAPS = (settings.AGG_PAGE_DEFAULT, settings.AGG_PAGE_MAX)
 
-# the table is symbols and never bars: a known symbol with no rows in the requested window is a
-# 200 with an empty list, and an existence check against bars cannot tell that from a 404
+# symbols and never bars: a known symbol with no rows in the window is a 200 with an empty list,
+# which an existence check against bars cannot tell from a 404
 REQUIRE_SYMBOL_SQL = "SELECT 1 FROM symbols WHERE symbol = %(symbol)s"
 
-# the cast is load-bearing and measured: psycopg deduplicates the repeated name to one parameter,
-# and with no filter supplied that parameter binds NULL, which Postgres refuses to type (42P08)
+# the cast is load-bearing and measured: psycopg dedupes the repeated name to one parameter, which
+# binds NULL when no filter is supplied, and Postgres refuses to type that (42P08)
 _SYMBOLS_SQL = (
     "SELECT symbol, name, exchange, active, first_bar_ts FROM symbols"
     " WHERE symbol > %(after)s"
@@ -74,8 +72,8 @@ _SYMBOLS_SQL = (
     " ORDER BY symbol LIMIT %(fetch)s"
 )
 
-# published in the generated page, because a required window reads as a limitation unless it says
-# why; the partition counts behind the why are the /bars windows in docs/QUERY_PERFORMANCE.md
+# published in the generated page: a required window reads as a limitation unless it says why. The
+# partition counts behind it are the /bars windows in docs/QUERY_PERFORMANCE.md
 _BARS_DESCRIPTION = (
     "Minute bars for one symbol inside a required window, oldest first, keyset-paginated with "
     "`limit` and `cursor`. The window is required by design rather than as a limitation: without "
@@ -83,38 +81,36 @@ _BARS_DESCRIPTION = (
     "bar table."
 )
 
-# lo and hi come from _instant_bounds, never from the raw dates: a timestamptz compared with a
-# date resolves to that date's UTC midnight, which drops the final day's whole session
+# lo and hi come from _instant_bounds, never the raw dates: a timestamptz compared with a date
+# resolves to that date's UTC midnight and drops the final day's whole session
 _BARS_SQL = (
     "SELECT ts, open, high, low, close, volume, trade_count, vwap FROM bars"
     " WHERE symbol = %(symbol)s AND ts >= %(lo)s AND ts <= %(hi)s AND ts > %(after)s"
     " ORDER BY ts LIMIT %(fetch)s"
 )
 
-# rendered ONCE at import and never on the request path: a read_text() per request on a Class A
-# endpoint, frozen SQL that becomes runtime-mutable so its captured plans stop describing what
-# runs, and a malformed query file that becomes a request-time 500 instead of an import failure
+# rendered ONCE at import, never per request: otherwise a read_text() on a Class A endpoint, SQL
+# that becomes runtime-mutable so its captured plans stop describing what runs, and a malformed
+# file that fails at request time instead of at import
 _DAILY_ROLLUP = db.sql.render("06_daily_rollup.sql").rstrip().removesuffix(";")
-# the outer SELECT drops the rollup's own symbol column without touching the committed file, and
-# the outer ORDER BY converts an in-practice guarantee about subquery ordering into a stated one
+# the outer SELECT drops the rollup's symbol column without touching the committed file, and the
+# outer ORDER BY makes an in-practice subquery-ordering guarantee a stated one
 # the newlines are load-bearing: the rendered file opens on a -- comment, which on one line would
-# swallow the rest of the wrapper's own first line
+# swallow the rest of the wrapper's first line
 _DAILY_SQL = (
     "SELECT day, open, high, low, close, volume, bars FROM (\n"
     f"{_DAILY_ROLLUP}\n"
     ") AS page ORDER BY day LIMIT %(fetch)s"
 )
-# no wrapper on these two: neither paginates, and each committed file already projects exactly the
-# response columns in the response order, so a subquery would only move the plan the Class A
-# number is taken on
+# no wrapper on these two: neither paginates, and each file already projects the response columns in
+# order, so a subquery would only move the plan the Class A number is taken on
 _VOLATILITY_SQL = db.sql.render("01_volatility.sql")
 _GAPS_SQL = db.sql.render("03_gaps.sql")
 
-# the endpoint form of query 5, which 05_largest_moves.sql is deliberately not: that file ranks by
-# magnitude, and a ranking has to read the whole window before it knows its first row, so nothing
-# streams it in order and no cursor over it is stable. This one is chronological on (ts, symbol),
-# which is an index this database already has. The projection stops at open and close because the
-# hot-window partial index covers those two and nothing else
+# the endpoint form of query 5, which 05_largest_moves.sql deliberately is not: that file ranks by
+# magnitude, and a ranking must read the whole window before it knows its first row, so no cursor
+# over it is stable. This one is chronological on (ts, symbol), an index this database has, and the
+# projection stops at open and close because the hot-window partial index covers those two alone
 _MOVES_SQL = """
 SELECT b.ts, b.symbol,
        round(b.open, 4)                            AS open,
@@ -148,30 +144,27 @@ WHERE m.day >= %(start)s AND m.day <= %(end)s
 ORDER BY b.ts, b.symbol
 LIMIT %(fetch)s"""
 
-# Postgres numeric refuses more precision than either of these rather than rounding
-# (NumericValueOutOfRange), so a value Decimal accepts can still fail the query; counted from the
-# parsed Decimal's own digits and exponent, without normalising, since normalising would undercount
-# a value like 0.10 that carries a real trailing zero
+# Postgres numeric refuses more precision than these rather than rounding (NumericValueOutOfRange),
+# so a value Decimal accepts can still fail the query. Counted from the parsed Decimal's own digits
+# and exponent, unnormalised -- normalising would undercount a 0.10 whose trailing zero is real
 _NUMERIC_MAX_DIGITS_BEFORE_POINT = 131_072
 _NUMERIC_MAX_DIGITS_AFTER_POINT = 16_383
-# the largest exponent Postgres numeric reads (INT32_MAX / 2, measured): the one bound on a zero's
-# positive exponent, since a zero is stored with no digits before the point however far it moves
+# the largest exponent Postgres numeric reads (INT32_MAX / 2, measured): the only bound on a zero's
+# positive exponent, since a zero stores no digits before the point however far it moves
 _NUMERIC_MAX_EXPONENT = 1_073_741_823
 
 
-# The shape of a 200, published so the generated document says what a request returns and not only
-# how it can fail. Declared through `responses={200: {"model": ...}}` and NEVER as response_model,
-# which would re-serialise every row through pydantic on the request path: that moves what a numeric
-# column looks like on the wire and adds per-row validation to a 1,000-row page whose block and
-# latency figures are already published. These models are read by the document generator alone, so
-# the wire is byte-for-byte what it was.
-# Every numeric column is `float`, which publishes `type: number`: a whole-dollar price reaches the
-# wire as a JSON integer and a fractional one as a JSON float, and `number` is the one JSON Schema
-# type that admits both. Every column db/schema.sql leaves nullable is nullable here.
-# next_cursor carries no default in any page, so the document marks it required AS WELL AS nullable
-# -- spec section 4 pins it present-and-explicitly-null on the last page precisely so a generated
-# client that checks presence and one that checks truthiness behave alike, and a client generated
-# from a document where the key is optional cannot honour that.
+# The 200's shape, so the document says what a request returns and not only how it can fail.
+# Declared through `responses={200: {"model": ...}}` and NEVER response_model, which would
+# re-serialise every row through pydantic on the request path -- moving what a numeric column looks
+# like on the wire and adding per-row validation to a 1,000-row page whose block and latency figures
+# are published. The generator alone reads these models, so the wire is unchanged.
+# Every numeric column is `float`, publishing `type: number`: a whole-dollar price reaches the wire
+# as a JSON integer and a fractional one as a float, and `number` is the one type admitting both.
+# Every column db/schema.sql leaves nullable is nullable here.
+# next_cursor carries no default, so the document marks it required AS WELL AS nullable -- spec
+# section 4 pins it present-and-explicitly-null on the last page so that a client checking presence
+# and one checking truthiness behave alike, which an optional key cannot honour.
 
 
 class SymbolRow(BaseModel):
@@ -221,8 +214,8 @@ class DailyPage(BaseModel):
 class VolatilityBucket(BaseModel):
     bucket_minute: int
     returns: int
-    # null wherever the statistic is undefined on the rows it aggregates: stddev_samp of a single
-    # return is NULL, and an annualised figure derived from it is NULL with it
+    # null where the statistic is undefined: stddev_samp of a single return is NULL, and an
+    # annualised figure derived from it is NULL with it
     avg_minutes_per_return: float | None
     stddev_pct: float | None
     annualized_pct: float | None
@@ -234,8 +227,8 @@ class VolatilityPage(BaseModel):
 
 
 class GapsSummary(BaseModel):
-    # 03_gaps.sql has no GROUP BY, so this is always exactly one row: a window holding no gap
-    # answers the counts as zero and every distribution field as null
+    # 03_gaps.sql has no GROUP BY, so always exactly one row: a window with no gap answers zero
+    # counts and null distribution fields
     gaps: int
     gaps_spanning_a_skipped_session: int
     mean_pct: float | None
@@ -281,8 +274,8 @@ RESPONSE_200_MOVES = {"model": MovesPage, "description": _PAGE_200}
 def _reject_numeric_overflow(value: Decimal) -> Decimal:
     sign, digits, exponent = value.as_tuple()
     if isinstance(exponent, str):
-        # never reached, since pydantic's Decimal refuses every non-finite value first; returned
-        # rather than counted, because a NaN or an Infinity has no numeric exponent to count
+        # unreachable: pydantic's Decimal refuses non-finite values first. Returned rather than
+        # counted, since a NaN or Infinity has no exponent to count
         return value
     if any(digits):
         too_wide = len(digits) + exponent > _NUMERIC_MAX_DIGITS_BEFORE_POINT
@@ -295,19 +288,17 @@ def _reject_numeric_overflow(value: Decimal) -> Decimal:
     return value
 
 
-# A window bound is a calendar date and nothing else, which is what the published schema says
-# (`format: date`). pydantic's lax `date` accepts two further shapes and misreads both: a full ISO
-# datetime whose wall-clock time is exactly midnight, where the offset is DISCARDED and the literal
-# calendar date kept -- 2026-04-01T00:00:00+12:00 is the instant 2026-03-31T12:00:00Z and would be
-# served as 2026-04-01 -- and a Unix timestamp in seconds or milliseconds. The bounds are compared
-# against a timestamptz column in UTC, so no reading of an offset-aware request honours what it
-# names, and a client in a positive-offset zone formatting its window as offset-aware ISO timestamps
-# is the obvious thing to do against an API whose rows carry +00:00.
+# A window bound is a calendar date and nothing else, which is what the schema publishes
+# (`format: date`). pydantic's lax `date` accepts two more shapes and misreads both: an ISO datetime
+# at exactly midnight, where the offset is DISCARDED and the literal date kept --
+# 2026-04-01T00:00:00+12:00 is the instant 2026-03-31T12:00:00Z and would be served as 2026-04-01 --
+# and a Unix timestamp in seconds or milliseconds. The bounds compare against a timestamptz column
+# in UTC, so no reading of an offset-aware request honours what it names, and sending offset-aware
+# ISO timestamps is the obvious thing to do against an API whose rows carry +00:00.
 _A_PLAIN_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
-# the four separators are measured rather than assumed: pydantic-core accepts t, T, _ and a space
-# between the date and the time and nothing else, from feeding a date adapter all of
-# string.printable. Used only to say WHICH of the two misreadings a refused bound is, never to decide
-# whether to refuse it
+# the four separators are measured, not assumed: pydantic-core accepts t, T, _ and a space and
+# nothing else, from feeding a date adapter all of string.printable. Used only to say WHICH
+# misreading a refused bound is, never whether to refuse it
 _A_TIME_SEPARATOR = re.compile(r"\d{4}-\d{2}-\d{2}[tT_ ]")
 _A_DATE = TypeAdapter(date)
 _MIDNIGHT = time(0, 0)
@@ -323,17 +314,17 @@ _NOT_A_DATE_MESSAGE = (
 
 def _reject_a_window_bound_that_is_not_a_calendar_date(value):
     # The decision is delegated to pydantic rather than pattern-matched, and that is the whole point.
-    # A rule written from the spellings a finding exhibited claims every neighbour that merely
-    # resembles them: matching `date + separator` refused 2026-13-01T00:00:00, 2026-04-32 00:00:00,
-    # 9999-99-99T and a bare 2026-04-01t -- eleven values pydantic itself rejects -- under a slug
-    # saying their time could not be honoured, which is the one machine-readable field a client
-    # reads. Asking pydantic keeps "malformed, so its own slug is the accurate one" apart from
-    # "accepted and misread, so this rule owns it", by construction and not by enumeration.
+    # A rule written from the spellings a finding exhibited claims every neighbour resembling them:
+    # matching `date + separator` refused 2026-13-01T00:00:00, 2026-04-32 00:00:00, 9999-99-99T and
+    # a bare 2026-04-01t -- eleven values pydantic itself rejects -- under a slug saying their time
+    # could not be honoured, which is the one machine-readable field a client reads. Asking pydantic
+    # separates "malformed, so its own slug is accurate" from "accepted and misread, so this rule
+    # owns it" by construction rather than by enumeration.
     #
-    # Judged over every type pydantic's lax `date` accepts and not only the one HTTP delivers: a
-    # query parameter is always a str over the wire, so the three branches below are reachable from
-    # an in-process caller alone, but pydantic misreads bytes and an offset-aware datetime exactly as
-    # it misreads the text forms, and a guard scoped to `str` leaves the same defect one type over.
+    # Judged over every type lax `date` accepts, not only the one HTTP delivers: a query parameter
+    # is always a str, so the branches below are reachable only in-process, but pydantic misreads
+    # bytes and an offset-aware datetime exactly as it misreads text, and a guard scoped to `str`
+    # would leave the same defect one type over.
     if isinstance(value, bytes):
         try:
             value = value.decode()
@@ -343,8 +334,8 @@ def _reject_a_window_bound_that_is_not_a_calendar_date(value):
         # bool is an int in Python, and no reading of True is a calendar date either
         raise PydanticCustomError("date_is_not_a_calendar_date", _NOT_A_DATE_MESSAGE)
     if isinstance(value, datetime):
-        # a datetime is a date subclass, so this branch must precede the date one. pydantic keeps
-        # the literal calendar date and discards the offset, the same misreading as the text form
+        # a datetime is a date subclass, so this must precede the date branch. pydantic keeps the
+        # literal date and discards the offset, the same misreading as the text form
         if value.tzinfo is not None or value.time() != _MIDNIGHT:
             raise PydanticCustomError("date_carries_a_time", _CARRIES_A_TIME_MESSAGE)
         return value
@@ -352,8 +343,8 @@ def _reject_a_window_bound_that_is_not_a_calendar_date(value):
         return value
     if _A_PLAIN_DATE.fullmatch(value):
         return value
-    # pydantic refuses every padded plain date, so fullmatch above and pydantic's own accept set
-    # agree exactly on what a calendar date is and nothing has to be stripped here
+    # pydantic refuses every padded plain date, so fullmatch above and its accept set agree exactly
+    # on what a calendar date is, and nothing needs stripping
     try:
         _A_DATE.validate_python(value)
     except ValidationError:
@@ -363,19 +354,16 @@ def _reject_a_window_bound_that_is_not_a_calendar_date(value):
     raise PydanticCustomError("date_is_not_a_calendar_date", _NOT_A_DATE_MESSAGE)
 
 
-# the date bound itself is deliberate and load-bearing -- it is what makes the partition comparison
-# IMMUTABLE and the pruning stable -- so the remedy for the coercions above is a validator and never
-# a type change
+# the date bound is load-bearing -- it makes the partition comparison IMMUTABLE and the pruning
+# stable -- so the remedy for the coercions above is a validator, never a type change
 WindowBound = Annotated[date, BeforeValidator(_reject_a_window_bound_that_is_not_a_calendar_date)]
 
 
-# Query lives inside the Annotated alias rather than as the parameter's default value: this
-# project's FastAPI discards any Annotated metadata that is not itself a FieldInfo/Depends
-# whenever the default is a bare Query(...), which would silently drop AfterValidator.
-# Query comes first, so ge=0 refuses a negative before AfterValidator counts its digits: a negative
-# is refused for its sign whatever its size. WithJsonSchema replaces Decimal's own anyOf(number,
-# string) rendering, whose string branch admits "-1" and rejects "1e3", with the plain number the
-# service actually accepts
+# Query lives inside the Annotated alias, not as the default: this FastAPI discards Annotated
+# metadata that is not a FieldInfo/Depends whenever the default is a bare Query(...), silently
+# dropping AfterValidator. Query comes first, so ge=0 refuses a negative before AfterValidator
+# counts digits -- refused for its sign whatever its size. WithJsonSchema replaces Decimal's
+# anyOf(number, string), whose string branch admits "-1" and rejects "1e3", with a plain number
 MinMovePct = Annotated[
     Decimal,
     Query(ge=0),
@@ -385,8 +373,8 @@ MinMovePct = Annotated[
 
 
 def _limit_schema(page_default: int, page_max: int) -> dict:
-    # published for documentation only -- the real floor and cap are enforced in resolve_request,
-    # against the RESOLVED limit, so this schema cannot change today's limit_out_of_range detail
+    # documentation only -- the real floor and cap are enforced in resolve_request against the
+    # RESOLVED limit, so this schema cannot change today's limit_out_of_range detail
     return {"type": "integer", "minimum": 1, "maximum": page_max, "default": page_default}
 
 
@@ -409,13 +397,13 @@ def resolve_request(
     is not covered: require_symbol runs inside the connection block, so an unknown symbol is
     refused holding a checkout.
     """
-    # the cursor is decoded before the window is range-validated, so an inverted start/end makes
-    # almost any cursor a 400 cursor_outside_window rather than a 422 start_after_end. That looks
-    # wrong and is what spec line 507 mandates: params ahead of range semantics
+    # the cursor decodes before the window is range-validated, so an inverted start/end makes almost
+    # any cursor a 400 cursor_outside_window rather than a 422 start_after_end. That looks wrong and
+    # is what spec line 507 mandates: params ahead of range semantics
     cursor_values = decode_cursor(shape, cursor, start, end) if cursor is not None else None
 
-    # the RESOLVED limit and never the client's: with no floor on either page DEFAULT in config, a
-    # zero or negative one would otherwise reach paginate, whose refusal is a 500
+    # the RESOLVED limit, never the client's: with no floor on either page DEFAULT in config, a zero
+    # or negative one would reach paginate, whose refusal is a 500
     limit = raw_limit if raw_limit is not None else page_default
     if not 1 <= limit <= page_max:
         raise ApiError(
@@ -426,15 +414,15 @@ def resolve_request(
         )
 
     if start is not None and end is not None:
-        # spec line 507's own enumeration order, and the only self-consistent one: an inverted
-        # window makes (end - start).days negative, so the length rule could not fire on one
+        # spec line 507's enumeration order, and the only self-consistent one: an inverted window
+        # makes (end - start).days negative, so the length rule could not fire on it
         if start > end:
             raise ApiError(
                 422, "invalid_range", INVALID_RANGE_MESSAGE, {"reason": "start_after_end"}
             )
         if start < settings.INGEST_START or end > settings.INGEST_END:
-            # isoformat and not the date objects settings holds: a date in a detail is a TypeError
-            # inside the error handler, and the client gets a 500 instead of this 422
+            # isoformat, not the date objects settings holds: a date in a detail is a TypeError in
+            # the error handler, and the client gets a 500 instead of this 422
             raise ApiError(
                 422,
                 "invalid_range",
@@ -445,8 +433,8 @@ def resolve_request(
                     "max": settings.INGEST_END.isoformat(),
                 },
             )
-        # the difference and not the inclusive count: 2026-04-01 to 2026-06-30 is 90 days, which
-        # is exactly the cap and is the window the Class A targets are measured at
+        # the difference, not the inclusive count: 2026-04-01 to 2026-06-30 is 90 days, exactly the
+        # cap, and the window the Class A targets are measured at
         requested_days = (end - start).days
         if max_window_days is not None and requested_days > max_window_days:
             raise ApiError(
@@ -465,7 +453,7 @@ def resolve_request(
 
 def require_symbol(conn, symbol: str) -> None:
     # a NUL byte cannot have been ingested, and binding one raises psycopg.DataError rather than
-    # matching no row -- refused before the query runs so that crash cannot happen
+    # matching no row -- refused before the query runs
     if "\x00" in symbol:
         raise ApiError(
             404,
@@ -473,8 +461,8 @@ def require_symbol(conn, symbol: str) -> None:
             UNKNOWN_SYMBOL_MESSAGE,
             {"reason": "unknown_symbol", "symbol": symbol},
         )
-    # only the row's presence is read: under the pool's dict factory an unaliased SELECT 1 keys
-    # the row '?column?', so anything reading a field out of it breaks on a name nobody chose
+    # only presence is read: under the pool's dict factory an unaliased SELECT 1 keys the row
+    # '?column?', so reading a field out of it breaks on a name nobody chose
     if conn.execute(REQUIRE_SYMBOL_SQL, {"symbol": symbol}).fetchone() is None:
         raise ApiError(
             404,
@@ -487,8 +475,8 @@ def require_symbol(conn, symbol: str) -> None:
 @router.get(
     "/symbols",
     summary="List ingested symbols",
-    # no window, so no 422; default is declared instead because FastAPI adds a 422 in its own
-    # shape to any route with a parameter that documents none of 422, 4XX or default
+    # no window, so no 422; default is declared because FastAPI adds a 422 in its own shape to any
+    # route with a parameter documenting none of 422, 4XX or default
     responses={
         200: RESPONSE_200_SYMBOLS,
         400: RESPONSE_400,
@@ -541,7 +529,7 @@ def list_bars(
 ):
     page_default, page_max = _BARS_CAPS
     # no window-length cap here: spec line 630 says /bars accepts any window inside the ingested
-    # range, and a cap would make the deep-pagination measurement unrunnable at Feature 7
+    # range, and the per-page cost published for it is measured over the whole history
     cursor_values, resolved = resolve_request(
         start=start,
         end=end,
@@ -593,11 +581,11 @@ def list_daily(
         page_max=page_max,
         max_window_days=settings.AGG_MAX_WINDOW_DAYS,
     )
-    # the page NARROWS the committed query's own :start rather than filtering its output, because
-    # :start also drives the scan bound -- an outer WHERE day > cursor would leave the aggregation
-    # spanning the client's full window on every page, which is the shape spec line 476 warns
-    # against. It is safe because a New York session opens strictly after the UTC midnight of its
-    # own calendar day, so b.ts >= start::date never drops a bar belonging to session start
+    # the page NARROWS the committed query's :start rather than filtering its output, because :start
+    # also drives the scan bound -- an outer WHERE day > cursor would leave the aggregation spanning
+    # the client's full window on every page, the shape spec line 476 warns against. Safe because a
+    # New York session opens strictly after its own calendar day's UTC midnight, so b.ts >=
+    # start::date never drops a bar belonging to session start
     page_start = start if cursor_values is None else cursor_values["day"] + timedelta(days=1)
     with pool.connection() as conn:
         require_symbol(conn, symbol)
@@ -627,9 +615,9 @@ def analytics_volatility(
     pool: ConnectionPool = Depends(get_pool),
 ):
     page_default, page_max = _VOLATILITY_CAPS
-    # no limit and no cursor parameter: the result is one row per half-hour bucket of a session and
-    # has no page 2, so the resolved limit is discarded and next_cursor is always an explicit null.
-    # The pair is still passed, which is what makes the constant this handler reads observable
+    # no limit and no cursor: the result is one row per half-hour bucket and has no page 2, so the
+    # resolved limit is discarded and next_cursor is always an explicit null. The pair is still
+    # passed, which is what makes the constant this handler reads observable
     resolve_request(
         start=start,
         end=end,
@@ -673,8 +661,8 @@ def analytics_gaps(
     with pool.connection() as conn:
         require_symbol(conn, symbol)
         rows = conn.execute(_GAPS_SQL, {"symbol": symbol, "start": start, "end": end}).fetchall()
-    # 03_gaps.sql has no GROUP BY, so it answers exactly one row on any input: a window holding no
-    # bars is a row of zeros and nulls rather than an empty list
+    # 03_gaps.sql has no GROUP BY, so exactly one row on any input: a window with no bars is a row
+    # of zeros and nulls, not an empty list
     return {"data": rows, "next_cursor": None}
 
 
@@ -708,8 +696,8 @@ def analytics_largest_moves(
         max_window_days=settings.AGG_MAX_WINDOW_DAYS,
     )
     lo, hi = _instant_bounds(start, end)
-    # page 1 starts at the window's own lower instant rather than at _BEFORE_ANY_BAR, so
-    # _MOVES_SQL's redundant after_ts bound prunes on page 1 exactly as it does on every later one
+    # page 1 starts at the window's own lower instant, not _BEFORE_ANY_BAR, so _MOVES_SQL's
+    # redundant after_ts bound prunes on page 1 as it does on every later one
     after_ts = lo if cursor_values is None else cursor_values["ts"]
     after_symbol = _BEFORE_ANY_SYMBOL if cursor_values is None else cursor_values["symbol"]
     with pool.connection() as conn:

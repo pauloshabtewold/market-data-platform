@@ -18,7 +18,8 @@ ON CONFLICT (symbol) DO UPDATE
        active = EXCLUDED.active
 """
 
-# deleting a symbol that still has bars or progress rows would orphan them silently, so the mirror refuses those and the trimmed count stays reachable.
+# deleting a symbol with bars or progress rows orphans them silently, so those are refused and
+# the trimmed count stays reachable
 RECONCILE = """
 DELETE FROM symbols s
  WHERE s.symbol <> ALL(%(keep)s)
@@ -44,7 +45,7 @@ class SeedSummary:
 
 
 def seed_symbols(conn: psycopg.Connection, client, tickers: list[str]) -> SeedSummary:
-    # no status filter: filtering to active assets would make active true by construction and record the request rather than the asset.
+    # no status filter: active would be true by construction, recording the request not the asset
     assets = client.get_json(
         settings.ALPACA_TRADING_HOST,
         ASSETS_PATH,
@@ -76,10 +77,10 @@ def seed_symbols(conn: psycopg.Connection, client, tickers: list[str]) -> SeedSu
 
     refused = sorted(refusable - set(deleted))
     for symbol in inactive:
-        # an inactive constituent is a survivorship signal worth reporting rather than a lookup failure.
+        # an inactive constituent is a survivorship signal, not a lookup failure
         log.warning("symbols: %s is not active at the vendor", symbol)
     for symbol in deleted:
-        # the only destructive step in the run, and a count alone does not say which row the vendor's name and exchange went with.
+        # the only destructive step in the run, and a count hides which name and exchange went
         log.warning("symbols: %s removed, the ticker file no longer carries it", symbol)
     for symbol in refused:
         log.warning("symbols: %s left in place, it still has bars or progress rows", symbol)

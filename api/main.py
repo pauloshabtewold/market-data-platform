@@ -12,21 +12,19 @@ from api.errors import INTERNAL_MESSAGE, RESPONSE_500, ApiError, install_error_h
 from api.routes import router
 from config import hot_window_configuration_problems, settings
 
-# bounded well under an ALB's 5 s default health-check timeout, with room for the probe itself.
-# /health's own check runs on the event loop and on its own connection, off the shared pool and off
-# the 40-thread limiter every sync def route shares, so a burst of slow requests elsewhere cannot
-# delay the check. The 500 it answers with is built by the installed ApiError handler, which holds
-# this bound under such a burst only while that handler is itself async
+# well under an ALB's 5 s default health-check timeout, with room for the probe. The check runs on
+# the loop on its own connection, off the pool and the 40-thread limiter every sync def route
+# shares, so a burst elsewhere cannot delay it; only an async ApiError handler holds the bound while
+# building its 500
 HEALTH_TIMEOUT_SECONDS = 2.0
 
 log = logging.getLogger(__name__)
 
 
-# The shape of a healthy 200, declared through the route's `responses` and never as response_model,
-# for the same reason the page models are. A comment and not a docstring: a docstring on a published
-# model becomes that schema's `description`, which every generated client carries as its own class
-# documentation and every reader of the page sees -- wrapped across source lines, as one run-on line.
-# What /health answers is described client-facing in the route's own 200 entry instead.
+# The healthy 200's shape, via the route's `responses` and never response_model, as for the page
+# models. A comment, not a docstring: a docstring on a published model becomes that schema's
+# `description`, which every generated client carries as class documentation and the page renders as
+# one run-on line. The client-facing wording is in the route's own 200 entry.
 class HealthResponse(BaseModel):
     status: str
     version: str
@@ -34,10 +32,9 @@ class HealthResponse(BaseModel):
 
 def configure_logging(level: str) -> None:
     logging.basicConfig(level=level, format="%(message)s")
-    # basicConfig returns early once the root logger already has a handler, and uvicorn and pytest both install one before this ever runs
+    # basicConfig returns early if the root logger has a handler; uvicorn and pytest install one
     logging.getLogger().setLevel(level)
-    # httpx arrives through the vendor client and the test client rather than through this app, and
-    # logs every request at INFO
+    # httpx logs every request at INFO and arrives through the vendor and test clients, not this app
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
@@ -45,17 +42,17 @@ def configure_logging(level: str) -> None:
 async def _lifespan(app: FastAPI):
     configure_logging(settings.LOG_LEVEL)
     pool = app.state.pool
-    # unbounded wait would refuse to start the process while the database is briefly down, defeating the point of a health check
+    # an unbounded wait would refuse to start while the database is briefly down, defeating /health
     pool.open(wait=False)
     try:
         yield
     finally:
         try:
-            # a check still in flight would otherwise hold shutdown for the rest of its own deadline
+            # a check in flight would otherwise hold shutdown for the rest of its deadline
             await app.state.checks.close()
         finally:
-            # in a finally of its own: the pool holds server connections, and anything escaping the
-            # line above would otherwise leave them open for the process's lifetime
+            # its own finally: an escape above would leave the pool's server connections
+            # open for the process's lifetime
             pool.close()
 
 
@@ -65,16 +62,15 @@ async def _socket_ready(add_watcher, remove_watcher, fd: int) -> None:
     try:
         await ready
     finally:
-        # removed before the socket can close: asyncio keeps a watcher on a closed descriptor, and
-        # the next socket to reuse that number then never has its own watcher registered
+        # removed before the socket closes: asyncio keeps a watcher on a closed descriptor, so the
+        # next socket reusing that number gets none
         remove_watcher(fd)
 
 
 async def _select_one(pgconn: pq.abc.PGconn) -> None:
     loop = asyncio.get_running_loop()
-    # sent and read at the libpq level: on cancellation psycopg's own execute sends a cancel
-    # request and then waits for the query again with no deadline, which holds the response for
-    # as long as a server that connected and then froze stays frozen
+    # at the libpq level: on cancellation psycopg's own execute sends a cancel and waits again with
+    # no deadline, holding the response as long as a frozen server stays frozen
     pgconn.send_query(b"SELECT 1")
     fd = pgconn.socket
     while pgconn.flush():
@@ -88,38 +84,36 @@ async def _select_one(pgconn: pq.abc.PGconn) -> None:
         if result.status == pq.ExecStatus.TUPLES_OK and result.ntuples == 1:
             answers.append(result.get_value(0, 0))
         else:
-            # the status beside libpq's own message, the way the pool's check reports one: psycopg
-            # returns a non-empty placeholder for a result that carries no error, so a message alone
-            # names nothing when the answer is well formed and simply not one row -- a COMMAND_OK,
-            # an empty query and a two-row answer all read "no error details available"
+            # the status beside libpq's message, as the pool's check reports one: a result carrying
+            # no error gets the non-empty placeholder "no error details available" -- COMMAND_OK, an
+            # empty query and a two-row answer all do -- so the message alone names nothing
             answers.append((pq.ExecStatus(result.status).name, result.get_error_message()))
-    # a connection that is refused its query answers with an error result rather than raising
+    # a refused query answers with an error result rather than raising
     if answers != [b"1"]:
         raise psycopg.OperationalError(f"SELECT 1 answered {answers!r}")
 
 
 async def _check_database(dsn: str) -> None:
-    # /health's own short-lived connection, never the shared pool: a request that is holding every
-    # pooled connection must not make this read as a dead database. connect_timeout is a libpq
-    # connection parameter (seconds) and bounds the connect phase
+    # a short-lived connection of its own, never the pool: a request holding every pooled connection
+    # must not make this read as a dead database. libpq's connect_timeout bounds connect, in seconds
     conn = await psycopg.AsyncConnection.connect(dsn, connect_timeout=HEALTH_TIMEOUT_SECONDS)
     try:
         await _select_one(conn.pgconn)
     finally:
-        # closes the socket at once, whether the check answered or its deadline cancelled it
+        # closes the socket at once, answered or cancelled at the deadline
         await conn.close()
 
 
 async def _bounded_check(dsn: str) -> None:
     try:
-        # cancelling _check_database removes its socket watcher and closes its socket, so this
-        # returns at the deadline rather than when the server does
+        # cancelling _check_database removes its watcher and closes its socket, so the deadline ends
+        # this, not the server
         await asyncio.wait_for(_check_database(dsn), timeout=HEALTH_TIMEOUT_SECONDS)
         return
     except asyncio.TimeoutError:
         pass
-    # raised outside the except block: the timeout's own exception chain holds the frames of a
-    # connect cancelled mid-startup, and those hold its socket open for as long as it is kept
+    # outside the except: the timeout's chain holds the frames of a connect cancelled mid-startup,
+    # which hold its socket open while kept
     raise TimeoutError(f"the database did not answer within {HEALTH_TIMEOUT_SECONDS} s")
 
 
@@ -128,10 +122,9 @@ def _failed_check_logger(dsn: str):
         if task.cancelled() or task.exception() is None:
             return
         exc = task.exception()
-        # once per check, however many probes shared it: the class and libpq's message tell an
-        # authentication failure, a full server, a DNS failure and a timeout apart. libpq quotes a
-        # connection string it cannot parse back in that message, password included, so what is
-        # logged is masked against the string this app was built with
+        # once per check, however many probes shared it: class plus libpq's message tells an auth
+        # failure, a full server, a DNS failure and a timeout apart. libpq echoes an unparseable
+        # connection string, password included, so the line is masked against this app's own dsn
         log.warning(
             "database check failed: %s: %s",
             type(exc).__name__,
@@ -160,48 +153,42 @@ class _SharedCheck:
         if task is None or task.done():
             return
         task.cancel()
-        # awaited so the cancellation lands and the check's own socket is closed before the loop
-        # this runs on is torn down. gathered rather than awaited directly, so the task's own
-        # CancelledError is absorbed while one aimed at the caller still ends the caller
+        # awaited so the cancellation lands and the socket closes before this loop is torn down;
+        # gathered so the task's own CancelledError is absorbed while one aimed at the caller lands
         await asyncio.gather(task, return_exceptions=True)
 
 
 def create_app(dsn: str | None = None) -> FastAPI:
-    # checked here and not in Settings, so db.migrate and the ingest start on a configuration only the
-    # API cannot serve
+    # not in Settings, so db.migrate and the ingest start on a config only the API cannot serve
     problems = hot_window_configuration_problems(settings)
     if problems:
         raise RuntimeError("refusing to build the app:\n- " + "\n- ".join(problems))
     app = FastAPI(
         lifespan=_lifespan,
-        # the same version /health reports: FastAPI's own default is a literal 0.1.0 that would stop
-        # matching the package at its first release
+        # /health's own version: FastAPI defaults to a literal 0.1.0, stale at the first release
         title="Market Data Platform",
         version=build_version(),
-        # generated from the routes themselves, so the page cannot describe an endpoint that is not
-        # served. docs_url is honoured only while openapi_url is set, which makes openapi_url the
-        # line that publishes or withdraws the whole surface; ReDoc stays off because the surface is
-        # one generated page, not two renderings of the same document
+        # generated from the routes, so the page cannot describe an unserved endpoint. docs_url is
+        # honoured only while openapi_url is set, so that line publishes or withdraws the surface;
+        # ReDoc is off because the surface is one generated page, not two renderings of it
         docs_url="/docs",
         redoc_url=None,
         openapi_url="/openapi.json",
-        # a 307 to the unslashed path carries no body, so it is the one response that escapes the
-        # single error shape; off, an unrouted /health/ is the 404 the handler already builds.
-        # It governs this app's own router, which every include_router route joins -- a sub-app
-        # added with app.mount() keeps its own router and its own 307.
+        # a 307 to the unslashed path has no body, the one response escaping the single error shape;
+        # off, an unrouted /health/ is the 404 the handler builds. Governs this app's own router,
+        # which every include_router route joins -- an app.mount()ed sub-app keeps its own 307.
         redirect_slashes=False,
     )
     install_error_handlers(app)
     app.include_router(router)
-    # an explicit dsn lets tests and the testcontainer avoid ever touching settings.DATABASE_URL.
-    # kept on app.state itself, alongside the pool built from it, so /health can open its own
-    # connection from the same dsn without ever reaching for settings.DATABASE_URL either
+    # an explicit dsn keeps tests and the testcontainer off settings.DATABASE_URL; on app.state
+    # beside the pool built from it, so /health opens its own connection from the same dsn
     resolved_dsn = dsn or settings.DATABASE_URL
     app.state.dsn = resolved_dsn
     app.state.pool = build_pool(resolved_dsn)
 
     checks = _SharedCheck()
-    # on app.state so the lifespan can end a check still in flight at shutdown
+    # on app.state so the lifespan can end a check in flight at shutdown
     app.state.checks = checks
 
     @app.get(
@@ -214,12 +201,12 @@ def create_app(dsn: str | None = None) -> FastAPI:
     )
     async def health():
         try:
-            # shielded, so a probe that gives up does not cancel the check other probes share
+            # shielded: a probe that gives up must not cancel the check others share
             await asyncio.wait_for(
                 asyncio.shield(checks.start(app.state.dsn)), timeout=HEALTH_TIMEOUT_SECONDS
             )
         except Exception as exc:
-            # covers both a connection/query failure and asyncio.TimeoutError from wait_for itself
+            # covers a connection/query failure and wait_for's own asyncio.TimeoutError
             raise ApiError(500, "internal", INTERNAL_MESSAGE, None) from exc
         return {"status": "ok", "version": build_version()}
 

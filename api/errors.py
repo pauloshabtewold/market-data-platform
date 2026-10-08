@@ -9,7 +9,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 log = logging.getLogger(__name__)
 
-# closed so a sixth code cannot enter the vocabulary by accident at a later feature
+# closed: no sixth code can enter the vocabulary by accident
 ERROR_CODES = frozenset(
     {"invalid_cursor", "unknown_symbol", "invalid_range", "invalid_params", "internal"}
 )
@@ -23,11 +23,10 @@ INVALID_RANGE_MESSAGE = "the requested date range is not one this endpoint serve
 
 
 class ErrorInfo(BaseModel):
-    # a Literal over ERROR_CODES rather than str, so the generated document names the same closed
-    # vocabulary the frozenset enforces at runtime
+    # a Literal, not str, so the document names the same closed vocabulary the frozenset enforces
     code: Literal[tuple(sorted(ERROR_CODES))]
     message: str
-    # no default, so the document marks it required as well as nullable: every body carries the key
+    # no default: documented required as well as nullable -- every body carries the key
     detail: dict | None
 
 
@@ -37,8 +36,8 @@ class ErrorResponse(BaseModel):
     error: ErrorInfo
 
 
-# shared response entries for the routes' own `responses=`, so every route publishing a given
-# status documents the same schema and description rather than four independently-typed copies
+# shared across the routes' `responses=`, so one status has one schema and description, not four
+# independently-typed copies
 RESPONSE_400 = {"model": ErrorResponse, "description": "A parameter or cursor was not valid."}
 RESPONSE_404 = {"model": ErrorResponse, "description": "No symbol by that name has been ingested."}
 RESPONSE_422 = {"model": ErrorResponse, "description": "The requested range was not valid."}
@@ -60,20 +59,19 @@ class ApiError(RuntimeError):
 
 
 def error_body(code: str, message: str, detail: dict | None) -> dict:
-    # checked here as well as in ApiError: this is the single constructor of the wire shape, so it
-    # is the door a later feature's handler reaches for without raising anything
+    # checked here, not only in ApiError: the sole wire-shape constructor, reached without raising
     if code not in ERROR_CODES:
         raise ValueError(f"{code!r} is not a member of ERROR_CODES")
     return {"error": {"code": code, "message": message, "detail": detail}}
 
 
 def _internal_response(exc: Exception) -> JSONResponse:
-    # shared by the Exception handler and the non-routing branch below, so the two 500 bodies cannot drift apart
+    # shared by the Exception handler and the branch below, so the 500 bodies cannot drift
     log.exception("unhandled exception", exc_info=exc)
     return JSONResponse(status_code=500, content=error_body("internal", INTERNAL_MESSAGE, None))
 
 
-# all four async: Starlette runs a def handler on the sync routes' thread pool, behind their slow requests
+# all four async: a def handler runs on the sync routes' thread pool, behind their slow requests
 async def _api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status, content=error_body(exc.code, exc.message, exc.detail)
@@ -83,9 +81,8 @@ async def _api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
 async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     loc = exc.errors()[0]["loc"]
     detail = {"reason": "invalid_parameter", "parameter": loc[-1], "location": loc[0]}
-    # additive, so the three keys above stay the contract they were: the per-entry type is
-    # pydantic's own slug, and it is what tells apart five wrong requests that otherwise return an
-    # identical body -- a request missing both start and end named only start
+    # additive, keeping the three keys above as the contract; pydantic's type slug separates five
+    # wrong requests with identical bodies -- missing start and end reports only start
     detail["errors"] = [
         {"parameter": e["loc"][-1], "location": e["loc"][0], "type": e["type"]}
         for e in exc.errors()
@@ -96,9 +93,9 @@ async def _validation_error_handler(request: Request, exc: RequestValidationErro
 
 
 async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
-    # this is what puts the unrouted 404 and the wrong-method 405 into the one error shape
+    # puts the unrouted 404 and the wrong-method 405 into the one error shape
     if type(exc) is StarletteHTTPException:
-        # exact type only -- a subclass reaching here is an endpoint's own HTTPException, not a routing failure
+        # exact type only: a subclass is an endpoint's own HTTPException, not a routing failure
         detail = {"reason": "unknown_route", "path": request.url.path}
         return JSONResponse(
             status_code=exc.status_code,

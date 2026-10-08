@@ -1,19 +1,14 @@
 -- query 4: volume profile by hour of the session, across the whole universe.
 -- parameters: none
--- Universe-wide, whole window: the parameter table binds nothing for this file.
--- class C: an unfiltered full-universe aggregation. Every row is read by definition, so this is
--- judged on evidence of optimality rather than on a speedup.
---
--- NO scalar bound on bars.ts: there is no :start or :end to bind, and a predicate true of every
--- row is not free to the planner.
---
+-- Universe-wide, whole window: the parameter table binds nothing here. Class C -- every row is
+-- read by definition, so it is judged on evidence of optimality, not a speedup. NO scalar bound
+-- on bars.ts: nothing to bind, and a predicate true of every row is not free to the planner.
 -- Session definition is 06_daily_rollup.sql's.
 --
--- Bucketed on ts - open_ts, exactly as query 1 is, and for the same reason: date_trunc('hour', ts)
--- under the mandated TimeZone=UTC puts the same 09:30 ET open in hour 14 for the EST months and
--- hour 13 for the EDT months, so a whole-history profile would smear every hour into its
--- neighbour for the third of the sample that falls in the other offset. Minutes-since-open is
--- DST-immune, and it is half-day-correct too: a 13:00 ET close simply contributes no late hours.
+-- Bucketed on ts - open_ts like query 1: under the mandated TimeZone=UTC, date_trunc('hour', ts)
+-- bins one 09:30 ET open into hour 14 in EST months and 13 in EDT, smearing every hour into its
+-- neighbour across the third of the sample in the other offset. Minutes-since-open is DST-immune
+-- and half-day-correct -- a 13:00 ET close adds no late hours.
 
 WITH session_bars AS (
     SELECT
@@ -26,10 +21,9 @@ WITH session_bars AS (
 )
 SELECT
     session_hour,
-    -- the start of the bucket in wall-clock ET, because "hour 0" is not what a reader wants to see
-    -- in a profile and the mapping is fixed: every session opens at 09:30 ET. deliberately not a
-    -- range: the last bucket is truncated by the close -- 30 minutes on a normal day and none at
-    -- all on a half day -- so a "15:30-16:30" label would be wrong on every row it appeared on
+    -- the bucket start in wall-clock ET, since "hour 0" is not what a reader wants and every
+    -- session opens at 09:30 ET. not a range: the close truncates the last bucket, by 30 minutes
+    -- on a normal day and entirely on a half day, so "15:30-16:30" would be wrong on every row
     to_char(TIME '09:30' + (session_hour || ' hours')::interval, 'HH24:MI') AS et_from,
     count(*)                                        AS bars,
     count(DISTINCT symbol)                          AS symbols,

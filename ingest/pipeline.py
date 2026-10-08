@@ -24,10 +24,12 @@ INSERT INTO ingest_progress (symbol, month, completed_at, row_count, rejected_co
 VALUES (%s, %s, now(), %s, %s)
 """
 
-# read back inside the unit transaction rather than counting what this fetch accepted: a replay whose accepted set is smaller than what is already stored would otherwise leave sum(row_count) below count(*) and fail the reconciliation on a healthy database
+# read back in the unit transaction, not from this fetch: a replay accepting less than is stored
+# drops sum(row_count) below count(*) and fails reconciliation on a healthy database
 COUNT_UNIT_BARS = "SELECT count(*) FROM bars WHERE symbol = %s AND ts >= %s AND ts < %s"
 
-# correlated per symbol rather than grouped over bars: a GROUP BY cannot express a symbol holding no bars, which would keep a stale value the coverage query then reads as ingested
+# correlated per symbol, not grouped: a GROUP BY omits a symbol with no bars, leaving a stale
+# value the coverage query reads as ingested
 RECOMPUTE_FIRST_BAR_TS = """
 UPDATE symbols s
    SET first_bar_ts = (SELECT min(b.ts) FROM bars b WHERE b.symbol = s.symbol)
@@ -50,20 +52,20 @@ def partition_name(month: date) -> str:
 
 
 def ensure_partition(conn: psycopg.Connection, month: date) -> None:
-    # the request window is built from the month's first day, so the bounds are too -- a day component reaching here would leave the child's range narrower than its data.
+    # the bounds follow the window's first-of-month start: a day here narrows it below its data
     month = month.replace(day=1)
     child = partition_name(month)
     row = conn.execute(PROBE, (f"public.{child}",)).fetchone()
 
     if row is None:
-        # to_regclass yields NULL for a missing relation so this predicate returns zero rows rather than a row holding NULL.
+        # to_regclass is NULL for a missing relation, so this returns zero rows, not a NULL row
         conn.execute(
             sql.SQL("CREATE TABLE {} (LIKE bars INCLUDING ALL)").format(sql.Identifier(child))
         )
     elif row[0]:
         return
 
-    # PARTITION OF takes an AccessExclusiveLock on the parent where LIKE plus ATTACH takes only ShareUpdateExclusiveLock.
+    # PARTITION OF takes AccessExclusiveLock on bars; LIKE+ATTACH only ShareUpdateExclusiveLock
     conn.execute(
         sql.SQL("ALTER TABLE bars ATTACH PARTITION {} FOR VALUES FROM ({}) TO ({})").format(
             sql.Identifier(child),
@@ -75,7 +77,7 @@ def ensure_partition(conn: psycopg.Connection, month: date) -> None:
 
 def ingest_unit(conn: psycopg.Connection, symbol: str, month: date, fetch) -> tuple[int, int, int]:
     bars = fetch(symbol, month)
-    # validated outside the transaction, so a rejected bar costs no transaction time and rejection can never abort the unit
+    # validated outside the transaction: a rejection costs no transaction time and cannot abort it
     checked = check_bars(bars, month)
     rows = [
         (b.symbol, b.ts, b.open, b.high, b.low, b.close, b.volume, b.trade_count, b.vwap)
@@ -97,7 +99,7 @@ def ingest_unit(conn: psycopg.Connection, symbol: str, month: date, fetch) -> tu
 
 
 def recompute_first_bar_ts(conn: psycopg.Connection) -> int:
-    # recomputed after the run and never set on insert, because resume can ingest an earlier month after a later one
+    # after the run, not on insert: resume can ingest an earlier month after a later one
     cur = conn.execute(RECOMPUTE_FIRST_BAR_TS)
     conn.commit()
     return cur.rowcount
@@ -122,7 +124,7 @@ def run(
         (row[0], row[1])
         for row in conn.execute("SELECT symbol, month FROM ingest_progress")
     }
-    # closes the read's transaction so each unit below is a top-level one that commits, rather than a savepoint inside it.
+    # closes the read's transaction: each unit below commits at top level, not as a savepoint
     conn.commit()
 
     began = time.monotonic()
@@ -136,14 +138,14 @@ def run(
             try:
                 parsed, refused, inserted = ingest_unit(conn, symbol, month, fetch)
             except FatalVendorError:
-                # ordered first: the clause below is except Exception and would otherwise swallow the one failure class that must stop the run
+                # first, or the except Exception below swallows the one class that must stop the run
                 raise
             except Exception as exc:
-                # no progress row for a failed unit, because a row here is a permanent skip on every future resume
+                # no progress row for a failure: a row here is a permanent skip on every resume
                 log.error("%s %s failed: %s", symbol, f"{month:%Y-%m}", exc)
                 failed.append((symbol, month))
                 if conn.closed:
-                    # as unclearable as a fatal status, and every unit after it still spends a vendor request before finding out
+                    # unclearable as a fatal status: each later unit spends a vendor request first
                     raise
                 continue
             log.info("%s %s parsed=%d inserted=%d", symbol, f"{month:%Y-%m}", parsed, inserted)
@@ -151,5 +153,5 @@ def run(
             rows += parsed
             rejected += refused
 
-    # a tuple rather than a list, so frozen=True means what it says and the dataclass stays hashable
+    # a tuple so frozen=True means what it says and the dataclass stays hashable
     return RunSummary(units, skipped, rows, rejected, tuple(failed), time.monotonic() - began)

@@ -22,7 +22,7 @@ def apply(conn: psycopg.Connection) -> int:
 
     files = sorted(MIGRATIONS_DIR.glob("*.sql"))
     if not files:
-        # an install that shipped no .sql would otherwise report "applied 0 migrations" and exit 0, which is the success line
+        # an install with no .sql would report "applied 0 migrations" and exit 0, the success line
         raise RuntimeError(f"no migrations found in {MIGRATIONS_DIR}")
 
     count = 0
@@ -31,7 +31,7 @@ def apply(conn: psycopg.Connection) -> int:
             continue
         conn.execute(path.read_text())
         conn.execute("INSERT INTO schema_migrations (version) VALUES (%s)", (path.stem,))
-        # one file per transaction, so a failure halfway through leaves the ledger honest.
+        # one file per transaction: a mid-way failure leaves the ledger honest
         conn.commit()
         count += 1
     return count

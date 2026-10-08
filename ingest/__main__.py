@@ -16,7 +16,7 @@ log = logging.getLogger("ingest")
 
 
 def read_tickers(path: Path) -> list[str]:
-    # a whitespace-only line survives as an empty entry rather than being skipped, because `grep -c .` counts it and the gate counts this file that way.
+    # kept as an empty entry: the gate counts this file with `grep -c .`, which counts it
     return [line.strip() for line in path.read_text().splitlines() if line != ""]
 
 
@@ -27,12 +27,12 @@ def month_arg(value: str) -> date:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m ingest")
     parser.add_argument("--tickers-file", required=True, type=Path)
-    # repeated rather than a comma list so the shell commands that drive this stay free of commas.
+    # repeated so the shell commands driving this carry no commas
     parser.add_argument("--symbol", action="append", dest="symbols", metavar="TICKER")
     parser.add_argument("--start-month", type=month_arg, metavar="YYYY-MM")
     parser.add_argument("--end-month", type=month_arg, metavar="YYYY-MM")
     args = parser.parse_args(argv)
-    # one stream for the whole run: a redirected stdout is block-buffered, so a kill -9 discards every progress line still sitting in it.
+    # one stream: redirected stdout block-buffers, so a kill -9 loses progress lines
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     # httpx logs every request at INFO
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -48,13 +48,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if "" in tickers:
-        # dropping it silently would put the seeded count one below the line count the gate compares it against
+        # a silent drop puts the seeded count one below the gate's line count
         print(f"{args.tickers_file}: has a line holding only whitespace", file=sys.stderr)
         return 2
 
     repeated = sorted({t for t in tickers if tickers.count(t) > 1})
     if repeated:
-        # the universe is a set, and a repeated line makes the seeded count disagree with the file the gate counts
+        # the universe is a set: a repeat desyncs the seeded count from the gate's line count
         print(f"{args.tickers_file}: repeats {' '.join(repeated)}", file=sys.stderr)
         return 2
 
@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     window_start = settings.INGEST_START.replace(day=1)
     window_end = next_month(settings.INGEST_END) - timedelta(days=1)
     if (settings.INGEST_START, settings.INGEST_END) != (window_start, window_end):
-        # the unit of work is a whole month, so a window that starts or ends mid-month requests days outside itself
+        # the unit of work is a whole month; a mid-month bound requests days outside it
         print(
             f"INGEST_START/INGEST_END must span whole months, so "
             f"{window_start}..{window_end}, not {settings.INGEST_START}..{settings.INGEST_END}",
@@ -77,11 +77,11 @@ def main(argv: list[str] | None = None) -> int:
     start = args.start_month or window_start
     end = args.end_month or settings.INGEST_END
     if start > end:
-        # an inverted range enumerates no units and would otherwise print a run-complete line that reads like success
+        # an inverted range enumerates no units, so run-complete would read as success
         print(f"--start-month {start:%Y-%m} is after --end-month {end:%Y-%m}", file=sys.stderr)
         return 2
     if start < window_start or end > settings.INGEST_END:
-        # the window is fixed and closed, and a mistyped year outside it spends the shared budget on months the calendar has no rows for
+        # a mistyped year outside the fixed window spends the shared budget on uncalendared months
         print(
             f"--start-month/--end-month must fall inside "
             f"{window_start:%Y-%m}..{settings.INGEST_END:%Y-%m}",
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # deduped because the progress key is (symbol, month) and a repeated symbol would fail its second insert mid-run
+    # deduped: the progress key is (symbol, month), so a repeat fails its second insert mid-run
     wanted = list(dict.fromkeys(args.symbols or tickers))
 
     counts = None
@@ -100,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
             calendar = load_calendar(conn, client)
             log.info("calendar: %d days loaded %s..%s", calendar.days, calendar.first, calendar.last)
 
-            # seeding covers every line of the file however --symbol narrows the bars phase, so symbols stays checkable against a file this project never wrote.
+            # seeding spans the file, not --symbol, so symbols checks one this project never wrote
             seeded = seed_symbols(conn, client, tickers)
             log.info(
                 "symbols: upserted=%d deleted=%d refused=%d inactive=%d",
@@ -108,16 +108,16 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             summary = run(conn, wanted, start, end, partial(fetch_bars, client))
-            # inside the same try, so a run that aborts leaves the column to the next run rather than publishing a half-updated one
+            # inside the same try: an aborted run leaves the column to the next, not half-updated
             log.info("first_bar_ts: %d symbols recomputed", recompute_first_bar_ts(conn))
     finally:
-        # request_counts lives only in the client and is the one figure a failed run cannot re-derive from ingest_progress afterwards
+        # only the client holds request_counts; no failed run can re-derive it from ingest_progress
         _report(summary, counts, args)
     return 0
 
 
 def _resume_command(args) -> str:
-    # the flags travel with it: a narrowed run resumed by the bare form walks every ticker and every month instead of the ones that were asked for
+    # the flags travel with it: resumed bare, a narrowed run walks every ticker and month
     parts = ["python -m ingest --tickers-file", str(args.tickers_file)]
     for symbol in dict.fromkeys(args.symbols or []):
         parts += ["--symbol", symbol]
@@ -134,7 +134,7 @@ def _report(summary, counts, args) -> None:
         if summary is not None
         else "run incomplete:"
     )
-    # appended to the tail rather than inserted into it, so the assertions written against the existing head keep matching what they were written to match
+    # appended, not inserted, so assertions against the existing head keep matching
     tail = (
         f" rows={summary.rows} elapsed={summary.elapsed:.1f}s"
         f" rejected={summary.rejected} failed={len(summary.failed)}"
@@ -146,7 +146,7 @@ def _report(summary, counts, args) -> None:
         head, counts["calendar"], counts["symbols"], counts["bars"], tail,
     )
     if summary is not None and summary.failed:
-        # named as they are, because re-running the same command retries exactly those units and nothing else
+        # named because the same command retries exactly those units and nothing else
         log.info(
             "failed units: %s; rerun `%s` to retry them",
             " ".join(f"{symbol} {month:%Y-%m}" for symbol, month in summary.failed),

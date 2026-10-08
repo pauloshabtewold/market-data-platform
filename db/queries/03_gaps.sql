@@ -2,12 +2,11 @@
 -- parameters: :symbol :start :end
 -- class A, target <100 ms. bind :end = INGEST_END and :start = :end - AGG_MAX_WINDOW_DAYS.
 --
--- Consumes the daily rollup. 06_daily_rollup.sql is the definition of record for the session
--- and for the open/close pair; the CTE below is that query, inlined because a .sql file
--- cannot import another. Change one and change both.
+-- The rollup CTE is 06_daily_rollup.sql inlined, a .sql file having no import; that file is the
+-- definition of record for the session and the open/close pair. Change both.
 --
--- "Next" means the next row in market_days, never the next calendar day: a Friday close pairs
--- with a Monday open, and a close before a holiday pairs with the session after it.
+-- "Next" means the next market_days row, never the next calendar day: Friday's close pairs with
+-- Monday's open, a pre-holiday close with the session after it.
 
 WITH session_bars AS (
     SELECT m.day, b.ts, b.open, b.close
@@ -17,7 +16,7 @@ WITH session_bars AS (
      AND b.ts >= m.open_ts AND b.ts < m.close_ts
     WHERE b.symbol = :'symbol'
       AND m.day >= :'start'::date AND m.day <= :'end'::date
-      -- redundant by logic and required for partition pruning; the + 1 day keeps the final session
+      -- redundant by logic and required for partition pruning; + 1 day keeps the final session
       AND b.ts >= :'start'::date
       AND b.ts <  :'end'::date + INTERVAL '1 day'
 ),
@@ -29,9 +28,9 @@ rollup AS (
     GROUP BY day
 ),
 calendar AS (
-    -- the trading-day ordinal over market_days, which is what makes "next session" mean the
-    -- next row rather than the next date. a symbol that printed nothing on a trading day has
-    -- no rollup row for it, so its gap spans more than one session and says so below
+    -- the trading-day ordinal, which makes "next session" the next market_days row, not the
+    -- next date. a symbol that printed nothing has no rollup row, so its gap spans more than one
+    -- session and says so below
     SELECT day, row_number() OVER (ORDER BY day) AS session_no
     FROM market_days
     WHERE day >= :'start'::date AND day <= :'end'::date
@@ -55,9 +54,9 @@ SELECT
     round(avg(gap_pct), 4)                                            AS mean_pct,
     round(stddev_samp(gap_pct), 4)                                    AS stddev_pct,
     round(min(gap_pct), 4)                                            AS min_pct,
-    -- percentile_disc rather than percentile_cont, deliberately: cont has no numeric variant and
-    -- returns double precision, whose last digits will not match a hand-computed expectation.
-    -- disc also returns a gap that was actually observed rather than an interpolation between two
+    -- percentile_disc, not percentile_cont: cont has no numeric variant and returns double
+    -- precision, whose last digits miss a hand-computed expectation. disc also returns a gap
+    -- actually observed rather than an interpolation between two
     round(percentile_disc(0.25) WITHIN GROUP (ORDER BY gap_pct), 4)   AS p25_pct,
     round(percentile_disc(0.50) WITHIN GROUP (ORDER BY gap_pct), 4)   AS median_pct,
     round(percentile_disc(0.75) WITHIN GROUP (ORDER BY gap_pct), 4)   AS p75_pct,
