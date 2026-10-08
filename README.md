@@ -91,10 +91,20 @@ docker compose up -d --wait db
 .venv/bin/python -m pytest                # unit and integration, what CI runs
 ```
 
+The suite needs Docker but neither of the two steps above it. The integration half starts its own
+throwaway Postgres containers and migrates them itself, connecting to those rather than to
+`DATABASE_URL`, so `pytest` passes on a machine where `docker compose up` was never run and
+`db.migrate` failed against an unreachable address. Those two steps are here for the real
+database the ingest and the end-to-end suite work against.
+
 **If your Docker socket is not at `/var/run/docker.sock`** — Colima, Podman and Rancher Desktop all
 put it elsewhere — the integration half cannot start its containers, and the failure looks like a
 broken machine rather than a missing setting: roughly 280 errors, each one a Docker 500 about
-creating a directory at a socket path. Point the test containers at the real socket:
+creating a directory at a socket path. Set the override below to that literal value and not to
+your own socket path: it names the path the test containers bind-mount into their reaper container,
+which is the **daemon's** socket inside the Docker machine rather than the client socket your
+`docker` command talks to. On a Colima or Rancher Desktop host those two are different paths, and
+the client's is the one that fails.
 
 ```bash
 TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock .venv/bin/python -m pytest
