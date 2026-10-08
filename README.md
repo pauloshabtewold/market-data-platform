@@ -22,11 +22,14 @@ so the second link is the one that answers with no CDN in the path.
 below.** It is the hot window: 2,732,236 bars over four monthly partitions, copied from
 the loaded database rather than re-ingested. A request outside those four months is
 refused with a 422 naming the bounds it does serve, so the served range is discoverable
-from the service itself. One consequence is worth stating because it looks like a
-contradiction: `/symbols` reports each symbol's `first_bar_ts` as its first bar in the
-**full** history, 2020-08-03, because that column is copied as it stands to keep the
-deployed answers identical to the local ones — so the service names a date it will then
-refuse as a window bound.
+from the service itself. That range is **121 days, wider than the 90-day cap below**, so no
+single request to `/symbols/{symbol}/daily` or to an analytics endpoint can span it — ask those
+for at most 90 days at a time, and a longer window is refused with its own 422 naming the cap.
+`/symbols/{symbol}/bars` has no cap and spans the whole four months in one request. One
+consequence is worth stating because it looks like a contradiction: `/symbols` reports each
+symbol's `first_bar_ts` as its first bar in the **full** history, 2020-08-03, because that column
+is copied as it stands to keep the deployed answers identical to the local ones — so the service
+names a date it will then refuse as a window bound.
 
 The ingest pipeline, the database layer, the read endpoints and the analytics endpoints are
 built and tested. The API serves `/health` plus three keyset-paginated data endpoints:
@@ -38,12 +41,17 @@ row) and `GET /analytics/largest-moves` (every regular-session minute bar in the
 absolute percentage move is at least `min_move_pct`, across the full universe,
 keyset-paginated on `(ts, symbol)` — excluding a bar whose open or close is a value the
 percentage has no answer for, which `docs/QUERY_PERFORMANCE.md` states exactly and no row in
-the loaded data is). All three refuse a window longer than 90 days with a 422;
-the first two take no `limit` or `cursor` and answer with `next_cursor` always null. The
-OpenAPI document is generated from the routes and served at `/openapi.json`, with an
-interactive page at `/docs`. That page brings one more path with it, `/docs/oauth2-redirect`, which
-the framework mounts beside it and nothing here calls — so the paths named above are the ones this
-project declares, not every path that answers.
+the loaded data is). **Four endpoints cap the window at 90 days**, refusing a longer one with a 422
+that names the bound and the value which failed it: those three and `GET /symbols/{symbol}/daily`,
+which aggregates and carries the same bound. `GET /symbols/{symbol}/bars` takes a window and does
+not cap it, deliberately: the per-page cost published for `/bars` is measured over the whole
+history, which a 90-day cap would forbid. The cap is a difference and not an inclusive count, so
+2026-04-01 to 2026-06-30 is 90 days and is served while 2026-03-31 to 2026-06-30 is 91 and is not.
+Of the three analytics endpoints the first two take no `limit` or `cursor` and answer with
+`next_cursor` always null. The OpenAPI document is generated from the routes and served at
+`/openapi.json`, with an interactive page at `/docs`. That page brings one more path with it,
+`/docs/oauth2-redirect`, which the framework mounts beside it and nothing here calls — so the
+paths named above are the ones this project declares, not every path that answers.
 
 **Every refusal has one shape**, whatever the status: an `error` object carrying `code`, `message`
 and `detail`. All three keys are present on every error body, `detail` being nullable rather than
