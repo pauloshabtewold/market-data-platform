@@ -11,23 +11,13 @@ Region: us-east-1
 Billing alarm thresholds: $5 and $20
 Alarm created: 2026-10-06T01:16:12.680000+00:00
 
-The opening date above is the local calendar date. AWS's own `AccountCreatedDate` for this account
-reads `2026-10-06T00:49:24+00:00`, which is the same instant one day later in UTC. The earlier of
-the two is the one recorded, because the credit window runs from the opening and an opening date
-typed later than the true one lets the credits lapse before a teardown this document calls valid.
-Teardown is 14 days after opening, well inside the window on either reading.
-
+Teardown is 14 days after opening, inside the credit window on either the local or the UTC
+reading of the opening date.
 ## The credit model, and why there is a teardown date
 
-A new AWS account carries up to $200 of signup credits valid for up to six months, and there is no
-longer a perpetual free tier to fall back on. This deployment costs roughly $25–30 a month while it
-runs, so it burns **12.5% to 15%** of the balance a month — a range rather than a figure, because
-the cost is one. At that rate the balance carries 8.0 months of running at $25 and 6.7 at $30,
-against credits valid for up to six: **what ends this deployment is the expiry and not the
-spend**, and credits reaching their expiry closes the account rather than warning about it —
-which is why the teardown date is chosen before any billable resource exists and is recorded here
-rather than remembered.
-
+The $200 credit expires six months after the account was opened, not when it is spent, so the
+expiry ends this deployment rather than the spend does. That is why the teardown date is fixed
+before anything bills.
 ## The bound
 
 Two independent bounds, because each one fails silently on its own.
@@ -55,27 +45,6 @@ this account bound nothing today, and the budgets above — with `IncludeCredit`
 bound that actually holds. That is the case this section was written against, and it is the one
 that obtained.
 
-**What discriminates is the pair of readings taken at the same moment**, below: gross spend of
-$0.948 against `EstimatedCharges` publishing **0.0** on every one of **seven** datapoints spanning
-37 hours. A metric that were gross but merely lagging would have moved by the third of those; one
-that reads zero against known spend is reporting after credits are applied. That pair is the
-evidence, and it is what replaces the two-explanations standoff this section used to record.
-
-Cost Explorer grouped on `RECORD_TYPE` shows the same thing from the other side, and is
-corroboration rather than the warrant — it is a fact about Cost Explorer's netting, not about the
-CloudWatch metric. For 2026-10-07:
-
-| record type | unblended |
-| --- | ---: |
-| `Usage` | **+0.1368083634** USD |
-| `Credit` | **−0.1368083654** USD |
-| net | **−0.000000002** |
-
-The residual is AWS's own rounding in applying the credit; the two figures cancel to nine decimal
-places. So real usage is accruing and credits are cancelling it, which is why an ungrouped Cost
-Explorer query answers `0` as well. Neither zero means the account is free; both mean the credits
-are doing their job.
-
 **The budgets see through it, which is the whole reason they exist.** Read 2026-10-07 against
 limits of $5 and $20, `IncludeCredit` `false`:
 
@@ -84,20 +53,8 @@ market-data-5    ActualSpend 0.948    limit 5.0
 market-data-20   ActualSpend 0.948    limit 20.0
 ```
 
-**$0.948 is month-to-date**, and the budget period opens 2026-10-01 while the account's first
-billable resource — the image repository — exists from 2026-10-06T01:41Z, so the figure covers
-**40.4 billable hours**, of which the database accounts for 38.7. That is about **$0.56 a day** or
-**$17 a month** against the $25–30 estimated above, so the estimate is modestly high rather than
-wrong. Twelve days of it to the teardown date is roughly **$7**, about 3.4% of a $200 balance.
-Dividing by the database's 38.7 hours alone gives $0.59 a day and $18 a month; the difference is
-pennies of repository storage and the lower figure is the one the readings support.
-
-**Two things follow for anyone reading the alarms.** An alarm in `OK` on this account is not
-evidence of no spend, and it will stay in `OK` until the credits are exhausted, at which point it
-starts behaving as intended — so it is a bound for the period after the credits and not during it.
-And the single-figure check worth running is the budget's `ActualSpend`, not the alarm state or an
-ungrouped cost query, both of which read zero while money is being spent.
-
+Measured rate: **~$17-18 a month** against the $25-30 estimated, about **$7** over the
+twelve days to teardown, 3.4% of the $200 credit.
 ## Names
 
 Every identifier below is derived from one stem. None is a secret. The account id is deliberately
@@ -151,19 +108,8 @@ The image is `linux/arm64`, built on an Apple Silicon machine. Fargate's task-de
 fails to pull with a manifest-platform error — and that failure would land after the database is
 already running and charging. Fargate supports ARM64 and it is the cheaper of the two.
 
-The image was built once, before the registry existed, and pushed unchanged. It is not rebuilt: a
-rebuild resolves the base image and the dependency stack afresh, and pinning both is the whole
-reason this file records a digest. The immutable tag makes that one-way in any case.
-
-The repository is the first resource in this deployment that costs anything, which is why its
-creation time is recorded at all. Compared against the `Alarm created:` line near the top of this
-file, it lands 25 minutes and 20 seconds later: the bound existed before the first thing that
-bills, which is a different and stronger statement than the bound existing.
-
-Read both in UTC before comparing them. `aws ecr describe-repositories` returns `createdAt` in the
-caller's local offset while `aws cloudwatch describe-alarms` returns UTC, so comparing the two
-strings as printed reports the order backwards.
-
+The repository was created after the alarms, so the billing bound predates the first thing
+that bills.
 ## Resources
 
 ```
@@ -178,16 +124,8 @@ SSM parameter: /market-data/DATABASE_URL
 Service SG: sg-0836f2ca88ccf54ee
 RDS SG: sg-0e7293540c59bf35c
 Public address: http://100.58.98.13:8000/docs   (the bare address has no route and answers 404)
-RDS /32 opened: 2026-10-06T03:29:42Z
-RDS /32 closed: 2026-10-06T03:30:47Z
-RDS /32 opened: 2026-10-06T06:11:04Z
-RDS /32 closed: 2026-10-06T06:18:28Z
-RDS /32 opened: 2026-10-06T21:21:37Z
-RDS /32 closed: 2026-10-06T21:21:49Z
-RDS /32 opened: 2026-10-06T21:24:34Z
-RDS /32 closed: 2026-10-06T21:24:51Z
-RDS /32 opened: 2026-10-07T23:46:52Z
-RDS /32 closed: 2026-10-07T23:46:58Z
+Five temporary `/32` ingress windows were opened between 2026-10-06 and 2026-10-07, each
+revoked inside the step that needed it.
 ```
 
 The SSM parameter above is a **name**, not a value. The connection string it holds is a
@@ -204,9 +142,6 @@ minor. Pinning it mattered because the account's default is **18.3** — two maj
 planner, and a confound that sits above window size in the attribution order with no way to
 subtract it.
 
-Be careful reading the version list: the available 16.x versions sort **lexically** to 16.9 and
-**numerically** to 16.15, so a `sort | tail -1` picks the wrong minor.
-
 The parameter group `market-data-pg16` (family `postgres16`) pins three values to the development
 database's, each one read back from the server rather than from the API:
 
@@ -220,16 +155,9 @@ All three are `dynamic`, so `ApplyMethod=immediate` needed no reboot and
 `ParameterApplyStatus` reads `in-sync`. **`pending-reboot` would mean the values are set and
 not active, and any figure taken in that state is measured on the defaults instead.**
 
-**Two differences cannot be pinned, and both are recorded rather than worked around.**
-`shared_buffers` has `postmaster` context, so it is fixed at instance start: it reads **23081
-pages (≈180 MB)** here against **16384 pages (128 MB)** on the development database. That one is
-benign for block counts, and the reason is definitional rather than measured: `Shared Hit +
-Shared Read` is the number of blocks the executor touched, and residency decides only which of the
-two counters increments. No hit/read split is published on either side here, so the claim rests on
-what the counters mean and not on a reading. Which is why the pinned three are the ones that enter
-the cost model. The second is total instance RAM:
-`db.t4g.micro` is 1 GiB against the development host's 8 GiB. `TimeZone` is `UTC` on both.
-
+`shared_buffers` differs between the two instances and cannot be pinned — it has
+`postmaster` context. It moves which counter a block increments and not how many blocks are
+touched, and `Shared Hit + Shared Read` is the total either way.
 ### Why the database is publicly accessible
 
 `PubliclyAccessible` is **true**, deliberately. Two steps run `psql` from a laptop, and with it
@@ -237,41 +165,19 @@ off the instance has no public DNS or IP to resolve at all — so a temporary fi
 help and the remedy becomes a bastion host or a VPN, which are more billable resources on a finite
 balance. It also cannot be flipped later without a modify-and-reboot.
 
-**The safety property is the security group, not privacy.** The database's group allows 5432 from
-the service's group and from nothing else, and between windows that one rule is the whole group.
-The exception is governed by a rule and not by a quota: a laptop `/32` is opened only for a step that
-needs `psql` from the laptop, used, and revoked inside that same step, with the time it was opened
-and the time it was closed both recorded above. Every window adds its own pair of timestamps, so
-the record is the list above rather than a total that goes stale the next time a step needs one. A
-publicly addressable database carrying a standing open-to-the-world 5432 rule is the actual
-mistake, and it is a different mistake from this one.
-
+No `/32` window is left open: each is revoked inside the step that needed it.
 The service's group allows 8000 from `0.0.0.0/0` and carries **no rule for any single
 address** — nothing ever connects to the task directly.
 
-**That open rule is the whole exposure of the service, and what sits behind it should be read
-plainly.** The endpoint takes no authentication and applies no rate limit, and its analytics
-endpoints run SQL whose cost is bounded only by a 5 s `statement_timeout` set on every pooled
-connection. The page caps bound the rows one request returns and that timeout bounds how long one
-request runs; nothing bounds how many requests arrive. So anyone who finds the address can spend
-this instance's I/O on expensive queries against a database funded from a finite credit balance.
-That is accepted for a time-boxed demonstration, and what it is traded against is the teardown date
-and the two bounds at the top of this file rather than an authentication layer.
-
+The service has no authentication and no rate limit, accepted for a time-boxed demo over
+public read-only data; `README.md` publishes the same caveat.
 ### One address is allocated that no step asked for
 
-A publicly accessible database is given a **service-managed elastic address** — here
-`54.208.233.222`, which is what the endpoint name resolves to, on an interface owned by the
-database service rather than by this account's user. So a check that expects **zero** elastic
-addresses cannot pass while the database is reachable from a laptop, and the two decisions are in
-tension by construction. The check that means what was intended is *zero addresses this project
-allocated*: filter to the ones with no managing service, which reads **0**, and record the
-managed one at **1**.
-
-It matters at teardown. The managed address is released when the instance is deleted, so
-**after** the database goes, the total must fall back to zero — and an address left allocated and
-unattached bills by the hour indefinitely. Item 3's checklist carries that check.
-
+A `PubliclyAccessible` RDS instance is given a service-managed Elastic IP — `54.208.233.222`,
+on `eni-076036e91032399c3`, `RequesterManaged true`. Addresses this project allocated read 0;
+the managed one reads 1. **Teardown item 3 must re-read `length(Addresses)` as 0 *after* the
+instance goes**: an address left allocated and unassociated bills by the hour, and nothing else
+on the checklist would notice.
 ### What is deliberately absent
 
 No load balancer, no NAT gateway, and no task-level health check. The first two are ruled out on
@@ -280,27 +186,14 @@ the task's own network interface and **changes every time the task is replaced**
 health-check-driven replacement would quietly invalidate any address written down. The task's
 address is auto-assigned and is not an elastic address, which is why it survives nothing.
 
-Ruling out the load balancer also rules out TLS, and the address above says so: the service speaks
-plain HTTP on port 8000 and nothing listens on 443. Terminating TLS means either the load balancer
-that is ruled out on cost or a certificate on an address that changes with the task. It is
-acceptable here because the payload is read-only public market data — there is no authentication,
-no credential and no personal data in any request or response for transport encryption to protect.
-
-**Storage is not encrypted at rest.** `StorageEncrypted` is `false` and no KMS key is attached.
-The argument is the same one that rules out TLS above — the payload is read-only public market
-data, with no credential and no personal data in it — but unlike TLS this one costs nothing:
-`--storage-encrypted` at create time uses the AWS-managed key at no charge. It is recorded here
-because it is a choice rather than an oversight, and because like `PubliclyAccessible` it cannot
-be turned on for a live instance without a snapshot and restore. A deployment holding anything
-private would set it.
-
+No TLS: it goes with the load balancer, and the payload is public read-only data.
+`StorageEncrypted` is `false` by choice though it is free — a deployment holding anything
+private would set it, and it cannot be turned on later without a snapshot and restore.
+`assignPublicIp` is `ENABLED`, which is what lets the task pull its image with no NAT gateway.
 `assignPublicIp` is `ENABLED`. That single setting is what lets a task in a public subnet pull
 its image with no NAT gateway; without it the task dies before the application runs. The subnets
 are public by route, not merely by flag — the route table carries a default route to an internet
 gateway, which is the thing that actually has to be true.
-
-The image is pinned **by digest**, not by tag, so the running task is tied to one build rather
-than to a name that could be moved.
 
 ## The hot window
 
@@ -317,11 +210,8 @@ The four months copied, which are **read** from the hot-window cutoff and never 
 - bars_2026_06
 ```
 
-The cutoff is `2026-03-01`. The naive reading — the end of the ingest window minus four months,
-with no truncation to a month start — gives `2026-02-28` and pulls `bars_2026_02` in instead, so
-the month list comes from the same function the application uses rather than from arithmetic done
-by hand.
-
+The cutoff is `2026-03-01`, read from the application's own `_hot_window_cutoff` rather
+than derived by hand.
 Row counts, as four addends rather than one total, each equal to the development database's:
 
 | partition | rows | bounds |
@@ -330,12 +220,6 @@ Row counts, as four addends rather than one total, each equal to the development
 | `bars_2026_04` | 666,146 | `['2026-04-01', '2026-05-01')` |
 | `bars_2026_05` | 651,616 | `['2026-05-01', '2026-06-01')` |
 | `bars_2026_06` | 699,245 | `['2026-06-01', '2026-07-01')` |
-
-Rows outside `['2026-03-01', '2026-07-01')`: **0**. Span `2026-03-02 13:01:00+00` to
-`2026-06-30 20:54:00+00`. `symbols` 100 and `market_days` 1,484, both copied **in full and
-first** — see below. Grouping the parent's rows by their source table returns four rows matching
-the four counts above, which is what distinguishes a copy that was attached from one that was
-not.
 
 ### The arithmetic, and why the window is a choice rather than a limit
 
@@ -350,15 +234,8 @@ deployed instance:
 | `bars_2026_06` | 167,501,824 |
 | sum | **658,350,080** |
 
-Those are total relation sizes — the heap plus the three indexes each child carries. Read on the
-deployed instance, the heap is **276,185,088 bytes** and the indexes **381,943,808**, so **58.02%
-of the figure is index**. The 221,184-byte remainder is the free-space and visibility-map forks,
-which `pg_total_relation_size` counts and the other two do not; computing the index share as
-`1 − heap/total` instead attributes those forks to the indexes and reads 58.05%.
-
-**The heap copied byte-for-byte and the indexes did not, which is the useful fact here.** The same
-four partitions on the development database:
-
+**The heap copied byte-for-byte and the indexes did not.** The indexes were rebuilt by
+`CREATE INDEX` and are **24.12%** larger, which accounts for the whole 12.71% total difference.
 | | heap | indexes | total |
 | --- | ---: | ---: | ---: |
 | deployed | 276,185,088 | 381,943,808 | **658,350,080** |
@@ -378,61 +255,24 @@ the deployed instance; the heap is the one component where either side answers.
 The split above cost a fifth temporary `/32`, opened and revoked inside the step that needed it and
 recorded with the pair above like the four before it.
 
-`symbols` and `market_days` are left out of the sum. At 100 and 1,484 rows they add a fraction of a
-megabyte, and the four partitions alone decide the comparison below.
-
-Against a 10 GiB ceiling — half the 20 GiB the instance is provisioned with — that is **16.310×
-under, 6.13% of the ceiling**. The depth floor runs the other way: the deep-pagination claim needs
-1,000,000 + 1,000 + 1 = **1,001,001** rows inside the window a request can actually ask for, and
-the window the deep page requests holds **2,009,487** session rows, clearing it by **2.007×**. The
-widest window the cap permits inside these months holds 2,028,716, clearing by 2.027×. The two
-bounds do not cross and neither is close, so the deep-page depth is not reduced.
-
-**The whole development database is 6.52 GiB and would itself fit under that ceiling.** So the hot
-window is a design choice, not a storage constraint: batch ingestion runs where disk is cheap and
-the deployed service serves a recent window. A reader who divides 628 MiB by 20 GiB will ask, which
-is why the margin is written down rather than left to look like a padded guess.
-
+The copy is **627.852 MiB** against a 10 GiB ceiling, **16.3× under**. It holds **2,009,487**
+session rows against the 1,001,001 the deep page needs, **2.007×**. The whole development
+database is 6.52 GiB and also under the ceiling, so the hot window is a design choice rather
+than a storage constraint.
 ### Three ways this copy fails silently, all three checked
 
-**The partial index is not copied.** Creating a partition with `LIKE bars INCLUDING ALL` copies
-the indexes of the table named in the `LIKE` — the parent — and the hot-window partial index
-deliberately lives on the children. Measured here: each new partition arrived with **two**
-indexes, the primary key and the `(ts, symbol)` index, and **zero** hot-window indexes. So the
-copy arrives with exactly the index the hot window exists to have, missing. The four were created
-by hand afterwards and their definitions compared character for character against the development
-database's live catalog, which is a stronger comparison than against the published template. The
-listing is taken **twice**, before and after: one listing taken only afterwards cannot tell an
-index that was copied from one that was created.
-
-**The two small tables must go first, in full.** Both are populated by the ingestion pipeline, and
-the pipeline never runs against this database, so replaying the migrations leaves them empty — and
-nothing warns you. The service starts, the health check passes, every request for a named symbol
-is a correct 404 by the existence rule, and every session-bounded query joins an empty calendar
-and correctly returns no rows. The whole end-to-end suite then fails on a build that is working.
-The check that makes "first" mean something is reading all three counts at the one moment both
-small tables are full and `bars` is still empty: **0, 100, 1484**.
-
-**Analysing is not the same as vacuuming.** Analysing fixes the statistics the planner costs with.
-It does not set the visibility map, and the published hot-window result is an index-only scan with
-no heap fetches at all — on an unset map such a scan silently falls back to fetching from the heap
-and reads an order of magnitude more blocks, which a reader then attributes to a missing index or
-to the window size. So the copy is followed by a vacuum **and** an analyse, not an analyse alone.
-
-That third one has a trap of its own worth stating, because it tempts a reader into skipping the
-step. Read 27 seconds after the copy finished, the four partitions were already at **99.42% to
-99.94%** all-visible — autovacuum had reached all four within half a minute. None was complete, so
-the explicit vacuum did real work: it took all four to **100.0000%** and truncated the empty
-trailing pages, bringing the page counts to exactly the development database's. **The map does not
-stay empty; it fills part-way, on its own, fast enough to look finished.** Read it immediately or
-the reading argues for skipping the step that produced it.
-
-Those two percentages are a record and not a reproduction, and the reason is the sentence above:
-the window they describe closes within seconds of the copy landing and the vacuum closes it for
-good. Nothing on a finished database can be made to show them again. The only place they become a
-measurement is the **next** copy, read before its vacuum — which is why the step is written as
-read-then-vacuum rather than the other way round.
-
+**The partial index is not copied.** `LIKE bars INCLUDING ALL` copies the parent's indexes
+only, so each partition arrives with two indexes and **zero** hot-window indexes — the copy is
+missing exactly the index the hot window exists for. The four were created by hand and compared
+against the development catalog.
+**The two small tables go first, in full.** `symbols` and `market_days` are copied before
+any bar, and the check is one reading of all three at one moment: `bars` **0**, `symbols`
+**100**, `market_days` **1484**.
+**Analysing is not the same as vacuuming.** The copy is followed by `VACUUM (ANALYZE)`
+and not `ANALYZE` alone: analysing fixes the statistics and not the visibility map, and the
+published result is an index-only scan with no heap fetches.
+Autovacuum may already have run by the time the map is read, so a reading of 99%
+rather than 0% before the manual pass is expected and not a sign the statement was wrong.
 ### Do not move a partition with a table-level dump
 
 ```
@@ -440,54 +280,23 @@ Do not pg_dump -t a child partition. The restored table is not attached to bars,
 query through the parent returns nothing, correctly, forever.
 ```
 
-Selecting a child by name is unsupported for standalone restore: the dump makes no attempt to
-include objects the selected table depends upon, and the parent, its partition key and the
-statement that binds the child to it are all such dependencies. The failure is the quiet one — a
-table that restores without error, carries the right name and the right rows, and is simply not
-part of the hierarchy. The emitted definitions vary between dump versions, so a bad dump cannot
-reliably be recognised by reading it. Creating the partitions and copying rows through the parent,
-as above, sidesteps the question entirely. `--table-and-children` and `--load-via-partition-root`
-are the right flags if this hierarchy is ever dumped; neither is needed here.
-
+Use `--table-and-children` with `--load-via-partition-root`; selecting a child by name
+is unsupported for a standalone restore.
 ### What was deliberately not copied, and what was
 
-`ingest_progress` is **not** copied. It is read by the coverage query, the ingestion pipeline and
-the tests, and by no request handler — so an empty one here is correct, and saying so stops a
-future reader treating it as a failed copy.
-
-`first_bar_ts` **is** copied as it stands, which means it names an instant earlier than any row
-this database holds, because it was derived from the whole history rather than from the copied
-window. Recomputing it would make the same endpoint answer differently here than it does locally,
-for no benefit to any check. Copied in full, and recorded.
-
+`ingest_progress` is not copied: it records what the ingest did, and the copy did not ingest.
+`first_bar_ts` on `symbols` **is** copied as it stands, so the deployed service reports each
+symbol's first bar in the full history — a date it will then refuse as a window bound.
 ### Reading a plan difference, in this order
 
 A plan that differs from the published figures is attributed in a fixed order, because the
 explanations are not interchangeable and the cheapest one is also the most common:
-
-1. **Is the partial index there?** Four of them, one per partition, verified against the
-   development catalog.
-2. **Is the visibility map complete?** 100.0000% on all four, and the page counts match.
-3. **Do the engine version and the planner settings agree?** Engine 16.15 both sides; the three
-   pinned settings read back from the server; the parameter group in sync.
-4. **Only then, the window size.** Four months here against seventy-one.
-
-Getting this order wrong is how "it has four months instead of seventy-one" comes to explain a
-difference that is really a missing index. With the first three confirmed,
-**plans on RDS will differ on the smaller window** and that difference is the one measured.
 
 Measured here on the statement the page-cost comparison uses, at the pinned parameters: an
 **index-only scan on each planned partition's hot-window index, with no heap fetches**, no sort
 node above the scans, and three of the four partitions planned — the fourth is excluded by the
 window's own start, before execution begins. Eight blocks per page, identical across five runs,
 and the structured plan's root cross-checked against the text plan's.
-
-Two conditions of that comparison are recorded beside every figure taken from it. The pinned
-settings are `work_mem` 4096 kB, `effective_cache_size` 524288 pages and
-`max_parallel_workers_per_gather` 2. The unpinnable difference is `shared_buffers`, 23081 pages
-here against 16384 locally. That moves which counter a touched block lands in and not how many
-blocks are touched — `Shared Hit + Shared Read` is the total either way — which is a property of
-what the counters count rather than something measured on these two instances.
 
 ## Teardown
 
