@@ -913,3 +913,34 @@ def test_a_failed_check_masks_the_cause_where_the_check_reports_it(caplog):
     ]
 
 
+async def _swallows_its_cancellation(dsn: str) -> None:
+    try:
+        await asyncio.sleep(30)
+    except asyncio.CancelledError:
+        # wait_for cancels the inner coroutine and then awaits it, so a cleanup that does not
+        # return makes the inner deadline unenforceable and the route's own the only bound
+        await asyncio.sleep(30)
+
+
+def test_health_answers_rather_than_hanging_when_its_check_ignores_cancellation(monkeypatch):
+    monkeypatch.setattr(api.main, "_check_database", _swallows_its_cancellation)
+    app = create_app(DEAD_DSN)
+    status, elapsed = [None], [None]
+
+    def run():
+        with TestClient(app, raise_server_exceptions=False) as client:
+            started = time.monotonic()
+            status[0] = client.get("/health").status_code
+            elapsed[0] = time.monotonic() - started
+
+    # on its own thread with a hard join deadline: unbounded, this request never returns, and a
+    # test that hangs reports nothing at all
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=8.0)
+    assert not worker.is_alive(), (
+        "/health did not answer within 8 s against a check that ignores its cancellation:"
+        " nothing bounded the request"
+    )
+    assert status[0] == 500, status[0]
+    assert elapsed[0] < api.main.HEALTH_TIMEOUT_SECONDS + 1.5, elapsed[0]
