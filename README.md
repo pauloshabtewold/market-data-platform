@@ -11,11 +11,13 @@ Alpaca's IEX feed. **41,668,537 bars loaded in 42.4 minutes**, measured rather t
 - Live: http://3.238.67.1:8000/docs (until 2026-10-19)
 - OpenAPI document: http://3.238.67.1:8000/openapi.json
 - Demo: https://youtu.be/2Q49aHoaP7I
+- Charts: https://pauloshabtewold.github.io/market-data-platform/
 
-The address belongs to the task itself, with no load balancer, so it changes if the task is
-replaced and stops answering on the date given. It is a demonstration on a finite credit balance,
-not a service: plain HTTP, no auth, no rate limit, acceptable only because every endpoint is a read
-over public market data.
+The first two links stop answering on the date given; the demo and the charts do not — the chart
+page carries a snapshot of the API's own output and needs nothing running. The address belongs to
+the task itself, with no load balancer, so it changes if the task is replaced. It is a
+demonstration on a finite credit balance, not a service: plain HTTP, no auth, no rate limit,
+acceptable only because every endpoint is a read over public market data.
 
 **The deployed database holds four months — 2026-03-01 to 2026-06-30, 2,732,236 bars** — copied
 from the loaded database rather than re-ingested. That range is 121 days and four of the six routes
