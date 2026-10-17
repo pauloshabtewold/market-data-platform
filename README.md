@@ -8,22 +8,21 @@ Alpaca's IEX feed. **41,668,537 bars loaded in 42.4 minutes**, measured rather t
 
 ## Status
 
-- Live: http://3.238.67.1:8000/docs (until 2026-10-19)
-- OpenAPI document: http://3.238.67.1:8000/openapi.json
 - Demo: https://youtu.be/2Q49aHoaP7I
 - Charts: https://pauloshabtewold.github.io/market-data-platform/
 
-The first two links stop answering on the date given; the demo and the charts do not — the chart
-page carries a snapshot of the API's own output and needs nothing running. The address belongs to
-the task itself, with no load balancer, so it changes if the task is replaced. It is a
-demonstration on a finite credit balance, not a service: plain HTTP, no auth, no rate limit,
-acceptable only because every endpoint is a read over public market data.
+A live deployment ran on AWS Fargate against RDS PostgreSQL until 2026-10-16 and was then torn
+down, so the addresses this section used to carry answer nothing now and the two links above are
+what outlive them — the chart page holds a snapshot of the API's own output and needs nothing
+running. It was a demonstration on a finite credit balance rather than a service: the task's own
+address with no load balancer, plain HTTP, no auth and no rate limit, which was acceptable only
+because every endpoint is a read over public market data.
 
-**The deployed database holds four months — 2026-03-01 to 2026-06-30, 2,732,236 bars** — copied
-from the loaded database rather than re-ingested. That range is 121 days and four of the six routes
-cap a window at 90, so no single request spans it; `/symbols/{symbol}/bars` has no cap. One
-consequence looks like a contradiction and is deliberate: `/symbols` reports `first_bar_ts` from the
-**full** history, 2020-08-03, a date the service will then refuse as a window bound.
+**The deployed database held four months — 2026-03-01 to 2026-06-30, 2,732,236 bars** — copied
+from the loaded database rather than re-ingested. That range was 121 days and four of the six routes
+capped a window at 90, so no single request spanned it; `/symbols/{symbol}/bars` had no cap. One
+consequence looked like a contradiction and was deliberate: `/symbols` reported `first_bar_ts` from
+the **full** history, 2020-08-03, a date the service would then refuse as a window bound.
 
 The API serves `/health`, three keyset-paginated data endpoints (`/symbols`,
 `/symbols/{symbol}/bars`, `/symbols/{symbol}/daily`) and three analytics endpoints

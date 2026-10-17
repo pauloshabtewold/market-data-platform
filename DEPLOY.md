@@ -300,6 +300,9 @@ and the structured plan's root cross-checked against the text plan's.
 
 ## Teardown
 
+**Items 1-7 ran 2026-10-16 and every billable class reads zero.** Items 8-10 are open by design:
+item 8 confirms the FOLLOWING day's cost, and item 9 must not run before it.
+
 Run this on the teardown date, in this order, and only after the demo capture has been played back
 and confirmed usable — the capture is what outlives the URL, and nothing below is reversible.
 
@@ -311,7 +314,7 @@ the $0 confirmation: deleting the alarm before the bill is confirmed zero remove
 would say it is not. And the admin access key comes after all of it, because deleting it is what
 stops every command on this list from working.
 
-- [ ] 1. ECS service
+- [x] 1. ECS service
 
 ```
 aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --desired-count 0
@@ -322,7 +325,7 @@ aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query 'se
 aws ecs list-clusters --query 'length(clusterArns)'        # -> 1, the control: the cluster is still there
 ```
 
-- [ ] 2. ECS cluster
+- [x] 2. ECS cluster
 
 ```
 aws ecs delete-cluster --cluster "$CLUSTER"
@@ -331,7 +334,7 @@ aws ecs list-clusters --query 'length(clusterArns)'                 # -> 0
 aws ecr describe-repositories --query 'length(repositories)'        # -> 1, the control
 ```
 
-- [ ] 3. RDS instance, with no final snapshot — a retained snapshot keeps billing
+- [x] 3. RDS instance, with no final snapshot — a retained snapshot keeps billing
 
 ```
 aws rds delete-db-instance --db-instance-identifier "$RDS_ID" \
@@ -346,7 +349,7 @@ aws rds describe-db-parameter-groups --query 'length(DBParameterGroups)'    # ->
 aws ec2 describe-addresses --query 'length(Addresses)'                      # -> 0
 ```
 
-- [ ] 4. ECR images, then the repository
+- [x] 4. ECR images, then the repository
 
 ```
 aws ecr batch-delete-image --repository-name "$ECR_REPO" --image-ids imageTag="$TAG"
@@ -356,7 +359,7 @@ aws ecr describe-repositories --query 'length(repositories)'   # -> 0
 aws logs describe-log-groups --query 'length(logGroups)'       # -> 1, the control
 ```
 
-- [ ] 5. Security groups — after the RDS instance, or the delete fails on a dependency
+- [x] 5. Security groups — after the RDS instance, or the delete fails on a dependency
 
 ```
 aws ec2 revoke-security-group-ingress --group-id "$RDS_SG" --protocol tcp --port 5432 \
@@ -369,7 +372,7 @@ aws ec2 describe-security-groups --query 'length(SecurityGroups)'   # -> 1 or mo
                                                                     #    VPC's default group remains
 ```
 
-- [ ] 6. CloudWatch log group
+- [x] 6. CloudWatch log group
 
 ```
 aws logs delete-log-group --log-group-name "$LOG_GROUP"
@@ -377,7 +380,7 @@ aws logs delete-log-group --log-group-name "$LOG_GROUP"
 aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" --query 'length(logGroups)'   # -> 0
 ```
 
-- [ ] 7. The SSM parameter, the execution role and the DB parameter group
+- [x] 7. The SSM parameter, the execution role and the DB parameter group
 
 ```
 aws ssm delete-parameter --name "$SSM_DSN"
