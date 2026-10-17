@@ -8,8 +8,9 @@ Alpaca's IEX feed. **41,668,537 bars loaded in 42.4 minutes**, measured rather t
 
 ## Status
 
-- Live: http://100.58.98.13:8000/docs (until 2026-10-19)
-- OpenAPI document: http://100.58.98.13:8000/openapi.json
+- Live: http://3.238.67.1:8000/docs (until 2026-10-19)
+- OpenAPI document: http://3.238.67.1:8000/openapi.json
+- Demo: https://youtu.be/2Q49aHoaP7I
 
 The address belongs to the task itself, with no load balancer, so it changes if the task is
 replaced and stops answering on the date given. It is a demonstration on a finite credit balance,
@@ -26,10 +27,23 @@ The API serves `/health`, three keyset-paginated data endpoints (`/symbols`,
 `/symbols/{symbol}/bars`, `/symbols/{symbol}/daily`) and three analytics endpoints
 (`/analytics/volatility`, `/analytics/gaps`, `/analytics/largest-moves`).
 
+The document is generated from the routes and served at `/openapi.json`, with an interactive page
+at `/docs`. It carries the routes, the schemas and the statuses and nothing past them: `info` is a
+title and a version, and none of its 24 parameter entries carries a `description` or an `example`
+(one carries a `default`). Swagger UI's Try-it-out fields therefore open blank for the three values
+that cannot be guessed — a symbol, which is upper-case, and the two window bounds, which have to
+fall inside the served range. Those are described here and in the 422 a wrong one answers rather
+than in the document, because the deployed image is pinned by digest and adding them would publish
+a document the running service does not serve.
+
 **Every refusal has one shape**, whatever the status: an `error` object with `code`, `message` and
 `detail`, all three always present and `detail` nullable rather than optional. `code` is a closed
 set of five — `invalid_params`, `invalid_cursor`, `invalid_range`, `unknown_symbol`, `internal` —
-and `detail.reason` is what separates two refusals sharing one code. The one exception sits below
+and `detail.reason` is what separates two refusals sharing one code — a closed set of thirteen:
+`cursor_outside_window`, `invalid_parameter`, `limit_out_of_range`, `not_base64`, `not_json`,
+`outside_ingested_range`, `start_after_end`, `unknown_route`, `unknown_symbol`, `unparsable_ts`,
+`window_too_long`, `wrong_fields`, `wrong_types`. The published document names `code` and not
+these, so branch on `code` and read `reason` for the diagnosis. The one exception sits below
 the application: a request malformed at the HTTP level never reaches it, and the server answers
 `400` as `text/plain`.
 
